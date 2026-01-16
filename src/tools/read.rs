@@ -61,7 +61,7 @@ impl CallableFunction for ReadTool {
             }
         };
 
-        eprintln!("[read: {}]", path.display());
+        // Logging is handled by main.rs event loop with timing info
 
         match tokio::fs::read_to_string(&path).await {
             Ok(contents) => Ok(json!({

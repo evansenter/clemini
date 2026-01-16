@@ -70,7 +70,7 @@ impl CallableFunction for WriteTool {
             }
         };
 
-        eprintln!("[write: {} ({} bytes)]", path.display(), content.len());
+        // Logging is handled by main.rs event loop with timing info
 
         // Create parent directories if needed
         if let Some(parent) = path.parent()

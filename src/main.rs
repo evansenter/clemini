@@ -7,7 +7,6 @@ use rustyline::error::ReadlineError;
 use std::env;
 use std::io::{self, Write};
 use std::sync::Arc;
-use std::time::Instant;
 
 mod tools;
 
@@ -153,8 +152,6 @@ async fn run_interaction(
 
     let mut last_id: Option<String> = None;
     let mut cumulative_tokens: u32 = 0;
-    let mut pending_calls: Vec<String> = Vec::new();
-    let mut call_start: Option<Instant> = None;
 
     while let Some(event) = stream.next().await {
         match event {
@@ -166,10 +163,6 @@ async fn run_interaction(
                     }
                 }
                 AutoFunctionStreamChunk::ExecutingFunctions(resp) => {
-                    let calls = resp.function_calls();
-                    pending_calls = calls.iter().map(|c| format_call(c)).collect();
-                    call_start = Some(Instant::now());
-
                     // Update token count from the response that triggered function calls
                     if let Some(usage) = &resp.usage {
                         cumulative_tokens = usage.total_input_tokens.unwrap_or(0)
@@ -177,36 +170,29 @@ async fn run_interaction(
                     }
                 }
                 AutoFunctionStreamChunk::FunctionResults(results) => {
-                    let elapsed = call_start.map(|s| s.elapsed()).unwrap_or_default();
-                    let elapsed_secs = elapsed.as_secs_f32();
-
                     // Calculate tokens added by function results
                     let mut tokens_added: u32 = 0;
                     for result in results {
-                        // Rough estimate: count characters in result as proxy for tokens
                         let result_str = result.result.to_string();
                         tokens_added += (result_str.len() / 4) as u32; // ~4 chars per token
                     }
-
-                    // Log each call with timing and tokens
-                    for (i, call_name) in pending_calls.iter().enumerate() {
-                        let result = results.get(i);
-                        let has_error = result
-                            .map(|r| r.result.get("error").is_some())
-                            .unwrap_or(false);
-
-                        if has_error {
-                            eprint!("\n[{call_name}] {elapsed_secs:.1}s ERROR");
-                        } else {
-                            eprint!("\n[{call_name}] {elapsed_secs:.1}s");
-                        }
-                    }
-
                     cumulative_tokens += tokens_added;
-                    eprintln!(" | {:.1}k ctx (+{})", cumulative_tokens as f32 / 1000.0, tokens_added);
 
-                    pending_calls.clear();
-                    call_start = None;
+                    // Log each result with timing and tokens
+                    for result in results {
+                        let has_error = result.result.get("error").is_some();
+                        let error_suffix = if has_error { " ERROR" } else { "" };
+                        let elapsed_secs = result.duration.as_secs_f32();
+
+                        eprintln!(
+                            "[{}] {:.1}s, {:.1}k tokens (+{}){}",
+                            result.name,
+                            elapsed_secs,
+                            cumulative_tokens as f32 / 1000.0,
+                            tokens_added,
+                            error_suffix
+                        );
+                    }
                 }
                 AutoFunctionStreamChunk::Complete(resp) => {
                     last_id = resp.id.clone();
@@ -237,40 +223,4 @@ async fn run_interaction(
     }
 
     Ok(last_id)
-}
-
-/// Format a function call for display
-fn format_call(call: &genai_rs::FunctionCallInfo) -> String {
-    // Extract a short summary of the arguments
-    let args_summary = if let Some(obj) = call.args.as_object() {
-        if let Some(cmd) = obj.get("command").and_then(|v| v.as_str()) {
-            // Bash command - show the command
-            truncate(cmd, 50)
-        } else if let Some(path) = obj.get("file_path").and_then(|v| v.as_str()) {
-            // File operation - show the path
-            truncate(path, 50)
-        } else {
-            // Other - show first arg value
-            obj.values()
-                .next()
-                .map(|v| truncate(&v.to_string(), 30))
-                .unwrap_or_default()
-        }
-    } else {
-        String::new()
-    };
-
-    if args_summary.is_empty() {
-        call.name.to_string()
-    } else {
-        format!("{}: {}", call.name, args_summary)
-    }
-}
-
-fn truncate(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
-        s.to_string()
-    } else {
-        format!("{}...", &s[..max_len - 3])
-    }
 }

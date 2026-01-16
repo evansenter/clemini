@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-Project-specific instructions for Claude Code when working on clemini.
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Project Overview
 
@@ -19,45 +19,35 @@ cargo fmt            # Format
 
 ## Architecture
 
-```
-src/
-├── main.rs          # CLI entry, REPL loop, streaming handler
-└── tools/
-    ├── mod.rs       # ToolService impl, path validation
-    ├── read.rs      # Read file tool
-    ├── write.rs     # Write file tool
-    └── bash.rs      # Bash execution with safety checks
-```
+The CLI has two modes: single-prompt (`-p "prompt"`) and interactive REPL.
 
-## Key Design Decisions
+**Streaming with auto-functions**: Uses `create_stream_with_auto_functions()` which handles the tool execution loop automatically. The stream emits `ExecutingFunctions` before tool calls and `FunctionResults` after, with timing/token info.
 
-### Safety / Sandboxing
-- All file operations restricted to cwd (no access outside working directory)
-- Bash tool has blocklist for dangerous patterns (rm -rf /, fork bombs, etc.)
-- Caution logging for sensitive commands (sudo, rm, mv, etc.)
+**Tool sandboxing**: All tools share a `cwd` via `CleminiToolService`. Path validation (`validate_path`) ensures operations stay within the working directory. Bash has regex blocklists for dangerous patterns.
 
-### genai-rs Integration
-- Uses `create_stream_with_auto_functions()` for streaming + auto tool execution
-- Server-side storage for multi-turn conversations via `with_previous_interaction()`
-- `ToolService` trait for stateful tools that share cwd context
-- **Important**: `system_instruction` is NOT inherited via `previousInteractionId` - must send on every turn
+**Multi-turn conversations**: Server-side storage via `with_previous_interaction(interaction_id)`. Note: `system_instruction` is NOT inherited - must send on every turn.
 
-## genai-rs Sharp Edges
+## genai-rs Integration Notes
 
-When encountering pain points or API issues with genai-rs, file issues at:
-https://github.com/evansenter/genai-rs/issues
+When encountering API issues, file at: https://github.com/evansenter/genai-rs/issues
 
-Filed issues:
+Known issues:
 - [#367](https://github.com/evansenter/genai-rs/issues/367) - `InteractionBuilder` typestate makes conditional chaining awkward
+- [#368](https://github.com/evansenter/genai-rs/issues/368) - `FunctionExecutionResult` missing args field for logging
+
+Debugging: `LOUD_WIRE=1` logs all HTTP requests/responses.
 
 ## Environment
 
-- `GEMINI_API_KEY` - Required for API access
+- `GEMINI_API_KEY` - Required
 - Model: `gemini-3-flash-preview`
 
 ## Conventions
 
-- Use Rust 2024 edition features (let chains, etc.)
-- All tools return JSON with either success data or `{"error": "..."}`
-- Log tool invocations to stderr: `[read: path]`, `[write: path (N bytes)]`, `[bash: cmd]`
-- Token usage logged after each interaction: `[tokens: N in, M out]`
+- Rust 2024 edition (let chains, etc.)
+- Tools return JSON: success data or `{"error": "..."}`
+- Logging format: `[tool_name] 0.5s, 1.2k tokens (+50)` per call, `[total: N.Nk tokens (X in + Y out)]` at end
+
+## Development Process
+
+**Test features yourself before considering them done** - Run clemini and verify the feature works before reporting completion.

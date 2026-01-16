@@ -109,11 +109,7 @@ impl CallableFunction for BashTool {
             }));
         }
 
-        if self.needs_caution(command) {
-            eprintln!("[bash (caution): {}]", command);
-        } else {
-            eprintln!("[bash: {}]", command);
-        }
+        // Logging is handled by main.rs event loop with timing info
 
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(timeout_secs),
