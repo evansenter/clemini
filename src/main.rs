@@ -112,6 +112,11 @@ async fn run_repl(
                     continue;
                 }
 
+                if input == "/model" || input == "/m" {
+                    eprintln!("{MODEL}");
+                    continue;
+                }
+
                 if input == "/pwd" || input == "/cwd" {
                     eprintln!("{}", cwd.display());
                     continue;
@@ -142,6 +147,7 @@ async fn run_repl(
                     eprintln!("  /q, /quit, /exit  Exit the REPL");
                     eprintln!("  /c, /clear        Clear conversation history");
                     eprintln!("  /v, /version      Show version and model");
+                    eprintln!("  /m, /model        Show model name");
                     eprintln!("  /pwd, /cwd        Show current working directory");
                     eprintln!("  /d, /diff         Show git diff");
                     eprintln!("  /s, /status       Show git status");
