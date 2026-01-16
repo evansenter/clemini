@@ -28,6 +28,7 @@ Be concise in your responses. Focus on getting things done."#;
 
 #[derive(Parser)]
 #[command(name = "clemini")]
+#[command(version)]
 #[command(about = "A Gemini-powered coding CLI")]
 struct Args {
     /// Initial prompt to run (non-interactive mode)
