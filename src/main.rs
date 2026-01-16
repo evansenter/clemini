@@ -32,6 +32,8 @@ Guidelines:
     - Use `read_file` to read the content of specific files.
     - Use `edit` for surgical string replacements in existing files (preferred for small changes). The `old_string` must match EXACTLY and uniquely. If it fails, re-read the file to ensure you have the correct text and whitespace.
     - Use `write_file` for creating new files or completely rewriting existing ones.
+    - Use `web_search` for searching for information on the web using DuckDuckGo's instant answer API.
+    - Use `web_fetch` for fetching the content of a web page from a URL.
     - Avoid creating temporary helper scripts (e.g. Python scripts for text processing). Use existing tools and shell commands instead.
 - Codebase Exploration:
     - Start with high-level commands like `ls -F` or `bash` with `find . -maxdepth 2`.
@@ -271,6 +273,8 @@ async fn run_repl(
                     eprintln!("  bash              Run shell commands");
                     eprintln!("  glob              Find files by pattern");
                     eprintln!("  grep              Search text in files");
+                    eprintln!("  web_search        Search the web");
+                    eprintln!("  web_fetch         Fetch web content");
                     eprintln!();
                     continue;
                 }

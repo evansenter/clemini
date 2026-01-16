@@ -5,6 +5,7 @@ mod grep;
 mod list_directory;
 mod read;
 mod web_fetch;
+mod web_search;
 mod write;
 
 use genai_rs::{CallableFunction, ToolService};
@@ -18,6 +19,7 @@ pub use grep::GrepTool;
 pub use list_directory::ListDirectoryTool;
 pub use read::ReadTool;
 pub use web_fetch::WebFetchTool;
+pub use web_search::WebSearchTool;
 pub use write::WriteTool;
 
 /// Tool service that provides file and command execution capabilities.
@@ -44,6 +46,7 @@ impl ToolService for CleminiToolService {
     /// - `grep`: Search for text in files
     /// - `list_directory`: List entries in a directory
     /// - `web_fetch`: Fetch web content
+    /// - `web_search`: Search the web using DuckDuckGo
     fn tools(&self) -> Vec<Arc<dyn CallableFunction>> {
         vec![
             Arc::new(ReadTool::new(self.cwd.clone())),
@@ -54,6 +57,7 @@ impl ToolService for CleminiToolService {
             Arc::new(GrepTool::new(self.cwd.clone())),
             Arc::new(ListDirectoryTool::new(self.cwd.clone())),
             Arc::new(WebFetchTool::new(self.cwd.clone())),
+            Arc::new(WebSearchTool::new(self.cwd.clone())),
         ]
     }
 }
