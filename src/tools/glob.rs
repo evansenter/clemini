@@ -8,6 +8,8 @@ pub struct GlobTool {
     cwd: PathBuf,
 }
 
+const DEFAULT_EXCLUDES: &[&str] = &[".git", "node_modules", "target", "__pycache__", ".venv"];
+
 impl GlobTool {
     pub fn new(cwd: PathBuf) -> Self {
         Self { cwd }
@@ -53,6 +55,17 @@ impl CallableFunction for GlobTool {
                 for entry in paths {
                     match entry {
                         Ok(path) => {
+                            // Skip excluded directories
+                            if path.components().any(|c| {
+                                if let std::path::Component::Normal(s) = c {
+                                    DEFAULT_EXCLUDES.contains(&s.to_string_lossy().as_ref())
+                                } else {
+                                    false
+                                }
+                            }) {
+                                continue;
+                            }
+
                             // Convert to relative path from cwd
                             let relative = path
                                 .strip_prefix(&self.cwd)
