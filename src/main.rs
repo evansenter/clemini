@@ -183,6 +183,7 @@ async fn run_interaction(
     let mut last_id: Option<String> = None;
     let mut cumulative_tokens: u32 = 0;
     let mut response_text = String::new();
+    let skin = MadSkin::default();
 
     while let Some(event) = stream.next().await {
         match event {
@@ -193,6 +194,16 @@ async fn run_interaction(
                     }
                 }
                 AutoFunctionStreamChunk::ExecutingFunctions(resp) => {
+                    // Capture interaction ID early for conversation continuity
+                    last_id = resp.id.clone();
+
+                    // Render any text before tool execution
+                    if !response_text.is_empty() {
+                        skin.print_text(&response_text);
+                        response_text.clear();
+                        println!();
+                    }
+
                     // Update token count from the response that triggered function calls
                     if let Some(usage) = &resp.usage {
                         cumulative_tokens = usage.total_input_tokens.unwrap_or(0)
@@ -229,7 +240,6 @@ async fn run_interaction(
 
                     // Render accumulated text as markdown
                     if !response_text.is_empty() {
-                        let skin = MadSkin::default();
                         skin.print_text(&response_text);
                         response_text.clear();
                     }
@@ -257,6 +267,12 @@ async fn run_interaction(
                 break;
             }
         }
+    }
+
+    // Render any remaining text (e.g., if stream ended abruptly or on error)
+    if !response_text.is_empty() {
+        skin.print_text(&response_text);
+        println!();
     }
 
     Ok(last_id)
