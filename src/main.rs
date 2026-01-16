@@ -6,6 +6,7 @@ use genai_rs::{AutoFunctionStreamChunk, Client, Content};
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
 use std::env;
+use std::io::{self, IsTerminal, Read};
 use std::sync::Arc;
 use termimad::MadSkin;
 
@@ -69,7 +70,23 @@ async fn main() -> Result<()> {
     eprintln!("Model: {MODEL}");
     eprintln!();
 
-    if let Some(prompt) = args.prompt {
+    let mut piped_input = String::new();
+    if !io::stdin().is_terminal() {
+        io::stdin().read_to_string(&mut piped_input)?;
+    }
+    let piped_input = piped_input.trim();
+
+    let combined_prompt = if !piped_input.is_empty() {
+        if let Some(user_prompt) = args.prompt {
+            Some(format!("{piped_input}\n---\n{user_prompt}"))
+        } else {
+            Some(piped_input.to_string())
+        }
+    } else {
+        args.prompt
+    };
+
+    if let Some(prompt) = combined_prompt {
         // Non-interactive mode: run single prompt
         run_interaction(&client, &tool_service, &prompt, None).await?;
     } else {
