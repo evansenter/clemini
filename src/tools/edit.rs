@@ -74,7 +74,7 @@ impl CallableFunction for EditTool {
             Ok(p) => p,
             Err(e) => {
                 return Ok(json!({
-                    "error": format!("Access denied: {}", e)
+                    "error": format!("Access denied: {}. Only files within the current working directory can be accessed.", e)
                 }));
             }
         };
@@ -84,7 +84,7 @@ impl CallableFunction for EditTool {
             Ok(c) => c,
             Err(e) => {
                 return Ok(json!({
-                    "error": format!("Failed to read {}: {}", path.display(), e)
+                    "error": format!("Failed to read {}: {}. Ensure the file exists and is not a directory.", path.display(), e)
                 }));
             }
         };
@@ -94,14 +94,14 @@ impl CallableFunction for EditTool {
 
         if matches.is_empty() {
             return Ok(json!({
-                "error": "old_string not found in file",
+                "error": format!("The 'old_string' was not found in {}. Ensure the string matches exactly, including whitespace and indentation. Use 'read_file' to confirm the file's current content.", file_path),
                 "file_path": file_path
             }));
         }
 
         if matches.len() > 1 {
             return Ok(json!({
-                "error": format!("old_string found {} times in file - must be unique. Provide more context to make it unique.", matches.len()),
+                "error": format!("The 'old_string' was found {} times in {}. It must be unique to ensure the correct replacement. Provide more surrounding context to make it unique.", matches.len(), file_path),
                 "file_path": file_path,
                 "occurrences": matches.len()
             }));
@@ -120,7 +120,7 @@ impl CallableFunction for EditTool {
                 "file_size": new_content.len()
             })),
             Err(e) => Ok(json!({
-                "error": format!("Failed to write {}: {}", path.display(), e)
+                "error": format!("Failed to write {}: {}. Check file permissions.", path.display(), e)
             })),
         }
     }
