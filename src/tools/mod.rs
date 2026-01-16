@@ -50,12 +50,12 @@ impl ToolService for CleminiToolService {
 }
 
 /// Check if a path is within the allowed working directory.
-/// Returns Ok(canonical_path) if allowed, Err(reason) if denied.
+/// Returns `Ok(canonical_path)` if allowed, Err(reason) if denied.
 pub fn validate_path(path: &std::path::Path, cwd: &std::path::Path) -> Result<PathBuf, String> {
     // For new files, check parent directory
     let check_path = if path.exists() {
         path.canonicalize()
-            .map_err(|e| format!("Cannot resolve path: {}", e))?
+            .map_err(|e| format!("Cannot resolve path: {e}"))?
     } else {
         // For new files, canonicalize the parent and append the filename
         let parent = path.parent().unwrap_or(std::path::Path::new("."));
@@ -67,7 +67,7 @@ pub fn validate_path(path: &std::path::Path, cwd: &std::path::Path) -> Result<Pa
             } else if parent.exists() {
                 parent
                     .canonicalize()
-                    .map_err(|e| format!("Cannot resolve parent: {}", e))?
+                    .map_err(|e| format!("Cannot resolve parent: {e}"))?
             } else {
                 // Parent doesn't exist - check if it would be under cwd
                 let full_parent = if parent.is_absolute() {
@@ -92,7 +92,7 @@ pub fn validate_path(path: &std::path::Path, cwd: &std::path::Path) -> Result<Pa
     // Verify the path is under cwd
     let canonical_cwd = cwd
         .canonicalize()
-        .map_err(|e| format!("Cannot resolve cwd: {}", e))?;
+        .map_err(|e| format!("Cannot resolve cwd: {e}"))?;
 
     if !check_path.starts_with(&canonical_cwd) {
         return Err(format!(

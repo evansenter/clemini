@@ -14,7 +14,7 @@ use tools::CleminiToolService;
 
 const MODEL: &str = "gemini-3-flash-preview";
 
-const SYSTEM_PROMPT: &str = r#"You are clemini, a coding assistant that helps users with software engineering tasks.
+const SYSTEM_PROMPT: &str = r"You are clemini, a coding assistant that helps users with software engineering tasks.
 
 You have access to tools for reading files, writing files, and executing bash commands.
 Use these tools to help users accomplish their goals.
@@ -37,7 +37,7 @@ Guidelines:
     - For example, if `read_file` fails because a file doesn't exist, use `ls` or `glob` to find the correct path.
 - Be extremely concise in your responses. Focus on getting things done. Avoid long explanations unless necessary.
 - Before editing or overwriting a file, ensure you have read its current content to understand the context.
-"#;
+";
 
 #[derive(Parser)]
 #[command(name = "clemini")]
@@ -65,7 +65,7 @@ async fn main() -> Result<()> {
 
     eprintln!("clemini v{}", env!("CARGO_PKG_VERSION"));
     eprintln!("Working directory: {}", cwd.display());
-    eprintln!("Model: {}", MODEL);
+    eprintln!("Model: {MODEL}");
     eprintln!();
 
     if let Some(prompt) = args.prompt {
@@ -82,29 +82,6 @@ async fn main() -> Result<()> {
 async fn run_repl(client: &Client, tool_service: &Arc<CleminiToolService>) -> Result<()> {
     let mut rl = DefaultEditor::new()?;
     let mut last_interaction_id: Option<String> = None;
-
-    fn run_git_command(args: &[&str], empty_msg: &str) {
-        let output = std::process::Command::new("git").args(args).output();
-
-        match output {
-            Ok(o) => {
-                if o.status.success() {
-                    let stdout = String::from_utf8_lossy(&o.stdout);
-                    if stdout.is_empty() {
-                        eprintln!("[{}]", empty_msg);
-                    } else {
-                        println!("{}", stdout);
-                    }
-                } else {
-                    let stderr = String::from_utf8_lossy(&o.stderr);
-                    eprintln!("[git {} error: {}]", args[0], stderr.trim());
-                }
-            }
-            Err(e) => {
-                eprintln!("[failed to run git {}: {}]", args[0], e);
-            }
-        }
-    }
 
     loop {
         let readline = rl.readline("> ");
@@ -127,7 +104,7 @@ async fn run_repl(client: &Client, tool_service: &Arc<CleminiToolService>) -> Re
 
                 if input == "/version" {
                     eprintln!("clemini v{}", env!("CARGO_PKG_VERSION"));
-                    eprintln!("Model: {}", MODEL);
+                    eprintln!("Model: {MODEL}");
                     continue;
                 }
 
@@ -170,19 +147,18 @@ async fn run_repl(client: &Client, tool_service: &Arc<CleminiToolService>) -> Re
                         last_interaction_id = new_id;
                     }
                     Err(e) => {
-                        eprintln!("\n[error: {}]", e);
+                        eprintln!("\n[error: {e}]");
                     }
                 }
             }
             Err(ReadlineError::Interrupted) => {
                 eprintln!("[interrupted]");
-                continue;
             }
             Err(ReadlineError::Eof) => {
                 break;
             }
             Err(err) => {
-                eprintln!("[readline error: {}]", err);
+                eprintln!("[readline error: {err}]");
                 break;
             }
         }
@@ -191,6 +167,30 @@ async fn run_repl(client: &Client, tool_service: &Arc<CleminiToolService>) -> Re
     Ok(())
 }
 
+fn run_git_command(args: &[&str], empty_msg: &str) {
+    let output = std::process::Command::new("git").args(args).output();
+
+    match output {
+        Ok(o) => {
+            if o.status.success() {
+                let stdout = String::from_utf8_lossy(&o.stdout);
+                if stdout.is_empty() {
+                    eprintln!("[{empty_msg}]");
+                } else {
+                    println!("{stdout}");
+                }
+            } else {
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                eprintln!("[git {} error: {}]", args[0], stderr.trim());
+            }
+        }
+        Err(e) => {
+            eprintln!("[failed to run git {}: {}]", args[0], e);
+        }
+    }
+}
+
+#[allow(clippy::too_many_lines)]
 async fn run_interaction(
     client: &Client,
     tool_service: &Arc<CleminiToolService>,
@@ -237,7 +237,7 @@ async fn run_interaction(
                 }
                 AutoFunctionStreamChunk::ExecutingFunctions(resp) => {
                     // Capture interaction ID early for conversation continuity
-                    last_id = resp.id.clone();
+                    last_id.clone_from(&resp.id);
 
                     // Render any text before tool execution
                     if !response_text.is_empty() {
@@ -258,7 +258,7 @@ async fn run_interaction(
                     let mut tokens_added: u32 = 0;
                     for result in results {
                         let result_str = result.result.to_string();
-                        tokens_added += (result_str.len() / 4) as u32; // ~4 chars per token
+                        tokens_added += u32::try_from(result_str.len() / 4).unwrap_or(u32::MAX); // ~4 chars per token
                     }
                     estimated_context_size += tokens_added;
 
@@ -272,14 +272,14 @@ async fn run_interaction(
                             "[{}] {:.1}s, {:.1}k tokens (+{}){}",
                             result.name,
                             elapsed_secs,
-                            estimated_context_size as f32 / 1000.0,
+                            f64::from(estimated_context_size) / 1000.0,
                             tokens_added,
                             error_suffix
                         );
                     }
                 }
                 AutoFunctionStreamChunk::Complete(resp) => {
-                    last_id = resp.id.clone();
+                    last_id.clone_from(&resp.id);
 
                     // Render accumulated text as markdown
                     if !response_text.is_empty() {
@@ -294,7 +294,7 @@ async fn run_interaction(
                         let total_out = usage.total_output_tokens.unwrap_or(0);
                         eprintln!(
                             "[total: {:.1}k tokens ({} in + {} out)]",
-                            (total_in + total_out) as f32 / 1000.0,
+                            f64::from(total_in + total_out) / 1000.0,
                             total_in,
                             total_out
                         );
@@ -306,7 +306,7 @@ async fn run_interaction(
                 _ => {}
             },
             Err(e) => {
-                eprintln!("\n[stream error: {}]", e);
+                eprintln!("\n[stream error: {e}]");
                 break;
             }
         }

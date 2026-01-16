@@ -50,7 +50,7 @@ impl BashTool {
         Self { cwd }
     }
 
-    fn is_blocked(&self, command: &str) -> Option<&'static str> {
+    fn is_blocked(command: &str) -> Option<&'static str> {
         for pattern in BLOCKED_PATTERNS.iter() {
             if pattern.is_match(command) {
                 return Some("Command matches blocked pattern");
@@ -59,7 +59,7 @@ impl BashTool {
         None
     }
 
-    fn needs_caution(&self, command: &str) -> bool {
+    fn needs_caution(command: &str) -> bool {
         CAUTION_PATTERNS
             .iter()
             .any(|pattern| command.contains(pattern))
@@ -97,20 +97,20 @@ impl CallableFunction for BashTool {
 
         let timeout_secs = args
             .get("timeout_seconds")
-            .and_then(|v| v.as_u64())
+            .and_then(serde_json::Value::as_u64)
             .unwrap_or(120);
 
         // Safety check
-        if let Some(reason) = self.is_blocked(command) {
-            eprintln!("[bash BLOCKED: {}]", command);
+        if let Some(reason) = Self::is_blocked(command) {
+            eprintln!("[bash BLOCKED: {command}]");
             return Ok(json!({
                 "error": format!("Command blocked: {}", reason),
                 "command": command
             }));
         }
 
-        if self.needs_caution(command) {
-            eprintln!("[bash CAUTION: {}]", command);
+        if Self::needs_caution(command) {
+            eprintln!("[bash CAUTION: {command}]");
         }
 
         // Logging is handled by main.rs event loop with timing info

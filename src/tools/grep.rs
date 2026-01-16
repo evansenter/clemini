@@ -55,10 +55,12 @@ impl CallableFunction for GrepTool {
             .and_then(|v| v.as_str())
             .unwrap_or("**/*");
 
-        let max_results = args
-            .get("max_results")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(100) as usize;
+        let max_results = usize::try_from(
+            args.get("max_results")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(100),
+        )
+        .unwrap_or(usize::MAX);
 
         // Compile regex
         let regex = match Regex::new(pattern) {
@@ -76,7 +78,7 @@ impl CallableFunction for GrepTool {
 
         let file_paths: Vec<PathBuf> = match glob(&pattern_str) {
             Ok(paths) => paths
-                .filter_map(|p| p.ok())
+                .filter_map(std::result::Result::ok)
                 .filter(|p| {
                     if !p.is_file() {
                         return false;
@@ -104,9 +106,8 @@ impl CallableFunction for GrepTool {
 
         for path in file_paths {
             // Skip binary files by checking if we can read as text
-            let content = match tokio::fs::read_to_string(&path).await {
-                Ok(c) => c,
-                Err(_) => continue, // Skip files we can't read as text
+            let Ok(content) = tokio::fs::read_to_string(&path).await else {
+                continue; // Skip files we can't read as text
             };
 
             files_searched += 1;
