@@ -67,6 +67,12 @@ impl CallableFunction for EditTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| FunctionError::ArgumentMismatch("Missing new_string".to_string()))?;
 
+        if old_string == new_string {
+            return Ok(json!({
+                "error": "The 'old_string' and 'new_string' are the same. No replacement needed."
+            }));
+        }
+
         let raw_path = self.resolve_path(file_path);
 
         // Safety check - must be within cwd
