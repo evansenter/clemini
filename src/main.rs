@@ -118,6 +118,11 @@ async fn run_repl(client: &Client, tool_service: &Arc<CleminiToolService>) -> Re
                     continue;
                 }
 
+                if input == "/log" {
+                    run_git_command(&["log", "--oneline", "-5"], "no commits found");
+                    continue;
+                }
+
                 if input == "/help" {
                     eprintln!("Commands:");
                     eprintln!("  /quit, /exit  Exit the REPL");
@@ -125,6 +130,7 @@ async fn run_repl(client: &Client, tool_service: &Arc<CleminiToolService>) -> Re
                     eprintln!("  /version      Show version and model");
                     eprintln!("  /diff         Show uncommitted git changes");
                     eprintln!("  /status       Show git status");
+                    eprintln!("  /log          Show last 5 git commits");
                     eprintln!("  /help         Show this help message");
                     eprintln!();
                     eprintln!("Tools:");
