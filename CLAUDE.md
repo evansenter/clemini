@@ -40,6 +40,7 @@ src/
 - Uses `create_stream_with_auto_functions()` for streaming + auto tool execution
 - Server-side storage for multi-turn conversations via `with_previous_interaction()`
 - `ToolService` trait for stateful tools that share cwd context
+- **Important**: `system_instruction` is NOT inherited via `previousInteractionId` - must send on every turn
 
 ## genai-rs Sharp Edges
 
