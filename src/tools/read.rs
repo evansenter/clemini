@@ -56,7 +56,7 @@ impl CallableFunction for ReadTool {
             Ok(p) => p,
             Err(e) => {
                 return Ok(json!({
-                    "error": format!("Access denied: {}", e)
+                    "error": format!("Access denied: {}. Only files within the current working directory can be accessed.", e)
                 }));
             }
         };
@@ -70,7 +70,7 @@ impl CallableFunction for ReadTool {
                 "size_bytes": contents.len()
             })),
             Err(e) => Ok(json!({
-                "error": format!("Failed to read {}: {}", path.display(), e)
+                "error": format!("Failed to read {}: {}. Ensure the file exists and is not a directory.", path.display(), e)
             })),
         }
     }

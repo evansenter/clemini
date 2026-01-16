@@ -65,7 +65,7 @@ impl CallableFunction for WriteTool {
             Ok(p) => p,
             Err(e) => {
                 return Ok(json!({
-                    "error": format!("Access denied: {}", e)
+                    "error": format!("Access denied: {}. Only files within the current working directory can be accessed.", e)
                 }));
             }
         };
@@ -78,7 +78,7 @@ impl CallableFunction for WriteTool {
             && let Err(e) = tokio::fs::create_dir_all(parent).await
         {
             return Ok(json!({
-                "error": format!("Failed to create directory {}: {}", parent.display(), e)
+                "error": format!("Failed to create directory {}: {}. Check permissions for the parent directory.", parent.display(), e)
             }));
         }
 
@@ -89,7 +89,7 @@ impl CallableFunction for WriteTool {
                 "success": true
             })),
             Err(e) => Ok(json!({
-                "error": format!("Failed to write {}: {}", path.display(), e)
+                "error": format!("Failed to write {}: {}. Check file permissions.", path.display(), e)
             })),
         }
     }

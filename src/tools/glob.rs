@@ -80,15 +80,21 @@ impl CallableFunction for GlobTool {
                     }
                 }
 
+                if matches.is_empty() {
+                    return Ok(json!({
+                        "error": format!("No files matched the pattern '{}'. Suggestions: ensure the pattern is correct, check that the files exist, and that they are not in excluded directories (e.g., .git, node_modules).", pattern)
+                    }));
+                }
+
                 Ok(json!({
                     "pattern": pattern,
                     "matches": matches,
                     "count": matches.len(),
-                    "errors": errors
+                    "errors": if errors.is_empty() { Value::Null } else { json!(errors) }
                 }))
             }
             Err(e) => Ok(json!({
-                "error": format!("Invalid glob pattern: {}", e)
+                "error": format!("Invalid glob pattern: {}. Ensure you are using valid glob syntax (e.g., '**/*.rs', 'src/*.ts'). Suggestions: check for invalid characters or incorrectly nested patterns.", e)
             })),
         }
     }
