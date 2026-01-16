@@ -1,3 +1,4 @@
+mod ask_user;
 mod bash;
 mod edit;
 mod glob;
@@ -12,6 +13,7 @@ use genai_rs::{CallableFunction, ToolService};
 use std::path::PathBuf;
 use std::sync::Arc;
 
+pub use ask_user::AskUserTool;
 pub use bash::BashTool;
 pub use edit::EditTool;
 pub use glob::GlobTool;
@@ -47,6 +49,7 @@ impl ToolService for CleminiToolService {
     /// - `list_directory`: List entries in a directory
     /// - `web_fetch`: Fetch web content
     /// - `web_search`: Search the web using DuckDuckGo
+    /// - `ask_user`: Ask the user a question
     fn tools(&self) -> Vec<Arc<dyn CallableFunction>> {
         vec![
             Arc::new(ReadTool::new(self.cwd.clone())),
@@ -58,6 +61,7 @@ impl ToolService for CleminiToolService {
             Arc::new(ListDirectoryTool::new(self.cwd.clone())),
             Arc::new(WebFetchTool::new(self.cwd.clone())),
             Arc::new(WebSearchTool::new(self.cwd.clone())),
+            Arc::new(AskUserTool::new()),
         ]
     }
 }
