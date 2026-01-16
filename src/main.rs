@@ -117,6 +117,7 @@ async fn main() -> Result<()> {
         model.green(),
         cwd.display().to_string().yellow()
     );
+    eprintln!("{} Remember to take breaks during development!", "💡".yellow());
     eprintln!();
 
     let mut piped_input = String::new();
@@ -274,8 +275,8 @@ async fn run_repl(
                     continue;
                 }
 
-                if input.starts_with('!') {
-                    let cmd = &input[1..].trim();
+                if let Some(cmd) = input.strip_prefix('!') {
+                    let cmd = cmd.trim();
                     if !cmd.is_empty() {
                         rl.add_history_entry(input)?;
                         run_shell_command(cmd);
@@ -360,10 +361,8 @@ fn run_shell_command(command: &str) {
 
     match cmd.status() {
         Ok(status) => {
-            if !status.success() {
-                if let Some(code) = status.code() {
-                    eprintln!("[process exited with code: {code}]");
-                }
+            if let Some(code) = status.code().filter(|_| !status.success()) {
+                eprintln!("[process exited with code: {code}]");
             }
         }
         Err(e) => {

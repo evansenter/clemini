@@ -92,12 +92,10 @@ impl CallableFunction for GlobTool {
                 if matches.is_empty() {
                     // Check if the pattern matches a directory
                     let full_path = self.cwd.join(pattern);
-                    if let Ok(validated_path) = validate_path(&full_path, &self.cwd) {
-                        if validated_path.is_dir() {
-                            return Ok(json!({
-                                "error": format!("The pattern '{}' matches a directory, but this tool is for finding files. Suggestion: use '{}/*' to find files within this directory or '{}/**/*' for recursive search.", pattern, pattern, pattern)
-                            }));
-                        }
+                    if validate_path(&full_path, &self.cwd).is_ok_and(|p| p.is_dir()) {
+                        return Ok(json!({
+                            "error": format!("The pattern '{}' matches a directory, but this tool is for finding files. Suggestion: use '{}/*' to find files within this directory or '{}/**/*' for recursive search.", pattern, pattern, pattern)
+                        }));
                     }
 
                     return Ok(json!({
