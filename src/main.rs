@@ -60,6 +60,12 @@ For tasks with 3+ steps, use `todo_write` to:
 - Making changes without verifying they work
 - Long explanations when action is needed
 - Guessing when you could ask
+
+## Self-Improvement
+When you encounter recurring issues or discover better patterns:
+- Update THIS system instruction (in src/main.rs SYSTEM_PROMPT) with general guidance
+- Keep additions concise and actionable
+- Only add guidance that applies broadly, not task-specific notes
 "#;
 
 #[derive(serde::Deserialize, Default)]
