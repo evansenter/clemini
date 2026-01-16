@@ -123,6 +123,11 @@ async fn run_repl(client: &Client, tool_service: &Arc<CleminiToolService>) -> Re
                     continue;
                 }
 
+                if input == "/branch" || input == "/b" {
+                    run_git_command(&["branch"], "no branches found");
+                    continue;
+                }
+
                 if input == "/help" || input == "/h" {
                     eprintln!("Commands:");
                     eprintln!("  /q, /quit, /exit  Exit the REPL");
@@ -131,6 +136,7 @@ async fn run_repl(client: &Client, tool_service: &Arc<CleminiToolService>) -> Re
                     eprintln!("  /d, /diff         Show git diff");
                     eprintln!("  /s, /status       Show git status");
                     eprintln!("  /l, /log          Show git log");
+                    eprintln!("  /b, /branch       Show git branches");
                     eprintln!("  /h, /help         Show this help message");
                     eprintln!();
                     eprintln!("Tools:");
