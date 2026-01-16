@@ -102,10 +102,17 @@ async fn run_repl(client: &Client, tool_service: &Arc<CleminiToolService>) -> Re
                     continue;
                 }
 
+                if input == "/version" {
+                    eprintln!("clemini v{}", env!("CARGO_PKG_VERSION"));
+                    eprintln!("Model: {}", MODEL);
+                    continue;
+                }
+
                 if input == "/help" {
                     eprintln!("Commands:");
                     eprintln!("  /quit, /exit  Exit the REPL");
                     eprintln!("  /clear        Clear conversation history");
+                    eprintln!("  /version      Show version and model");
                     eprintln!("  /help         Show this help message");
                     eprintln!();
                     eprintln!("Tools:");
