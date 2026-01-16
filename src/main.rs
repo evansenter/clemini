@@ -108,11 +108,38 @@ async fn run_repl(client: &Client, tool_service: &Arc<CleminiToolService>) -> Re
                     continue;
                 }
 
+                if input == "/diff" {
+                    let output = std::process::Command::new("git")
+                        .arg("diff")
+                        .output();
+
+                    match output {
+                        Ok(o) => {
+                            if o.status.success() {
+                                let stdout = String::from_utf8_lossy(&o.stdout);
+                                if stdout.is_empty() {
+                                    eprintln!("[no uncommitted changes]");
+                                } else {
+                                    println!("{}", stdout);
+                                }
+                            } else {
+                                let stderr = String::from_utf8_lossy(&o.stderr);
+                                eprintln!("[git diff error: {}]", stderr.trim());
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("[failed to run git diff: {}]", e);
+                        }
+                    }
+                    continue;
+                }
+
                 if input == "/help" {
                     eprintln!("Commands:");
                     eprintln!("  /quit, /exit  Exit the REPL");
                     eprintln!("  /clear        Clear conversation history");
                     eprintln!("  /version      Show version and model");
+                    eprintln!("  /diff         Show uncommitted git changes");
                     eprintln!("  /help         Show this help message");
                     eprintln!();
                     eprintln!("Tools:");
