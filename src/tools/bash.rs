@@ -109,6 +109,10 @@ impl CallableFunction for BashTool {
             }));
         }
 
+        if self.needs_caution(command) {
+            eprintln!("[bash CAUTION: {}]", command);
+        }
+
         // Logging is handled by main.rs event loop with timing info
 
         let result = tokio::time::timeout(
