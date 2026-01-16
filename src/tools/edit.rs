@@ -3,7 +3,7 @@ use genai_rs::{CallableFunction, FunctionDeclaration, FunctionError, FunctionPar
 use serde_json::{Value, json};
 use std::path::PathBuf;
 
-use super::validate_path;
+use super::resolve_and_validate_path;
 
 pub struct EditTool {
     cwd: PathBuf,
@@ -12,15 +12,6 @@ pub struct EditTool {
 impl EditTool {
     pub fn new(cwd: PathBuf) -> Self {
         Self { cwd }
-    }
-
-    fn resolve_path(&self, file_path: &str) -> PathBuf {
-        let path = PathBuf::from(file_path);
-        if path.is_absolute() {
-            path
-        } else {
-            self.cwd.join(path)
-        }
     }
 }
 
@@ -73,10 +64,8 @@ impl CallableFunction for EditTool {
             }));
         }
 
-        let raw_path = self.resolve_path(file_path);
-
-        // Safety check - must be within cwd
-        let path = match validate_path(&raw_path, &self.cwd) {
+        // Resolve and validate path
+        let path = match resolve_and_validate_path(file_path, &self.cwd) {
             Ok(p) => p,
             Err(e) => {
                 return Ok(json!({

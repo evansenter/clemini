@@ -50,6 +50,21 @@ impl ToolService for CleminiToolService {
     }
 }
 
+/// Resolves a path relative to CWD and validates it's within CWD.
+pub fn resolve_and_validate_path(
+    file_path: &str,
+    cwd: &std::path::Path,
+) -> Result<PathBuf, String> {
+    let path = std::path::Path::new(file_path);
+    let full_path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    };
+
+    validate_path(&full_path, cwd)
+}
+
 /// Check if a path is within the allowed working directory.
 /// Returns `Ok(canonical_path)` if allowed, Err(reason) if denied.
 pub fn validate_path(path: &std::path::Path, cwd: &std::path::Path) -> Result<PathBuf, String> {
@@ -104,4 +119,14 @@ pub fn validate_path(path: &std::path::Path, cwd: &std::path::Path) -> Result<Pa
     }
 
     Ok(check_path)
+}
+
+/// Makes a path relative to the CWD if possible, otherwise returns the path as a string.
+pub fn make_relative(path: &std::path::Path, cwd: &std::path::Path) -> String {
+    let canonical_cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+    path.strip_prefix(&canonical_cwd)
+        .or_else(|_| path.strip_prefix(cwd))
+        .unwrap_or(path)
+        .to_string_lossy()
+        .to_string()
 }

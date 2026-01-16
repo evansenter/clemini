@@ -4,6 +4,8 @@ use glob::glob;
 use serde_json::{Value, json};
 use std::path::PathBuf;
 
+use super::{make_relative, validate_path};
+
 pub struct GlobTool {
     cwd: PathBuf,
 }
@@ -55,6 +57,12 @@ impl CallableFunction for GlobTool {
                 for entry in paths {
                     match entry {
                         Ok(path) => {
+                            // Security check - only include files within cwd
+                            let path = match validate_path(&path, &self.cwd) {
+                                Ok(p) => p,
+                                Err(_) => continue, // Skip files outside cwd
+                            };
+
                             // Only include files, skip directories
                             if !path.is_file() {
                                 continue;
@@ -72,11 +80,7 @@ impl CallableFunction for GlobTool {
                             }
 
                             // Convert to relative path from cwd
-                            let relative = path
-                                .strip_prefix(&self.cwd)
-                                .unwrap_or(&path)
-                                .to_string_lossy()
-                                .to_string();
+                            let relative = make_relative(&path, &self.cwd);
                             matches.push(relative);
                         }
                         Err(e) => {
@@ -87,8 +91,9 @@ impl CallableFunction for GlobTool {
 
                 if matches.is_empty() {
                     // Check if the pattern matches a directory
-                    if let Ok(full_path) = self.cwd.join(pattern).canonicalize() {
-                        if full_path.is_dir() {
+                    let full_path = self.cwd.join(pattern);
+                    if let Ok(validated_path) = validate_path(&full_path, &self.cwd) {
+                        if validated_path.is_dir() {
                             return Ok(json!({
                                 "error": format!("The pattern '{}' matches a directory, but this tool is for finding files. Suggestion: use '{}/*' to find files within this directory or '{}/**/*' for recursive search.", pattern, pattern, pattern)
                             }));

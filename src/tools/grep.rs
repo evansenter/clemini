@@ -5,6 +5,8 @@ use regex::Regex;
 use serde_json::{Value, json};
 use std::path::PathBuf;
 
+use super::{make_relative, validate_path};
+
 pub struct GrepTool {
     cwd: PathBuf,
 }
@@ -80,18 +82,24 @@ impl CallableFunction for GrepTool {
             Ok(paths) => {
                 let paths: Vec<PathBuf> = paths
                     .filter_map(std::result::Result::ok)
-                    .filter(|p| {
-                        if !p.is_file() {
-                            return false;
+                    .filter_map(|p| {
+                        // Security check - only include files within cwd
+                        let validated_path = validate_path(&p, &self.cwd).ok()?;
+
+                        if !validated_path.is_file() {
+                            return None;
                         }
                         // Skip excluded directories
-                        !p.components().any(|c| {
+                        if validated_path.components().any(|c| {
                             if let std::path::Component::Normal(s) = c {
                                 DEFAULT_EXCLUDES.contains(&s.to_string_lossy().as_ref())
                             } else {
                                 false
                             }
-                        })
+                        }) {
+                            return None;
+                        }
+                        Some(validated_path)
                     })
                     .collect();
 
@@ -129,11 +137,7 @@ impl CallableFunction for GrepTool {
                         files_with_matches += 1;
                     }
 
-                    let relative_path = path
-                        .strip_prefix(&self.cwd)
-                        .unwrap_or(&path)
-                        .to_string_lossy()
-                        .to_string();
+                    let relative_path = make_relative(&path, &self.cwd);
 
                     matches.push(json!({
                         "file": relative_path,
