@@ -81,6 +81,10 @@ struct Args {
     /// Model to use
     #[arg(short, long)]
     model: Option<String>,
+
+    /// Stream raw text output (non-interactive mode)
+    #[arg(long)]
+    stream: bool,
 }
 
 #[tokio::main]
@@ -135,10 +139,10 @@ async fn main() -> Result<()> {
 
     if let Some(prompt) = combined_prompt {
         // Non-interactive mode: run single prompt
-        run_interaction(&client, &tool_service, &prompt, None, &model).await?;
+        run_interaction(&client, &tool_service, &prompt, None, &model, args.stream).await?;
     } else {
         // Interactive REPL mode
-        run_repl(&client, &tool_service, cwd, &model).await?;
+        run_repl(&client, &tool_service, cwd, &model, args.stream).await?;
     }
 
     Ok(())
@@ -149,6 +153,7 @@ async fn run_repl(
     tool_service: &Arc<CleminiToolService>,
     cwd: std::path::PathBuf,
     model: &str,
+    stream_output: bool,
 ) -> Result<()> {
     let mut rl = DefaultEditor::new()?;
 
@@ -265,6 +270,7 @@ async fn run_repl(
                     input,
                     last_interaction_id.as_deref(),
                     model,
+                    stream_output,
                 )
                 .await
                 {
@@ -380,6 +386,7 @@ async fn run_interaction(
     input: &str,
     previous_interaction_id: Option<&str>,
     model: &str,
+    stream_output: bool,
 ) -> Result<Option<String>> {
     // Build the interaction - system instruction must be sent on every turn
     // (it's NOT inherited via previousInteractionId per genai-rs docs)
@@ -417,6 +424,10 @@ async fn run_interaction(
             Ok(event) => match &event.chunk {
                 AutoFunctionStreamChunk::Delta(content) => {
                     if let Some(text) = content.as_text() {
+                        if stream_output {
+                            print!("{text}");
+                            io::stdout().flush()?;
+                        }
                         response_text.push_str(text);
                     }
                 }
@@ -426,7 +437,9 @@ async fn run_interaction(
 
                     // Render any text before tool execution
                     if !response_text.is_empty() {
-                        skin.print_text(&response_text);
+                        if !stream_output {
+                            skin.print_text(&response_text);
+                        }
                         response_text.clear();
                         println!();
                     }
@@ -503,7 +516,9 @@ async fn run_interaction(
 
                     // Render accumulated text as markdown
                     if !response_text.is_empty() {
-                        skin.print_text(&response_text);
+                        if !stream_output {
+                            skin.print_text(&response_text);
+                        }
                         response_text.clear();
                     }
                     println!();
@@ -534,7 +549,9 @@ async fn run_interaction(
 
     // Render any remaining text (e.g., if stream ended abruptly or on error)
     if !response_text.is_empty() {
-        skin.print_text(&response_text);
+        if !stream_output {
+            skin.print_text(&response_text);
+        }
         println!();
     }
 
