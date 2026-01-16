@@ -5,6 +5,7 @@ mod glob;
 mod grep;
 mod list_directory;
 mod read;
+mod todo_write;
 mod web_fetch;
 mod web_search;
 mod write;
@@ -20,6 +21,7 @@ pub use glob::GlobTool;
 pub use grep::GrepTool;
 pub use list_directory::ListDirectoryTool;
 pub use read::ReadTool;
+pub use todo_write::TodoWriteTool;
 pub use web_fetch::WebFetchTool;
 pub use web_search::WebSearchTool;
 pub use write::WriteTool;
@@ -50,6 +52,7 @@ impl ToolService for CleminiToolService {
     /// - `web_fetch`: Fetch web content
     /// - `web_search`: Search the web using DuckDuckGo
     /// - `ask_user`: Ask the user a question
+    /// - `todo_write`: Display a todo list
     fn tools(&self) -> Vec<Arc<dyn CallableFunction>> {
         vec![
             Arc::new(ReadTool::new(self.cwd.clone())),
@@ -62,6 +65,7 @@ impl ToolService for CleminiToolService {
             Arc::new(WebFetchTool::new(self.cwd.clone())),
             Arc::new(WebSearchTool::new(self.cwd.clone())),
             Arc::new(AskUserTool::new()),
+            Arc::new(TodoWriteTool::new()),
         ]
     }
 }

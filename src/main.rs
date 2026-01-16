@@ -302,7 +302,7 @@ async fn run_repl(
                 {
                     Ok((new_id, context_size)) => {
                         last_interaction_id = new_id;
-                        last_estimated_context_size = context_size;
+                        last_estimated_context_size += context_size;
                     }
                     Err(e) => {
                         eprintln!("\n{}", format!("[error: {e}]").red());
@@ -507,7 +507,7 @@ async fn run_interaction(
 
                     // Update token count from the response that triggered function calls
                     if let Some(usage) = &resp.usage {
-                        estimated_context_size = usage.total_input_tokens.unwrap_or(0)
+                        estimated_context_size += usage.total_input_tokens.unwrap_or(0)
                             + usage.total_output_tokens.unwrap_or(0);
                     }
 
@@ -558,7 +558,7 @@ async fn run_interaction(
                     if let Some(usage) = &resp.usage {
                         let total_in = usage.total_input_tokens.unwrap_or(0);
                         let total_out = usage.total_output_tokens.unwrap_or(0);
-                        estimated_context_size = total_in + total_out;
+                        estimated_context_size += total_in + total_out;
                         eprintln!(
                             "[{}→{} tok]",
                             total_in,
