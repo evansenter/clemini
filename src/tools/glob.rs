@@ -55,6 +55,11 @@ impl CallableFunction for GlobTool {
                 for entry in paths {
                     match entry {
                         Ok(path) => {
+                            // Only include files, skip directories
+                            if !path.is_file() {
+                                continue;
+                            }
+
                             // Skip excluded directories
                             if path.components().any(|c| {
                                 if let std::path::Component::Normal(s) = c {
@@ -81,6 +86,15 @@ impl CallableFunction for GlobTool {
                 }
 
                 if matches.is_empty() {
+                    // Check if the pattern matches a directory
+                    if let Ok(full_path) = self.cwd.join(pattern).canonicalize() {
+                        if full_path.is_dir() {
+                            return Ok(json!({
+                                "error": format!("The pattern '{}' matches a directory, but this tool is for finding files. Suggestion: use '{}/*' to find files within this directory or '{}/**/*' for recursive search.", pattern, pattern, pattern)
+                            }));
+                        }
+                    }
+
                     return Ok(json!({
                         "error": format!("No files matched the pattern '{}'. Suggestions: ensure the pattern is correct, check that the files exist, and that they are not in excluded directories (e.g., .git, node_modules).", pattern)
                     }));
