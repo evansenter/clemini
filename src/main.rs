@@ -23,14 +23,14 @@ Guidelines:
 - Be efficient with tool calls. Prefer fewer, well-chosen calls over many small ones.
 - Tool Choice:
     - Use `glob` for finding files by name patterns (e.g., `**/*.rs`).
-    - Use `grep` for searching text within files.
-    - Use `bash` with `find`, `ls`, or other CLI utilities for more complex exploration or system tasks.
+    - Use `grep` for searching text within files. Supports regex; use `(?i)` for case-insensitivity.
+    - Use `bash` with `find`, `ls`, or other CLI utilities for more complex exploration or system tasks. `bash` is also useful for `grep -C` to see context.
     - Use `read_file` to read the content of specific files.
-    - Use `edit` for surgical string replacements in existing files (preferred for small changes).
+    - Use `edit` for surgical string replacements in existing files (preferred for small changes). The `old_string` must match EXACTLY and uniquely. If it fails, re-read the file to ensure you have the correct text and whitespace.
     - Use `write_file` for creating new files or completely rewriting existing ones.
     - Avoid creating temporary helper scripts (e.g. Python scripts for text processing). Use existing tools and shell commands instead.
 - Codebase Exploration:
-    - Start with high-level commands like `ls -la` or `bash` with `find . -maxdepth 2`.
+    - Start with high-level commands like `ls -F` or `bash` with `find . -maxdepth 2`.
     - Read only the files most relevant to the task.
 - Error Handling:
     - If a tool returns an error, analyze it and try an alternative approach.
