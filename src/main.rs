@@ -386,6 +386,55 @@ fn check_context_window(total_tokens: u32) {
     }
 }
 
+struct Spinner {
+    handle: tokio::task::JoinHandle<()>,
+    stop: Arc<AtomicBool>,
+}
+
+impl Spinner {
+    fn start() -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_clone = stop.clone();
+        let handle = tokio::spawn(async move {
+            let chars = ['|', '/', '-', '\\'];
+            let mut i = 0;
+            while !stop_clone.load(Ordering::SeqCst) {
+                eprint!("\r{}", chars[i]);
+                let _ = io::stderr().flush();
+                i = (i + 1) % chars.len();
+                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            }
+            // Clear spinner
+            eprint!("\r\x1B[K");
+            let _ = io::stderr().flush();
+        });
+        Self { handle, stop }
+    }
+
+    async fn stop(self) {
+        self.stop.store(true, Ordering::SeqCst);
+        let _ = self.handle.await;
+    }
+}
+
+async fn stop_spinner(spinner: &mut Option<Spinner>) {
+    if let Some(s) = spinner.take() {
+        s.stop().await;
+    }
+}
+
+fn flush_response(response_text: &mut String, skin: &MadSkin, stream_output: bool, force_newline: bool) {
+    if !response_text.is_empty() {
+        if !stream_output {
+            skin.print_text(response_text);
+        }
+        response_text.clear();
+        println!();
+    } else if force_newline {
+        println!();
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 async fn run_interaction(
     client: &Client,
@@ -397,34 +446,27 @@ async fn run_interaction(
 ) -> Result<Option<String>> {
     // Build the interaction - system instruction must be sent on every turn
     // (it's NOT inherited via previousInteractionId per genai-rs docs)
+    let interaction = client
+        .interaction()
+        .with_model(model)
+        .with_tool_service(tool_service.clone())
+        .with_system_instruction(SYSTEM_PROMPT)
+        .with_content(vec![Content::text(input)])
+        .with_max_function_call_loops(100);
+
     let mut stream = if let Some(prev_id) = previous_interaction_id {
-        // Continuation turn - chain to previous interaction
-        client
-            .interaction()
-            .with_model(model)
-            .with_tool_service(tool_service.clone())
+        interaction
             .with_previous_interaction(prev_id)
-            .with_system_instruction(SYSTEM_PROMPT)
-            .with_content(vec![Content::text(input)])
-            .with_max_function_call_loops(100)
             .create_stream_with_auto_functions()
     } else {
-        // First turn
-        client
-            .interaction()
-            .with_model(model)
-            .with_tool_service(tool_service.clone())
-            .with_system_instruction(SYSTEM_PROMPT)
-            .with_content(vec![Content::text(input)])
-            .with_max_function_call_loops(100)
-            .create_stream_with_auto_functions()
+        interaction.create_stream_with_auto_functions()
     };
 
     let mut last_id: Option<String> = None;
     let mut estimated_context_size: u32 = 0;
     let mut response_text = String::new();
     let skin = MadSkin::default();
-    let mut spinner: Option<(tokio::task::JoinHandle<()>, Arc<AtomicBool>)> = None;
+    let mut spinner: Option<Spinner> = None;
 
     while let Some(event) = stream.next().await {
         match event {
@@ -443,13 +485,7 @@ async fn run_interaction(
                     last_id.clone_from(&resp.id);
 
                     // Render any text before tool execution
-                    if !response_text.is_empty() {
-                        if !stream_output {
-                            skin.print_text(&response_text);
-                        }
-                        response_text.clear();
-                        println!();
-                    }
+                    flush_response(&mut response_text, &skin, stream_output, false);
 
                     // Update token count from the response that triggered function calls
                     if let Some(usage) = &resp.usage {
@@ -458,36 +494,12 @@ async fn run_interaction(
                     }
 
                     // Start spinner
-                    if let Some((h, stop)) = spinner.take() {
-                        stop.store(true, Ordering::SeqCst);
-                        let _ = h.await;
-                    }
-
-                    let stop_flag = Arc::new(AtomicBool::new(false));
-                    let stop_flag_clone = stop_flag.clone();
-                    spinner = Some((
-                        tokio::spawn(async move {
-                            let chars = ['|', '/', '-', '\\'];
-                            let mut i = 0;
-                            while !stop_flag_clone.load(Ordering::SeqCst) {
-                                eprint!("\r{}", chars[i]);
-                                let _ = io::stderr().flush();
-                                i = (i + 1) % chars.len();
-                                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-                            }
-                            // Clear spinner
-                            eprint!("\r\x1B[K");
-                            let _ = io::stderr().flush();
-                        }),
-                        stop_flag,
-                    ));
+                    stop_spinner(&mut spinner).await;
+                    spinner = Some(Spinner::start());
                 }
                 AutoFunctionStreamChunk::FunctionResults(results) => {
                     // Stop spinner
-                    if let Some((h, stop)) = spinner.take() {
-                        stop.store(true, Ordering::SeqCst);
-                        let _ = h.await;
-                    }
+                    stop_spinner(&mut spinner).await;
 
                     // Calculate tokens added by function results.
                     // Note: This is a crude estimate (approx. 4 chars per token).
@@ -522,13 +534,7 @@ async fn run_interaction(
                     last_id.clone_from(&resp.id);
 
                     // Render accumulated text as markdown
-                    if !response_text.is_empty() {
-                        if !stream_output {
-                            skin.print_text(&response_text);
-                        }
-                        response_text.clear();
-                    }
-                    println!();
+                    flush_response(&mut response_text, &skin, stream_output, true);
 
                     // Log final token usage
                     if let Some(usage) = &resp.usage {
@@ -555,18 +561,10 @@ async fn run_interaction(
     }
 
     // Render any remaining text (e.g., if stream ended abruptly or on error)
-    if !response_text.is_empty() {
-        if !stream_output {
-            skin.print_text(&response_text);
-        }
-        println!();
-    }
+    flush_response(&mut response_text, &skin, stream_output, false);
 
     // Cleanup spinner if it's still running
-    if let Some((h, stop)) = spinner.take() {
-        stop.store(true, Ordering::SeqCst);
-        let _ = h.await;
-    }
+    stop_spinner(&mut spinner).await;
 
     if estimated_context_size > 0 {
         check_context_window(estimated_context_size);
