@@ -7,8 +7,8 @@ use std::process::Stdio;
 use std::sync::LazyLock;
 use tokio::process::Command;
 
-/// Dangerous command patterns that are always blocked.
-static DANGEROUS_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+/// Blocked command patterns that are always rejected.
+static BLOCKED_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     vec![
         // Destructive filesystem operations
         Regex::new(r"rm\s+(-[rfRF]+\s+)*[/~](\s|$)").unwrap(),
@@ -50,10 +50,10 @@ impl BashTool {
         Self { cwd }
     }
 
-    fn is_dangerous(&self, command: &str) -> Option<&'static str> {
-        for pattern in DANGEROUS_PATTERNS.iter() {
+    fn is_blocked(&self, command: &str) -> Option<&'static str> {
+        for pattern in BLOCKED_PATTERNS.iter() {
             if pattern.is_match(command) {
-                return Some("Command matches dangerous pattern");
+                return Some("Command matches blocked pattern");
             }
         }
         None
@@ -101,7 +101,7 @@ impl CallableFunction for BashTool {
             .unwrap_or(120);
 
         // Safety check
-        if let Some(reason) = self.is_dangerous(command) {
+        if let Some(reason) = self.is_blocked(command) {
             eprintln!("[bash BLOCKED: {}]", command);
             return Ok(json!({
                 "error": format!("Command blocked: {}", reason),
