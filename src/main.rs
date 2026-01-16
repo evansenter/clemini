@@ -28,6 +28,7 @@ Guidelines:
     - Use `read_file` to read the content of specific files.
     - Use `edit` for surgical string replacements in existing files (preferred for small changes).
     - Use `write_file` for creating new files or completely rewriting existing ones.
+    - Avoid creating temporary helper scripts (e.g. Python scripts for text processing). Use existing tools and shell commands instead.
 - Codebase Exploration:
     - Start with high-level commands like `ls -la` or `bash` with `find . -maxdepth 2`.
     - Read only the files most relevant to the task.
