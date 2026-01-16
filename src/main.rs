@@ -172,7 +172,7 @@ async fn main() -> Result<()> {
 
     if let Some(prompt) = combined_prompt {
         // Non-interactive mode: run single prompt
-        run_interaction(&client, &tool_service, &prompt, None, &model, args.stream).await?;
+        let _ = run_interaction(&client, &tool_service, &prompt, None, &model, args.stream).await?;
     } else {
         // Interactive REPL mode
         run_repl(&client, &tool_service, cwd, &model, args.stream).await?;
@@ -201,6 +201,11 @@ async fn run_repl(
 
     let mut last_interaction_id: Option<String> = None;
     let mut last_estimated_context_size: u32 = 0;
+
+    let session_start = std::time::Instant::now();
+    let mut total_interactions = 0;
+    let mut total_tool_calls = 0;
+    let mut total_session_tokens = 0;
 
     loop {
         let readline = rl.readline("> ");
@@ -272,6 +277,26 @@ async fn run_repl(
                     continue;
                 }
 
+                if input == "/stats" {
+                    let elapsed = session_start.elapsed();
+                    let mins = elapsed.as_secs() / 60;
+                    let secs = elapsed.as_secs() % 60;
+                    println!("{}", "Session Statistics:".bold().underline());
+                    println!("  Uptime:        {}m {}s", mins, secs);
+                    println!("  Model:         {}", model.green());
+                    println!("  Interactions:  {}", total_interactions);
+                    println!("  Tool Calls:    {}", total_tool_calls);
+                    println!("  Total Tokens:  {}", total_session_tokens);
+                    println!(
+                        "  Context usage: {}/{} tokens ({:.1}%)",
+                        last_estimated_context_size,
+                        CONTEXT_WINDOW_LIMIT,
+                        (f64::from(last_estimated_context_size) / f64::from(CONTEXT_WINDOW_LIMIT))
+                            * 100.0
+                    );
+                    continue;
+                }
+
                 if input == "/help" || input == "/h" {
                     eprintln!("Commands:");
                     eprintln!("  /q, /quit, /exit  Exit the REPL");
@@ -279,6 +304,7 @@ async fn run_repl(
                     eprintln!("  /v, /version      Show version and model");
                     eprintln!("  /m, /model        Show model name");
                     eprintln!("  /t, /tokens       Show estimated context size");
+                    eprintln!("  /stats            Show session statistics");
                     eprintln!("  /pwd, /cwd        Show current working directory");
                     eprintln!("  /d, /diff         Show git diff");
                     eprintln!("  /s, /status       Show git status");
@@ -323,9 +349,12 @@ async fn run_repl(
                 )
                 .await
                 {
-                    Ok((new_id, context_size)) => {
-                        last_interaction_id = new_id;
-                        last_estimated_context_size += context_size;
+                    Ok(result) => {
+                        last_interaction_id = result.id;
+                        last_estimated_context_size = result.context_size;
+                        total_interactions += 1;
+                        total_tool_calls += result.tool_calls;
+                        total_session_tokens += result.total_tokens;
                     }
                     Err(e) => {
                         eprintln!("\n{}", format!("[error: {e}]").red());
@@ -476,6 +505,13 @@ fn flush_response(response_text: &mut String, skin: &MadSkin, stream_output: boo
     }
 }
 
+struct InteractionResult {
+    id: Option<String>,
+    context_size: u32,
+    total_tokens: u32,
+    tool_calls: u32,
+}
+
 #[allow(clippy::too_many_lines)]
 async fn run_interaction(
     client: &Client,
@@ -484,7 +520,7 @@ async fn run_interaction(
     previous_interaction_id: Option<&str>,
     model: &str,
     stream_output: bool,
-) -> Result<(Option<String>, u32)> {
+) -> Result<InteractionResult> {
     // Build the interaction - system instruction must be sent on every turn
     // (it's NOT inherited via previousInteractionId per genai-rs docs)
     let interaction = client
@@ -504,7 +540,9 @@ async fn run_interaction(
     };
 
     let mut last_id: Option<String> = None;
-    let mut estimated_context_size: u32 = 0;
+    let mut current_context_size: u32 = 0;
+    let mut total_tokens: u32 = 0;
+    let mut tool_calls: u32 = 0;
     let mut response_text = String::new();
     let skin = MadSkin::default();
     let mut spinner: Option<Spinner> = None;
@@ -530,8 +568,10 @@ async fn run_interaction(
 
                     // Update token count from the response that triggered function calls
                     if let Some(usage) = &resp.usage {
-                        estimated_context_size += usage.total_input_tokens.unwrap_or(0)
+                        let turn_tokens = usage.total_input_tokens.unwrap_or(0)
                             + usage.total_output_tokens.unwrap_or(0);
+                        current_context_size = turn_tokens;
+                        total_tokens += turn_tokens;
                     }
 
                     // Start spinner
@@ -546,10 +586,12 @@ async fn run_interaction(
                     // Note: This is a crude estimate (approx. 4 chars per token).
                     let mut tokens_added: u32 = 0;
                     for result in results {
+                        tool_calls += 1;
                         let result_str = result.result.to_string();
                         tokens_added += u32::try_from(result_str.len() / 4).unwrap_or(u32::MAX); // ~4 chars per token
                     }
-                    estimated_context_size += tokens_added;
+                    current_context_size += tokens_added;
+                    // We don't add to total_tokens here because the next turn's input usage will include these.
 
                     // Log each result with timing and tokens
                     for result in results {
@@ -565,7 +607,7 @@ async fn run_interaction(
                             "[{}] {}, {:.1}k tokens (+{}){}",
                             result.name.cyan(),
                             format!("{:.1}s", elapsed_secs).yellow(),
-                            f64::from(estimated_context_size) / 1000.0,
+                            f64::from(current_context_size) / 1000.0,
                             tokens_added,
                             error_suffix
                         );
@@ -581,7 +623,8 @@ async fn run_interaction(
                     if let Some(usage) = &resp.usage {
                         let total_in = usage.total_input_tokens.unwrap_or(0);
                         let total_out = usage.total_output_tokens.unwrap_or(0);
-                        estimated_context_size += total_in + total_out;
+                        current_context_size = total_in + total_out;
+                        total_tokens += total_in + total_out;
                         eprintln!(
                             "[{}→{} tok]",
                             total_in,
@@ -607,9 +650,14 @@ async fn run_interaction(
     // Cleanup spinner if it's still running
     stop_spinner(&mut spinner).await;
 
-    if estimated_context_size > 0 {
-        check_context_window(estimated_context_size);
+    if current_context_size > 0 {
+        check_context_window(current_context_size);
     }
 
-    Ok((last_id, estimated_context_size))
+    Ok(InteractionResult {
+        id: last_id,
+        context_size: current_context_size,
+        total_tokens,
+        tool_calls,
+    })
 }
