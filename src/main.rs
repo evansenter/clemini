@@ -15,6 +15,7 @@ mod tools;
 use tools::CleminiToolService;
 
 const MODEL: &str = "gemini-3-flash-preview";
+const CONTEXT_WINDOW_LIMIT: u32 = 1_000_000;
 
 const SYSTEM_PROMPT: &str = r"You are clemini, a coding assistant that helps users with software engineering tasks.
 
@@ -300,6 +301,35 @@ fn run_shell_command(command: &str) {
     }
 }
 
+fn check_context_window(total_tokens: u32) {
+    let ratio = f64::from(total_tokens) / f64::from(CONTEXT_WINDOW_LIMIT);
+    if ratio > 0.95 {
+        eprintln!(
+            "{}",
+            format!(
+                "WARNING: Context window usage is at {:.1}% ({}/{} tokens). Please use /clear to reset history.",
+                ratio * 100.0,
+                total_tokens,
+                CONTEXT_WINDOW_LIMIT
+            )
+            .red()
+            .bold()
+        );
+    } else if ratio > 0.80 {
+        eprintln!(
+            "{}",
+            format!(
+                "WARNING: Context window usage is at {:.1}% ({}/{} tokens).",
+                ratio * 100.0,
+                total_tokens,
+                CONTEXT_WINDOW_LIMIT
+            )
+            .yellow()
+            .bold()
+        );
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 async fn run_interaction(
     client: &Client,
@@ -406,6 +436,7 @@ async fn run_interaction(
                     if let Some(usage) = &resp.usage {
                         let total_in = usage.total_input_tokens.unwrap_or(0);
                         let total_out = usage.total_output_tokens.unwrap_or(0);
+                        estimated_context_size = total_in + total_out;
                         eprintln!(
                             "[{}→{} tok]",
                             total_in,
@@ -429,6 +460,10 @@ async fn run_interaction(
     if !response_text.is_empty() {
         skin.print_text(&response_text);
         println!();
+    }
+
+    if estimated_context_size > 0 {
+        check_context_window(estimated_context_size);
     }
 
     Ok(last_id)
