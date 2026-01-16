@@ -19,12 +19,12 @@ const SYSTEM_PROMPT: &str = r#"You are clemini, a coding assistant that helps us
 You have access to tools for reading files, writing files, and executing bash commands.
 Use these tools to help users accomplish their goals.
 
-When working on tasks:
-1. Read relevant files to understand the context
-2. Make changes using the write tool
-3. Run commands to verify your changes work
-
-Be concise in your responses. Focus on getting things done."#;
+Guidelines:
+- Be efficient with tool calls. Prefer fewer, well-chosen calls over many small ones.
+- Use `bash` with `find`, `ls`, or `cat` to quickly explore before reading individual files.
+- When exploring a codebase, start with high-level commands like `ls -la` or `find . -name "*.rs"`.
+- Read files that are most relevant to the task, not every file you find.
+- Be concise in your responses. Focus on getting things done."#;
 
 #[derive(Parser)]
 #[command(name = "clemini")]
@@ -136,6 +136,7 @@ async fn run_interaction(
             .with_previous_interaction(prev_id)
             .with_system_instruction(SYSTEM_PROMPT)
             .with_content(vec![Content::text(input)])
+            .with_max_function_call_loops(100)
             .create_stream_with_auto_functions()
     } else {
         // First turn
@@ -145,6 +146,7 @@ async fn run_interaction(
             .with_tool_service(tool_service.clone())
             .with_system_instruction(SYSTEM_PROMPT)
             .with_content(vec![Content::text(input)])
+            .with_max_function_call_loops(100)
             .create_stream_with_auto_functions()
     };
 
