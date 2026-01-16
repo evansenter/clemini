@@ -125,7 +125,8 @@ async fn run_interaction(
     input: &str,
     previous_interaction_id: Option<&str>,
 ) -> Result<Option<String>> {
-    // Due to genai-rs's typestate pattern, we need separate code paths for first turn vs continuation
+    // Build the interaction - system instruction must be sent on every turn
+    // (it's NOT inherited via previousInteractionId per genai-rs docs)
     let mut stream = if let Some(prev_id) = previous_interaction_id {
         // Continuation turn - chain to previous interaction
         client
@@ -133,10 +134,11 @@ async fn run_interaction(
             .with_model(MODEL)
             .with_tool_service(tool_service.clone())
             .with_previous_interaction(prev_id)
+            .with_system_instruction(SYSTEM_PROMPT)
             .with_content(vec![Content::text(input)])
             .create_stream_with_auto_functions()
     } else {
-        // First turn - include system instruction
+        // First turn
         client
             .interaction()
             .with_model(MODEL)
