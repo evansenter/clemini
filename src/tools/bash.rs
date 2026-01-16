@@ -81,7 +81,7 @@ impl CallableFunction for BashTool {
                     },
                     "timeout_seconds": {
                         "type": "integer",
-                        "description": "Maximum time to wait for the command (default: 120)"
+                        "description": "Maximum time to wait for the command (default: 60)"
                     }
                 }),
                 vec!["command".to_string()],
@@ -98,7 +98,7 @@ impl CallableFunction for BashTool {
         let timeout_secs = args
             .get("timeout_seconds")
             .and_then(serde_json::Value::as_u64)
-            .unwrap_or(120);
+            .unwrap_or(60);
 
         // Safety check
         if let Some(pattern) = Self::is_blocked(command) {
