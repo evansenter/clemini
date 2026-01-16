@@ -92,54 +92,54 @@ async fn run_repl(client: &Client, tool_service: &Arc<CleminiToolService>) -> Re
                     continue;
                 }
 
-                if input == "/quit" || input == "/exit" {
+                if input == "/quit" || input == "/exit" || input == "/q" {
                     break;
                 }
 
-                if input == "/clear" {
+                if input == "/clear" || input == "/c" {
                     last_interaction_id = None;
                     eprintln!("[conversation cleared]");
                     continue;
                 }
 
-                if input == "/version" {
+                if input == "/version" || input == "/v" {
                     eprintln!("clemini v{}", env!("CARGO_PKG_VERSION"));
                     eprintln!("Model: {MODEL}");
                     continue;
                 }
 
-                if input == "/diff" {
+                if input == "/diff" || input == "/d" {
                     run_git_command(&["diff"], "no uncommitted changes");
                     continue;
                 }
 
-                if input == "/status" {
+                if input == "/status" || input == "/s" {
                     run_git_command(&["status", "--short"], "clean working directory");
                     continue;
                 }
 
-                if input == "/log" {
+                if input == "/log" || input == "/l" {
                     run_git_command(&["log", "--oneline", "-5"], "no commits found");
                     continue;
                 }
 
-                if input == "/help" {
+                if input == "/help" || input == "/h" {
                     eprintln!("Commands:");
-                    eprintln!("  /quit, /exit  Exit the REPL");
-                    eprintln!("  /clear        Clear conversation history");
-                    eprintln!("  /version      Show version and model");
-                    eprintln!("  /diff         Show uncommitted git changes");
-                    eprintln!("  /status       Show git status");
-                    eprintln!("  /log          Show last 5 git commits");
-                    eprintln!("  /help         Show this help message");
+                    eprintln!("  /q, /quit, /exit  Exit the REPL");
+                    eprintln!("  /c, /clear        Clear conversation history");
+                    eprintln!("  /v, /version      Show version and model");
+                    eprintln!("  /d, /diff         Show git diff");
+                    eprintln!("  /s, /status       Show git status");
+                    eprintln!("  /l, /log          Show git log");
+                    eprintln!("  /h, /help         Show this help message");
                     eprintln!();
                     eprintln!("Tools:");
-                    eprintln!("  read_file     Read file contents");
-                    eprintln!("  write_file    Create/overwrite files");
-                    eprintln!("  edit          Surgical string replacement");
-                    eprintln!("  bash          Run shell commands");
-                    eprintln!("  glob          Find files by pattern");
-                    eprintln!("  grep          Search text in files");
+                    eprintln!("  read_file         Read file contents");
+                    eprintln!("  write_file        Create/overwrite files");
+                    eprintln!("  edit              Surgical string replacement");
+                    eprintln!("  bash              Run shell commands");
+                    eprintln!("  glob              Find files by pattern");
+                    eprintln!("  grep              Search text in files");
                     eprintln!();
                     continue;
                 }
