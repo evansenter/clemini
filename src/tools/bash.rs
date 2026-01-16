@@ -50,10 +50,10 @@ impl BashTool {
         Self { cwd }
     }
 
-    fn is_blocked(command: &str) -> Option<&'static str> {
+    fn is_blocked(command: &str) -> Option<String> {
         for pattern in BLOCKED_PATTERNS.iter() {
             if pattern.is_match(command) {
-                return Some("Command matches blocked pattern");
+                return Some(pattern.as_str().to_string());
             }
         }
         None
@@ -101,10 +101,10 @@ impl CallableFunction for BashTool {
             .unwrap_or(120);
 
         // Safety check
-        if let Some(reason) = Self::is_blocked(command) {
-            eprintln!("[bash BLOCKED: {command}]");
+        if let Some(pattern) = Self::is_blocked(command) {
+            eprintln!("[bash BLOCKED: {command}] (matches pattern: {pattern})");
             return Ok(json!({
-                "error": format!("Command blocked: {}", reason),
+                "error": format!("Command blocked: matches pattern '{pattern}'"),
                 "command": command
             }));
         }
