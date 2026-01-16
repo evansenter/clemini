@@ -357,7 +357,7 @@ async fn run_repl(
                         total_session_tokens += result.total_tokens;
                     }
                     Err(e) => {
-                        eprintln!("\n{}", format!("[error: {e}]").red());
+                        eprintln!("\n{}", format!("[error: {e}]").bright_red());
                     }
                 }
             }
@@ -438,7 +438,7 @@ fn check_context_window(total_tokens: u32) {
                 total_tokens,
                 CONTEXT_WINDOW_LIMIT
             )
-            .red()
+            .bright_red()
             .bold()
         );
     } else if ratio > 0.80 {
@@ -597,7 +597,7 @@ async fn run_interaction(
                     for result in results {
                         let has_error = result.result.get("error").is_some();
                         let error_suffix = if has_error {
-                            " ERROR".red().bold().to_string()
+                            " ERROR".bright_red().bold().to_string()
                         } else {
                             String::new()
                         };
@@ -633,12 +633,12 @@ async fn run_interaction(
                     }
                 }
                 AutoFunctionStreamChunk::MaxLoopsReached(_) => {
-                    eprintln!("\n{}", "[max tool loops reached]".red());
+                    eprintln!("\n{}", "[max tool loops reached]".bright_red());
                 }
                 _ => {}
             },
             Err(e) => {
-                eprintln!("\n{}", format!("[stream error: {e}]").red());
+                eprintln!("\n{}", format!("[stream error: {e}]").bright_red());
                 break;
             }
         }
