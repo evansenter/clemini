@@ -181,7 +181,7 @@ async fn run_interaction(
     };
 
     let mut last_id: Option<String> = None;
-    let mut cumulative_tokens: u32 = 0;
+    let mut estimated_context_size: u32 = 0;
     let mut response_text = String::new();
     let skin = MadSkin::default();
 
@@ -206,18 +206,19 @@ async fn run_interaction(
 
                     // Update token count from the response that triggered function calls
                     if let Some(usage) = &resp.usage {
-                        cumulative_tokens = usage.total_input_tokens.unwrap_or(0)
+                        estimated_context_size = usage.total_input_tokens.unwrap_or(0)
                             + usage.total_output_tokens.unwrap_or(0);
                     }
                 }
                 AutoFunctionStreamChunk::FunctionResults(results) => {
-                    // Calculate tokens added by function results
+                    // Calculate tokens added by function results.
+                    // Note: This is a crude estimate (approx. 4 chars per token).
                     let mut tokens_added: u32 = 0;
                     for result in results {
                         let result_str = result.result.to_string();
                         tokens_added += (result_str.len() / 4) as u32; // ~4 chars per token
                     }
-                    cumulative_tokens += tokens_added;
+                    estimated_context_size += tokens_added;
 
                     // Log each result with timing and tokens
                     for result in results {
@@ -229,7 +230,7 @@ async fn run_interaction(
                             "[{}] {:.1}s, {:.1}k tokens (+{}){}",
                             result.name,
                             elapsed_secs,
-                            cumulative_tokens as f32 / 1000.0,
+                            estimated_context_size as f32 / 1000.0,
                             tokens_added,
                             error_suffix
                         );
