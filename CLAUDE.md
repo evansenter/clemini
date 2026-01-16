@@ -46,8 +46,8 @@ src/
 When encountering pain points or API issues with genai-rs, file issues at:
 https://github.com/evansenter/genai-rs/issues
 
-Known issues to file:
-- [ ] `InteractionBuilder` typestate makes conditional chaining awkward (can't reassign after `with_previous_interaction()`)
+Filed issues:
+- [#367](https://github.com/evansenter/genai-rs/issues/367) - `InteractionBuilder` typestate makes conditional chaining awkward
 
 ## Environment
 
