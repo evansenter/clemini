@@ -85,6 +85,16 @@ async fn run_repl(
     cwd: std::path::PathBuf,
 ) -> Result<()> {
     let mut rl = DefaultEditor::new()?;
+
+    let history_path = home::home_dir().map(|mut p| {
+        p.push(".clemini_history");
+        p
+    });
+
+    if let Some(ref path) = history_path {
+        let _ = rl.load_history(path);
+    }
+
     let mut last_interaction_id: Option<String> = None;
 
     loop {
@@ -202,6 +212,10 @@ async fn run_repl(
                 break;
             }
         }
+    }
+
+    if let Some(ref path) = history_path {
+        rl.save_history(path)?;
     }
 
     Ok(())
