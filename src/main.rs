@@ -83,6 +83,29 @@ async fn run_repl(client: &Client, tool_service: &Arc<CleminiToolService>) -> Re
     let mut rl = DefaultEditor::new()?;
     let mut last_interaction_id: Option<String> = None;
 
+    fn run_git_command(args: &[&str], empty_msg: &str) {
+        let output = std::process::Command::new("git").args(args).output();
+
+        match output {
+            Ok(o) => {
+                if o.status.success() {
+                    let stdout = String::from_utf8_lossy(&o.stdout);
+                    if stdout.is_empty() {
+                        eprintln!("[{}]", empty_msg);
+                    } else {
+                        println!("{}", stdout);
+                    }
+                } else {
+                    let stderr = String::from_utf8_lossy(&o.stderr);
+                    eprintln!("[git {} error: {}]", args[0], stderr.trim());
+                }
+            }
+            Err(e) => {
+                eprintln!("[failed to run git {}: {}]", args[0], e);
+            }
+        }
+    }
+
     loop {
         let readline = rl.readline("> ");
         match readline {
@@ -109,55 +132,12 @@ async fn run_repl(client: &Client, tool_service: &Arc<CleminiToolService>) -> Re
                 }
 
                 if input == "/diff" {
-                    let output = std::process::Command::new("git")
-                        .arg("diff")
-                        .output();
-
-                    match output {
-                        Ok(o) => {
-                            if o.status.success() {
-                                let stdout = String::from_utf8_lossy(&o.stdout);
-                                if stdout.is_empty() {
-                                    eprintln!("[no uncommitted changes]");
-                                } else {
-                                    println!("{}", stdout);
-                                }
-                            } else {
-                                let stderr = String::from_utf8_lossy(&o.stderr);
-                                eprintln!("[git diff error: {}]", stderr.trim());
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!("[failed to run git diff: {}]", e);
-                        }
-                    }
+                    run_git_command(&["diff"], "no uncommitted changes");
                     continue;
                 }
 
                 if input == "/status" {
-                    let output = std::process::Command::new("git")
-                        .arg("status")
-                        .arg("--short")
-                        .output();
-
-                    match output {
-                        Ok(o) => {
-                            if o.status.success() {
-                                let stdout = String::from_utf8_lossy(&o.stdout);
-                                if stdout.is_empty() {
-                                    eprintln!("[clean working directory]");
-                                } else {
-                                    println!("{}", stdout);
-                                }
-                            } else {
-                                let stderr = String::from_utf8_lossy(&o.stderr);
-                                eprintln!("[git status error: {}]", stderr.trim());
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!("[failed to run git status: {}]", e);
-                        }
-                    }
+                    run_git_command(&["status", "--short"], "clean working directory");
                     continue;
                 }
 
