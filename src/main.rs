@@ -107,18 +107,18 @@ async fn run_repl(
                 }
 
                 if input == "/version" || input == "/v" {
-                    eprintln!("clemini v{}", env!("CARGO_PKG_VERSION"));
-                    eprintln!("Model: {MODEL}");
+                    println!("clemini v{}", env!("CARGO_PKG_VERSION"));
+                    println!("Model: {MODEL}");
                     continue;
                 }
 
                 if input == "/model" || input == "/m" {
-                    eprintln!("{MODEL}");
+                    println!("{MODEL}");
                     continue;
                 }
 
                 if input == "/pwd" || input == "/cwd" {
-                    eprintln!("{}", cwd.display());
+                    println!("{}", cwd.display());
                     continue;
                 }
 
