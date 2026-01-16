@@ -70,9 +70,13 @@ async fn main() -> Result<()> {
     let cwd = std::fs::canonicalize(&args.cwd)?;
     let tool_service = Arc::new(CleminiToolService::new(cwd.clone()));
 
-    eprintln!("clemini v{}", env!("CARGO_PKG_VERSION"));
-    eprintln!("Working directory: {}", cwd.display());
-    eprintln!("Model: {MODEL}");
+    eprintln!(
+        "{} v{} | {} | {}",
+        "clemini".bold(),
+        env!("CARGO_PKG_VERSION").cyan(),
+        MODEL.green(),
+        cwd.display().to_string().yellow()
+    );
     eprintln!();
 
     let mut piped_input = String::new();
@@ -149,8 +153,11 @@ async fn run_repl(
                 }
 
                 if input == "/version" || input == "/v" {
-                    println!("clemini v{}", env!("CARGO_PKG_VERSION"));
-                    println!("Model: {MODEL}");
+                    println!(
+                        "clemini v{} | {}",
+                        env!("CARGO_PKG_VERSION").cyan(),
+                        MODEL.green()
+                    );
                     continue;
                 }
 
@@ -160,7 +167,7 @@ async fn run_repl(
                 }
 
                 if input == "/pwd" || input == "/cwd" {
-                    println!("{}", cwd.display());
+                    println!("{}", cwd.display().to_string().yellow());
                     continue;
                 }
 
