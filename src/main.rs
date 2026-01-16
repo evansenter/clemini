@@ -155,6 +155,9 @@ async fn run_repl(
                     eprintln!("  /b, /branch       Show git branches");
                     eprintln!("  /h, /help         Show this help message");
                     eprintln!();
+                    eprintln!("Shell escape:");
+                    eprintln!("  ! <command>       Run a shell command directly");
+                    eprintln!();
                     eprintln!("Tools:");
                     eprintln!("  read_file         Read file contents");
                     eprintln!("  write_file        Create/overwrite files");
@@ -163,6 +166,15 @@ async fn run_repl(
                     eprintln!("  glob              Find files by pattern");
                     eprintln!("  grep              Search text in files");
                     eprintln!();
+                    continue;
+                }
+
+                if input.starts_with('!') {
+                    let cmd = &input[1..].trim();
+                    if !cmd.is_empty() {
+                        rl.add_history_entry(input)?;
+                        run_shell_command(cmd);
+                    }
                     continue;
                 }
 
@@ -214,6 +226,31 @@ fn run_git_command(args: &[&str], empty_msg: &str) {
         }
         Err(e) => {
             eprintln!("[failed to run git {}: {}]", args[0], e);
+        }
+    }
+}
+
+fn run_shell_command(command: &str) {
+    let mut cmd = if cfg!(target_os = "windows") {
+        let mut c = std::process::Command::new("cmd");
+        c.args(["/C", command]);
+        c
+    } else {
+        let mut c = std::process::Command::new("sh");
+        c.args(["-c", command]);
+        c
+    };
+
+    match cmd.status() {
+        Ok(status) => {
+            if !status.success() {
+                if let Some(code) = status.code() {
+                    eprintln!("[process exited with code: {code}]");
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("[failed to run command: {e}]");
         }
     }
 }
