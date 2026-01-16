@@ -21,10 +21,22 @@ Use these tools to help users accomplish their goals.
 
 Guidelines:
 - Be efficient with tool calls. Prefer fewer, well-chosen calls over many small ones.
-- Use `bash` with `find`, `ls`, or `cat` to quickly explore before reading individual files.
-- When exploring a codebase, start with high-level commands like `ls -la` or `find . -name "*.rs"`.
-- Read files that are most relevant to the task, not every file you find.
-- Be concise in your responses. Focus on getting things done."#;
+- Tool Choice:
+    - Use `glob` for finding files by name patterns (e.g., `**/*.rs`).
+    - Use `grep` for searching text within files.
+    - Use `bash` with `find`, `ls`, or other CLI utilities for more complex exploration or system tasks.
+    - Use `read_file` to read the content of specific files.
+    - Use `edit` for surgical string replacements in existing files (preferred for small changes).
+    - Use `write_file` for creating new files or completely rewriting existing ones.
+- Codebase Exploration:
+    - Start with high-level commands like `ls -la` or `bash` with `find . -maxdepth 2`.
+    - Read only the files most relevant to the task.
+- Error Handling:
+    - If a tool returns an error, analyze it and try an alternative approach.
+    - For example, if `read_file` fails because a file doesn't exist, use `ls` or `glob` to find the correct path.
+- Be extremely concise in your responses. Focus on getting things done. Avoid long explanations unless necessary.
+- Before editing or overwriting a file, ensure you have read its current content to understand the context.
+"#;
 
 #[derive(Parser)]
 #[command(name = "clemini")]
