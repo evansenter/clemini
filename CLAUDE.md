@@ -46,7 +46,7 @@ Debugging: `LOUD_WIRE=1` logs all HTTP requests/responses.
 
 - Rust 2024 edition (let chains, etc.)
 - Tools return JSON: success data or `{"error": "..."}`
-- Logging format: `[tool_name] 0.5s, 1.2k tokens (+50)` per call, `[total: N.Nk tokens (X in + Y out)]` at end
+- Logging format: `[tool_name] 0.5s, 1.2k tokens (+50)` per call, `[X→Y tok]` at end
 
 ## Development Process
 

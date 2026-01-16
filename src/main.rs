@@ -315,8 +315,7 @@ async fn run_interaction(
                         let total_in = usage.total_input_tokens.unwrap_or(0);
                         let total_out = usage.total_output_tokens.unwrap_or(0);
                         eprintln!(
-                            "[total: {:.1}k tokens ({} in + {} out)]",
-                            f64::from(total_in + total_out) / 1000.0,
+                            "[{}→{} tok]",
                             total_in,
                             total_out
                         );
