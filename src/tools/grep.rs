@@ -9,6 +9,8 @@ pub struct GrepTool {
     cwd: PathBuf,
 }
 
+const DEFAULT_EXCLUDES: &[&str] = &[".git", "node_modules", "target", "__pycache__", ".venv"];
+
 impl GrepTool {
     pub fn new(cwd: PathBuf) -> Self {
         Self { cwd }
@@ -73,7 +75,22 @@ impl CallableFunction for GrepTool {
         let pattern_str = full_pattern.to_string_lossy();
 
         let file_paths: Vec<PathBuf> = match glob(&pattern_str) {
-            Ok(paths) => paths.filter_map(|p| p.ok()).filter(|p| p.is_file()).collect(),
+            Ok(paths) => paths
+                .filter_map(|p| p.ok())
+                .filter(|p| {
+                    if !p.is_file() {
+                        return false;
+                    }
+                    // Skip excluded directories
+                    !p.components().any(|c| {
+                        if let std::path::Component::Normal(s) = c {
+                            DEFAULT_EXCLUDES.contains(&s.to_string_lossy().as_ref())
+                        } else {
+                            false
+                        }
+                    })
+                })
+                .collect(),
             Err(e) => {
                 return Ok(json!({
                     "error": format!("Invalid glob pattern: {}", e)
