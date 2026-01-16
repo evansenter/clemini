@@ -6,8 +6,9 @@ use genai_rs::{AutoFunctionStreamChunk, Client, Content};
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
 use std::env;
-use std::io::{self, IsTerminal, Read};
+use std::io::{self, IsTerminal, Read, Write};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use termimad::MadSkin;
 
 mod tools;
@@ -409,6 +410,7 @@ async fn run_interaction(
     let mut estimated_context_size: u32 = 0;
     let mut response_text = String::new();
     let skin = MadSkin::default();
+    let mut spinner: Option<(tokio::task::JoinHandle<()>, Arc<AtomicBool>)> = None;
 
     while let Some(event) = stream.next().await {
         match event {
@@ -434,8 +436,39 @@ async fn run_interaction(
                         estimated_context_size = usage.total_input_tokens.unwrap_or(0)
                             + usage.total_output_tokens.unwrap_or(0);
                     }
+
+                    // Start spinner
+                    if let Some((h, stop)) = spinner.take() {
+                        stop.store(true, Ordering::SeqCst);
+                        let _ = h.await;
+                    }
+
+                    let stop_flag = Arc::new(AtomicBool::new(false));
+                    let stop_flag_clone = stop_flag.clone();
+                    spinner = Some((
+                        tokio::spawn(async move {
+                            let chars = ['|', '/', '-', '\\'];
+                            let mut i = 0;
+                            while !stop_flag_clone.load(Ordering::SeqCst) {
+                                eprint!("\r{}", chars[i]);
+                                let _ = io::stderr().flush();
+                                i = (i + 1) % chars.len();
+                                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                            }
+                            // Clear spinner
+                            eprint!("\r\x1B[K");
+                            let _ = io::stderr().flush();
+                        }),
+                        stop_flag,
+                    ));
                 }
                 AutoFunctionStreamChunk::FunctionResults(results) => {
+                    // Stop spinner
+                    if let Some((h, stop)) = spinner.take() {
+                        stop.store(true, Ordering::SeqCst);
+                        let _ = h.await;
+                    }
+
                     // Calculate tokens added by function results.
                     // Note: This is a crude estimate (approx. 4 chars per token).
                     let mut tokens_added: u32 = 0;
@@ -503,6 +536,12 @@ async fn run_interaction(
     if !response_text.is_empty() {
         skin.print_text(&response_text);
         println!();
+    }
+
+    // Cleanup spinner if it's still running
+    if let Some((h, stop)) = spinner.take() {
+        stop.store(true, Ordering::SeqCst);
+        let _ = h.await;
     }
 
     if estimated_context_size > 0 {
