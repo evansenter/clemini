@@ -4,6 +4,7 @@ mod glob;
 mod grep;
 mod list_directory;
 mod read;
+mod web_fetch;
 mod write;
 
 use genai_rs::{CallableFunction, ToolService};
@@ -16,6 +17,7 @@ pub use glob::GlobTool;
 pub use grep::GrepTool;
 pub use list_directory::ListDirectoryTool;
 pub use read::ReadTool;
+pub use web_fetch::WebFetchTool;
 pub use write::WriteTool;
 
 /// Tool service that provides file and command execution capabilities.
@@ -41,6 +43,7 @@ impl ToolService for CleminiToolService {
     /// - `glob`: Find files by pattern
     /// - `grep`: Search for text in files
     /// - `list_directory`: List entries in a directory
+    /// - `web_fetch`: Fetch web content
     fn tools(&self) -> Vec<Arc<dyn CallableFunction>> {
         vec![
             Arc::new(ReadTool::new(self.cwd.clone())),
@@ -50,6 +53,7 @@ impl ToolService for CleminiToolService {
             Arc::new(GlobTool::new(self.cwd.clone())),
             Arc::new(GrepTool::new(self.cwd.clone())),
             Arc::new(ListDirectoryTool::new(self.cwd.clone())),
+            Arc::new(WebFetchTool::new(self.cwd.clone())),
         ]
     }
 }
