@@ -12,7 +12,7 @@ mod tools;
 
 use tools::CleminiToolService;
 
-const MODEL: &str = "gemini-3.0-flash-preview";
+const MODEL: &str = "gemini-3-flash-preview";
 
 const SYSTEM_PROMPT: &str = r#"You are clemini, a coding assistant that helps users with software engineering tasks.
 

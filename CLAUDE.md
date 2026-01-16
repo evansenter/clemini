@@ -52,7 +52,7 @@ Filed issues:
 ## Environment
 
 - `GEMINI_API_KEY` - Required for API access
-- Model: `gemini-3.0-flash-preview`
+- Model: `gemini-3-flash-preview`
 
 ## Conventions
 
