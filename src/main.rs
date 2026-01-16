@@ -89,6 +89,23 @@ async fn run_repl(client: &Client, tool_service: &Arc<CleminiToolService>) -> Re
                     continue;
                 }
 
+                if input == "/help" {
+                    eprintln!("Commands:");
+                    eprintln!("  /quit, /exit  Exit the REPL");
+                    eprintln!("  /clear        Clear conversation history");
+                    eprintln!("  /help         Show this help message");
+                    eprintln!();
+                    eprintln!("Tools:");
+                    eprintln!("  read_file     Read file contents");
+                    eprintln!("  write_file    Create/overwrite files");
+                    eprintln!("  edit          Surgical string replacement");
+                    eprintln!("  bash          Run shell commands");
+                    eprintln!("  glob          Find files by pattern");
+                    eprintln!("  grep          Search text in files");
+                    eprintln!();
+                    continue;
+                }
+
                 rl.add_history_entry(input)?;
 
                 match run_interaction(client, tool_service, input, last_interaction_id.as_deref())
