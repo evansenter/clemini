@@ -50,6 +50,10 @@ struct Args {
     #[arg(short, long)]
     prompt: Option<String>,
 
+    /// Read prompt from a file
+    #[arg(short, long)]
+    file: Option<std::path::PathBuf>,
+
     /// Working directory
     #[arg(short = 'C', long, default_value = ".")]
     cwd: String,
@@ -76,14 +80,23 @@ async fn main() -> Result<()> {
     }
     let piped_input = piped_input.trim();
 
+    let mut user_prompt = args.prompt;
+    if let Some(file_path) = args.file {
+        let file_content = std::fs::read_to_string(file_path)?;
+        user_prompt = Some(match user_prompt {
+            Some(p) => format!("{p}\n---\n{file_content}"),
+            None => file_content,
+        });
+    }
+
     let combined_prompt = if !piped_input.is_empty() {
-        if let Some(user_prompt) = args.prompt {
-            Some(format!("{piped_input}\n---\n{user_prompt}"))
+        if let Some(p) = user_prompt {
+            Some(format!("{piped_input}\n---\n{p}"))
         } else {
             Some(piped_input.to_string())
         }
     } else {
-        args.prompt
+        user_prompt
     };
 
     if let Some(prompt) = combined_prompt {
