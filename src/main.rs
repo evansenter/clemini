@@ -73,13 +73,17 @@ async fn main() -> Result<()> {
         run_interaction(&client, &tool_service, &prompt, None).await?;
     } else {
         // Interactive REPL mode
-        run_repl(&client, &tool_service).await?;
+        run_repl(&client, &tool_service, cwd).await?;
     }
 
     Ok(())
 }
 
-async fn run_repl(client: &Client, tool_service: &Arc<CleminiToolService>) -> Result<()> {
+async fn run_repl(
+    client: &Client,
+    tool_service: &Arc<CleminiToolService>,
+    cwd: std::path::PathBuf,
+) -> Result<()> {
     let mut rl = DefaultEditor::new()?;
     let mut last_interaction_id: Option<String> = None;
 
@@ -108,6 +112,11 @@ async fn run_repl(client: &Client, tool_service: &Arc<CleminiToolService>) -> Re
                     continue;
                 }
 
+                if input == "/pwd" || input == "/cwd" {
+                    eprintln!("{}", cwd.display());
+                    continue;
+                }
+
                 if input == "/diff" || input == "/d" {
                     run_git_command(&["diff"], "no uncommitted changes");
                     continue;
@@ -133,6 +142,7 @@ async fn run_repl(client: &Client, tool_service: &Arc<CleminiToolService>) -> Re
                     eprintln!("  /q, /quit, /exit  Exit the REPL");
                     eprintln!("  /c, /clear        Clear conversation history");
                     eprintln!("  /v, /version      Show version and model");
+                    eprintln!("  /pwd, /cwd        Show current working directory");
                     eprintln!("  /d, /diff         Show git diff");
                     eprintln!("  /s, /status       Show git status");
                     eprintln!("  /l, /log          Show git log");
