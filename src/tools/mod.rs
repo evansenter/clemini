@@ -2,6 +2,7 @@ mod bash;
 mod edit;
 mod glob;
 mod grep;
+mod list_directory;
 mod read;
 mod write;
 
@@ -13,6 +14,7 @@ pub use bash::BashTool;
 pub use edit::EditTool;
 pub use glob::GlobTool;
 pub use grep::GrepTool;
+pub use list_directory::ListDirectoryTool;
 pub use read::ReadTool;
 pub use write::WriteTool;
 
@@ -38,6 +40,7 @@ impl ToolService for CleminiToolService {
     /// - `bash`: Execute shell commands
     /// - `glob`: Find files by pattern
     /// - `grep`: Search for text in files
+    /// - `list_directory`: List entries in a directory
     fn tools(&self) -> Vec<Arc<dyn CallableFunction>> {
         vec![
             Arc::new(ReadTool::new(self.cwd.clone())),
@@ -46,6 +49,7 @@ impl ToolService for CleminiToolService {
             Arc::new(BashTool::new(self.cwd.clone(), self.bash_timeout)),
             Arc::new(GlobTool::new(self.cwd.clone())),
             Arc::new(GrepTool::new(self.cwd.clone())),
+            Arc::new(ListDirectoryTool::new(self.cwd.clone())),
         ]
     }
 }
