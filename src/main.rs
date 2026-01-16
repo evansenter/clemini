@@ -1,5 +1,6 @@
 use anyhow::Result;
 use clap::Parser;
+use colored::Colorize;
 use futures_util::StreamExt;
 use genai_rs::{AutoFunctionStreamChunk, Client, Content};
 use rustyline::DefaultEditor;
@@ -197,7 +198,7 @@ async fn run_repl(
                         last_interaction_id = new_id;
                     }
                     Err(e) => {
-                        eprintln!("\n[error: {e}]");
+                        eprintln!("\n{}", format!("[error: {e}]").red());
                     }
                 }
             }
@@ -344,13 +345,17 @@ async fn run_interaction(
                     // Log each result with timing and tokens
                     for result in results {
                         let has_error = result.result.get("error").is_some();
-                        let error_suffix = if has_error { " ERROR" } else { "" };
+                        let error_suffix = if has_error {
+                            " ERROR".red().bold().to_string()
+                        } else {
+                            String::new()
+                        };
                         let elapsed_secs = result.duration.as_secs_f32();
 
                         eprintln!(
-                            "[{}] {:.1}s, {:.1}k tokens (+{}){}",
-                            result.name,
-                            elapsed_secs,
+                            "[{}] {}, {:.1}k tokens (+{}){}",
+                            result.name.cyan(),
+                            format!("{:.1}s", elapsed_secs).yellow(),
                             f64::from(estimated_context_size) / 1000.0,
                             tokens_added,
                             error_suffix
@@ -379,12 +384,12 @@ async fn run_interaction(
                     }
                 }
                 AutoFunctionStreamChunk::MaxLoopsReached(_) => {
-                    eprintln!("\n[max tool loops reached]");
+                    eprintln!("\n{}", "[max tool loops reached]".red());
                 }
                 _ => {}
             },
             Err(e) => {
-                eprintln!("\n[stream error: {e}]");
+                eprintln!("\n{}", format!("[stream error: {e}]").red());
                 break;
             }
         }
