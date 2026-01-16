@@ -67,7 +67,7 @@ impl CallableFunction for GrepTool {
             Ok(r) => r,
             Err(e) => {
                 return Ok(json!({
-                    "error": format!("Invalid regex pattern: {}. Ensure you are using valid regex syntax. Suggestions: check for unclosed parentheses, invalid escape sequences, or other regex syntax errors.", e)
+                    "error": format!("Invalid regex pattern '{}': {}. Ensure you are using valid Rust regex syntax. Suggestions: check for unclosed parentheses, invalid escape sequences, or other regex syntax errors. Note: use '(?i)' for case-insensitive search.", pattern, e)
                 }));
             }
         };
