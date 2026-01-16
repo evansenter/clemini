@@ -1,4 +1,7 @@
 mod bash;
+mod edit;
+mod glob;
+mod grep;
 mod read;
 mod write;
 
@@ -7,6 +10,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 pub use bash::BashTool;
+pub use edit::EditTool;
+pub use glob::GlobTool;
+pub use grep::GrepTool;
 pub use read::ReadTool;
 pub use write::WriteTool;
 
@@ -26,7 +32,10 @@ impl ToolService for CleminiToolService {
         vec![
             Arc::new(ReadTool::new(self.cwd.clone())),
             Arc::new(WriteTool::new(self.cwd.clone())),
+            Arc::new(EditTool::new(self.cwd.clone())),
             Arc::new(BashTool::new(self.cwd.clone())),
+            Arc::new(GlobTool::new(self.cwd.clone())),
+            Arc::new(GrepTool::new(self.cwd.clone())),
         ]
     }
 }

@@ -1,0 +1,127 @@
+use async_trait::async_trait;
+use genai_rs::{CallableFunction, FunctionDeclaration, FunctionError, FunctionParameters};
+use serde_json::{Value, json};
+use std::path::PathBuf;
+
+use super::validate_path;
+
+pub struct EditTool {
+    cwd: PathBuf,
+}
+
+impl EditTool {
+    pub fn new(cwd: PathBuf) -> Self {
+        Self { cwd }
+    }
+
+    fn resolve_path(&self, file_path: &str) -> PathBuf {
+        let path = PathBuf::from(file_path);
+        if path.is_absolute() {
+            path
+        } else {
+            self.cwd.join(path)
+        }
+    }
+}
+
+#[async_trait]
+impl CallableFunction for EditTool {
+    fn declaration(&self) -> FunctionDeclaration {
+        FunctionDeclaration::new(
+            "edit".to_string(),
+            "Replace a specific string in a file with new content. The old_string must match exactly and uniquely in the file. Use this for surgical edits instead of rewriting entire files.".to_string(),
+            FunctionParameters::new(
+                "object".to_string(),
+                json!({
+                    "file_path": {
+                        "type": "string",
+                        "description": "Path to the file to edit"
+                    },
+                    "old_string": {
+                        "type": "string",
+                        "description": "The exact string to find and replace (must be unique in the file)"
+                    },
+                    "new_string": {
+                        "type": "string",
+                        "description": "The string to replace it with"
+                    }
+                }),
+                vec!["file_path".to_string(), "old_string".to_string(), "new_string".to_string()],
+            ),
+        )
+    }
+
+    async fn call(&self, args: Value) -> Result<Value, FunctionError> {
+        let file_path = args
+            .get("file_path")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| FunctionError::ArgumentMismatch("Missing file_path".to_string()))?;
+
+        let old_string = args
+            .get("old_string")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| FunctionError::ArgumentMismatch("Missing old_string".to_string()))?;
+
+        let new_string = args
+            .get("new_string")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| FunctionError::ArgumentMismatch("Missing new_string".to_string()))?;
+
+        let raw_path = self.resolve_path(file_path);
+
+        // Safety check - must be within cwd
+        let path = match validate_path(&raw_path, &self.cwd) {
+            Ok(p) => p,
+            Err(e) => {
+                return Ok(json!({
+                    "error": format!("Access denied: {}", e)
+                }));
+            }
+        };
+
+        // Read the file
+        let content = match tokio::fs::read_to_string(&path).await {
+            Ok(c) => c,
+            Err(e) => {
+                return Ok(json!({
+                    "error": format!("Failed to read {}: {}", path.display(), e)
+                }));
+            }
+        };
+
+        // Check that old_string exists and is unique
+        let matches: Vec<_> = content.match_indices(old_string).collect();
+
+        if matches.is_empty() {
+            return Ok(json!({
+                "error": "old_string not found in file",
+                "file_path": file_path
+            }));
+        }
+
+        if matches.len() > 1 {
+            return Ok(json!({
+                "error": format!("old_string found {} times in file - must be unique. Provide more context to make it unique.", matches.len()),
+                "file_path": file_path,
+                "occurrences": matches.len()
+            }));
+        }
+
+        // Perform the replacement
+        let new_content = content.replacen(old_string, new_string, 1);
+
+        // Write the file
+        match tokio::fs::write(&path, &new_content).await {
+            Ok(()) => Ok(json!({
+                "file_path": file_path,
+                "success": true,
+                "old_length": old_string.len(),
+                "new_length": new_string.len(),
+                "file_size": new_content.len()
+            })),
+            Err(e) => Ok(json!({
+                "error": format!("Failed to write {}: {}", path.display(), e)
+            })),
+        }
+    }
+}
