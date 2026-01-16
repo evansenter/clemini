@@ -5,8 +5,8 @@ use genai_rs::{AutoFunctionStreamChunk, Client, Content};
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
 use std::env;
-use std::io::{self, Write};
 use std::sync::Arc;
+use termimad::MadSkin;
 
 mod tools;
 
@@ -152,14 +152,14 @@ async fn run_interaction(
 
     let mut last_id: Option<String> = None;
     let mut cumulative_tokens: u32 = 0;
+    let mut response_text = String::new();
 
     while let Some(event) = stream.next().await {
         match event {
             Ok(event) => match &event.chunk {
                 AutoFunctionStreamChunk::Delta(content) => {
                     if let Some(text) = content.as_text() {
-                        print!("{}", text);
-                        io::stdout().flush()?;
+                        response_text.push_str(text);
                     }
                 }
                 AutoFunctionStreamChunk::ExecutingFunctions(resp) => {
@@ -196,6 +196,13 @@ async fn run_interaction(
                 }
                 AutoFunctionStreamChunk::Complete(resp) => {
                     last_id = resp.id.clone();
+
+                    // Render accumulated text as markdown
+                    if !response_text.is_empty() {
+                        let skin = MadSkin::default();
+                        skin.print_text(&response_text);
+                        response_text.clear();
+                    }
                     println!();
 
                     // Log final token usage
