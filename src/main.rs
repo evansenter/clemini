@@ -174,6 +174,7 @@ async fn run_repl(
     }
 
     let mut last_interaction_id: Option<String> = None;
+    let mut last_estimated_context_size: u32 = 0;
 
     loop {
         let readline = rl.readline("> ");
@@ -190,6 +191,7 @@ async fn run_repl(
 
                 if input == "/clear" || input == "/c" {
                     last_interaction_id = None;
+                    last_estimated_context_size = 0;
                     eprintln!("[conversation cleared]");
                     continue;
                 }
@@ -233,12 +235,24 @@ async fn run_repl(
                     continue;
                 }
 
+                if input == "/tokens" || input == "/t" {
+                    println!(
+                        "Estimated context size: {}/{} tokens ({:.1}%)",
+                        last_estimated_context_size,
+                        CONTEXT_WINDOW_LIMIT,
+                        (f64::from(last_estimated_context_size) / f64::from(CONTEXT_WINDOW_LIMIT))
+                            * 100.0
+                    );
+                    continue;
+                }
+
                 if input == "/help" || input == "/h" {
                     eprintln!("Commands:");
                     eprintln!("  /q, /quit, /exit  Exit the REPL");
                     eprintln!("  /c, /clear        Clear conversation history");
                     eprintln!("  /v, /version      Show version and model");
                     eprintln!("  /m, /model        Show model name");
+                    eprintln!("  /t, /tokens       Show estimated context size");
                     eprintln!("  /pwd, /cwd        Show current working directory");
                     eprintln!("  /d, /diff         Show git diff");
                     eprintln!("  /s, /status       Show git status");
@@ -281,8 +295,9 @@ async fn run_repl(
                 )
                 .await
                 {
-                    Ok(new_id) => {
+                    Ok((new_id, context_size)) => {
                         last_interaction_id = new_id;
+                        last_estimated_context_size = context_size;
                     }
                     Err(e) => {
                         eprintln!("\n{}", format!("[error: {e}]").red());
@@ -443,7 +458,7 @@ async fn run_interaction(
     previous_interaction_id: Option<&str>,
     model: &str,
     stream_output: bool,
-) -> Result<Option<String>> {
+) -> Result<(Option<String>, u32)> {
     // Build the interaction - system instruction must be sent on every turn
     // (it's NOT inherited via previousInteractionId per genai-rs docs)
     let interaction = client
@@ -570,5 +585,5 @@ async fn run_interaction(
         check_context_window(estimated_context_size);
     }
 
-    Ok(last_id)
+    Ok((last_id, estimated_context_size))
 }
