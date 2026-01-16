@@ -46,6 +46,7 @@ Guidelines:
 #[derive(serde::Deserialize, Default)]
 struct Config {
     model: Option<String>,
+    bash_timeout: Option<u64>,
 }
 
 fn load_config() -> Config {
@@ -82,6 +83,10 @@ struct Args {
     #[arg(short, long)]
     model: Option<String>,
 
+    /// Timeout for bash commands in seconds
+    #[arg(long)]
+    timeout: Option<u64>,
+
     /// Stream raw text output (non-interactive mode)
     #[arg(long)]
     stream: bool,
@@ -97,11 +102,13 @@ async fn main() -> Result<()> {
         .or(config.model)
         .unwrap_or_else(|| DEFAULT_MODEL.to_string());
 
+    let bash_timeout = args.timeout.or(config.bash_timeout).unwrap_or(60);
+
     let api_key = env::var("GEMINI_API_KEY").expect("GEMINI_API_KEY environment variable not set");
     let client = Client::new(api_key);
 
     let cwd = std::fs::canonicalize(&args.cwd)?;
-    let tool_service = Arc::new(CleminiToolService::new(cwd.clone()));
+    let tool_service = Arc::new(CleminiToolService::new(cwd.clone(), bash_timeout));
 
     eprintln!(
         "{} v{} | {} | {}",

@@ -19,11 +19,12 @@ pub use write::WriteTool;
 /// Tool service that provides file and command execution capabilities.
 pub struct CleminiToolService {
     cwd: PathBuf,
+    bash_timeout: u64,
 }
 
 impl CleminiToolService {
-    pub fn new(cwd: PathBuf) -> Self {
-        Self { cwd }
+    pub fn new(cwd: PathBuf, bash_timeout: u64) -> Self {
+        Self { cwd, bash_timeout }
     }
 }
 
@@ -42,7 +43,7 @@ impl ToolService for CleminiToolService {
             Arc::new(ReadTool::new(self.cwd.clone())),
             Arc::new(WriteTool::new(self.cwd.clone())),
             Arc::new(EditTool::new(self.cwd.clone())),
-            Arc::new(BashTool::new(self.cwd.clone())),
+            Arc::new(BashTool::new(self.cwd.clone(), self.bash_timeout)),
             Arc::new(GlobTool::new(self.cwd.clone())),
             Arc::new(GrepTool::new(self.cwd.clone())),
         ]

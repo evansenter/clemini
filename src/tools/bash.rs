@@ -43,11 +43,12 @@ static CAUTION_PATTERNS: LazyLock<Vec<&str>> = LazyLock::new(|| {
 
 pub struct BashTool {
     cwd: PathBuf,
+    timeout_secs: u64,
 }
 
 impl BashTool {
-    pub fn new(cwd: PathBuf) -> Self {
-        Self { cwd }
+    pub fn new(cwd: PathBuf, timeout_secs: u64) -> Self {
+        Self { cwd, timeout_secs }
     }
 
     fn is_blocked(command: &str) -> Option<String> {
@@ -81,7 +82,7 @@ impl CallableFunction for BashTool {
                     },
                     "timeout_seconds": {
                         "type": "integer",
-                        "description": "Maximum time to wait for the command (default: 60)"
+                        "description": format!("Maximum time to wait for the command (default: {})", self.timeout_secs)
                     }
                 }),
                 vec!["command".to_string()],
@@ -98,7 +99,7 @@ impl CallableFunction for BashTool {
         let timeout_secs = args
             .get("timeout_seconds")
             .and_then(serde_json::Value::as_u64)
-            .unwrap_or(60);
+            .unwrap_or(self.timeout_secs);
 
         // Safety check
         if let Some(pattern) = Self::is_blocked(command) {
