@@ -67,7 +67,7 @@ impl CallableFunction for GrepTool {
             Ok(r) => r,
             Err(e) => {
                 return Ok(json!({
-                    "error": format!("Invalid regex pattern: {}", e)
+                    "error": format!("Invalid regex pattern: {}. Ensure you are using valid regex syntax. Suggestions: check for unclosed parentheses, invalid escape sequences, or other regex syntax errors.", e)
                 }));
             }
         };
@@ -77,25 +77,34 @@ impl CallableFunction for GrepTool {
         let pattern_str = full_pattern.to_string_lossy();
 
         let file_paths: Vec<PathBuf> = match glob(&pattern_str) {
-            Ok(paths) => paths
-                .filter_map(std::result::Result::ok)
-                .filter(|p| {
-                    if !p.is_file() {
-                        return false;
-                    }
-                    // Skip excluded directories
-                    !p.components().any(|c| {
-                        if let std::path::Component::Normal(s) = c {
-                            DEFAULT_EXCLUDES.contains(&s.to_string_lossy().as_ref())
-                        } else {
-                            false
+            Ok(paths) => {
+                let paths: Vec<PathBuf> = paths
+                    .filter_map(std::result::Result::ok)
+                    .filter(|p| {
+                        if !p.is_file() {
+                            return false;
                         }
+                        // Skip excluded directories
+                        !p.components().any(|c| {
+                            if let std::path::Component::Normal(s) = c {
+                                DEFAULT_EXCLUDES.contains(&s.to_string_lossy().as_ref())
+                            } else {
+                                false
+                            }
+                        })
                     })
-                })
-                .collect(),
+                    .collect();
+
+                if paths.is_empty() {
+                    return Ok(json!({
+                        "error": format!("No files matched the pattern '{}'. Suggestions: ensure the pattern is correct, check that the files exist, and that they are not in excluded directories (e.g., .git, node_modules).", file_pattern)
+                    }));
+                }
+                paths
+            }
             Err(e) => {
                 return Ok(json!({
-                    "error": format!("Invalid glob pattern: {}", e)
+                    "error": format!("Invalid glob pattern: {}. Ensure you are using valid glob syntax (e.g., '**/*.rs', 'src/*.ts'). Suggestions: check for invalid characters or incorrectly nested patterns.", e)
                 }));
             }
         };
@@ -145,6 +154,21 @@ impl CallableFunction for GrepTool {
                     }
                 }
             }
+        }
+
+        if files_searched == 0 {
+            return Ok(json!({
+                "error": format!("No searchable text files were found matching '{}'. Suggestions: check file permissions and ensure files are not binary.", file_pattern)
+            }));
+        }
+
+        if matches.is_empty() {
+            return Ok(json!({
+                "error": format!("No matches found for pattern '{}' in files matching '{}'. Suggestions: check the pattern for typos, ensure the correct case is used, or try a simpler search pattern to find the relevant section.", pattern, file_pattern),
+                "pattern": pattern,
+                "file_pattern": file_pattern,
+                "files_searched": files_searched
+            }));
         }
 
         Ok(json!({
