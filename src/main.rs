@@ -14,7 +14,7 @@ mod tools;
 
 use tools::CleminiToolService;
 
-const MODEL: &str = "gemini-3-flash-preview";
+const DEFAULT_MODEL: &str = "gemini-3-flash-preview";
 const CONTEXT_WINDOW_LIMIT: u32 = 1_000_000;
 
 const SYSTEM_PROMPT: &str = r"You are clemini, a coding assistant that helps users with software engineering tasks.
@@ -42,6 +42,24 @@ Guidelines:
 - Before editing or overwriting a file, ensure you have read its current content to understand the context.
 ";
 
+#[derive(serde::Deserialize, Default)]
+struct Config {
+    model: Option<String>,
+}
+
+fn load_config() -> Config {
+    home::home_dir()
+        .map(|mut p| {
+            p.push(".clemini");
+            p.push("config.toml");
+            p
+        })
+        .filter(|p| p.exists())
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|s| toml::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
 #[derive(Parser)]
 #[command(name = "clemini")]
 #[command(version)]
@@ -58,11 +76,21 @@ struct Args {
     /// Working directory
     #[arg(short = 'C', long, default_value = ".")]
     cwd: String,
+
+    /// Model to use
+    #[arg(short, long)]
+    model: Option<String>,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+    let config = load_config();
+
+    let model = args
+        .model
+        .or(config.model)
+        .unwrap_or_else(|| DEFAULT_MODEL.to_string());
 
     let api_key = env::var("GEMINI_API_KEY").expect("GEMINI_API_KEY environment variable not set");
     let client = Client::new(api_key);
@@ -74,7 +102,7 @@ async fn main() -> Result<()> {
         "{} v{} | {} | {}",
         "clemini".bold(),
         env!("CARGO_PKG_VERSION").cyan(),
-        MODEL.green(),
+        model.green(),
         cwd.display().to_string().yellow()
     );
     eprintln!();
@@ -106,10 +134,10 @@ async fn main() -> Result<()> {
 
     if let Some(prompt) = combined_prompt {
         // Non-interactive mode: run single prompt
-        run_interaction(&client, &tool_service, &prompt, None).await?;
+        run_interaction(&client, &tool_service, &prompt, None, &model).await?;
     } else {
         // Interactive REPL mode
-        run_repl(&client, &tool_service, cwd).await?;
+        run_repl(&client, &tool_service, cwd, &model).await?;
     }
 
     Ok(())
@@ -119,6 +147,7 @@ async fn run_repl(
     client: &Client,
     tool_service: &Arc<CleminiToolService>,
     cwd: std::path::PathBuf,
+    model: &str,
 ) -> Result<()> {
     let mut rl = DefaultEditor::new()?;
 
@@ -156,13 +185,13 @@ async fn run_repl(
                     println!(
                         "clemini v{} | {}",
                         env!("CARGO_PKG_VERSION").cyan(),
-                        MODEL.green()
+                        model.green()
                     );
                     continue;
                 }
 
                 if input == "/model" || input == "/m" {
-                    println!("{MODEL}");
+                    println!("{model}");
                     continue;
                 }
 
@@ -229,8 +258,14 @@ async fn run_repl(
 
                 rl.add_history_entry(input)?;
 
-                match run_interaction(client, tool_service, input, last_interaction_id.as_deref())
-                    .await
+                match run_interaction(
+                    client,
+                    tool_service,
+                    input,
+                    last_interaction_id.as_deref(),
+                    model,
+                )
+                .await
                 {
                     Ok(new_id) => {
                         last_interaction_id = new_id;
@@ -343,6 +378,7 @@ async fn run_interaction(
     tool_service: &Arc<CleminiToolService>,
     input: &str,
     previous_interaction_id: Option<&str>,
+    model: &str,
 ) -> Result<Option<String>> {
     // Build the interaction - system instruction must be sent on every turn
     // (it's NOT inherited via previousInteractionId per genai-rs docs)
@@ -350,7 +386,7 @@ async fn run_interaction(
         // Continuation turn - chain to previous interaction
         client
             .interaction()
-            .with_model(MODEL)
+            .with_model(model)
             .with_tool_service(tool_service.clone())
             .with_previous_interaction(prev_id)
             .with_system_instruction(SYSTEM_PROMPT)
@@ -361,7 +397,7 @@ async fn run_interaction(
         // First turn
         client
             .interaction()
-            .with_model(MODEL)
+            .with_model(model)
             .with_tool_service(tool_service.clone())
             .with_system_instruction(SYSTEM_PROMPT)
             .with_content(vec![Content::text(input)])
