@@ -134,12 +134,40 @@ async fn run_repl(client: &Client, tool_service: &Arc<CleminiToolService>) -> Re
                     continue;
                 }
 
+                if input == "/status" {
+                    let output = std::process::Command::new("git")
+                        .arg("status")
+                        .arg("--short")
+                        .output();
+
+                    match output {
+                        Ok(o) => {
+                            if o.status.success() {
+                                let stdout = String::from_utf8_lossy(&o.stdout);
+                                if stdout.is_empty() {
+                                    eprintln!("[clean working directory]");
+                                } else {
+                                    println!("{}", stdout);
+                                }
+                            } else {
+                                let stderr = String::from_utf8_lossy(&o.stderr);
+                                eprintln!("[git status error: {}]", stderr.trim());
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("[failed to run git status: {}]", e);
+                        }
+                    }
+                    continue;
+                }
+
                 if input == "/help" {
                     eprintln!("Commands:");
                     eprintln!("  /quit, /exit  Exit the REPL");
                     eprintln!("  /clear        Clear conversation history");
                     eprintln!("  /version      Show version and model");
                     eprintln!("  /diff         Show uncommitted git changes");
+                    eprintln!("  /status       Show git status");
                     eprintln!("  /help         Show this help message");
                     eprintln!();
                     eprintln!("Tools:");
