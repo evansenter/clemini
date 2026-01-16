@@ -28,6 +28,15 @@ impl CleminiToolService {
 }
 
 impl ToolService for CleminiToolService {
+    /// Returns the list of available tools.
+    ///
+    /// Available tools:
+    /// - `read`: Read file contents
+    /// - `write`: Create or overwrite files
+    /// - `edit`: Surgical string replacement in files
+    /// - `bash`: Execute shell commands
+    /// - `glob`: Find files by pattern
+    /// - `grep`: Search for text in files
     fn tools(&self) -> Vec<Arc<dyn CallableFunction>> {
         vec![
             Arc::new(ReadTool::new(self.cwd.clone())),
