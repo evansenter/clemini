@@ -57,6 +57,8 @@ static SKIN: LazyLock<MadSkin> = LazyLock::new(|| {
     skin
 });
 
+static CANCELLED: AtomicBool = AtomicBool::new(false);
+
 /// Log to human-readable file with ANSI colors preserved
 /// Uses same naming as rolling::daily: clemini.log.YYYY-MM-DD
 pub fn log_event(message: &str) {
@@ -735,6 +737,122 @@ fn format_tool_result(
     )
 }
 
+struct ToolExecutionResult {
+    results: Vec<Content>,
+    cumulative_tool_tokens: u32,
+    cancelled: bool,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_tools(
+    tool_service: &Arc<CleminiToolService>,
+    accumulated_function_calls: &[(Option<String>, String, Value)],
+    spinner: &mut Option<Spinner>,
+    progress_fn: &Option<Arc<dyn Fn(InteractionProgress) + Send + Sync>>,
+    tool_calls: &mut Vec<String>,
+    mut cumulative_tool_tokens: u32,
+) -> ToolExecutionResult {
+    let mut results = Vec::new();
+    let has_interactive = accumulated_function_calls
+        .iter()
+        .any(|(_, name, _)| name == "ask_user");
+
+    if !has_interactive {
+        *spinner = Some(Spinner::start());
+    }
+
+    for (call_id, call_name, call_args) in accumulated_function_calls {
+        if CANCELLED.load(Ordering::SeqCst) {
+            return ToolExecutionResult {
+                results,
+                cumulative_tool_tokens,
+                cancelled: true,
+            };
+        }
+
+        log_event(&format!(
+            "{} {} {}",
+            "CALL".magenta().bold(),
+            call_name.purple(),
+            format_tool_args(call_args).trim().dimmed()
+        ));
+
+        if let Some(cb) = progress_fn {
+            cb(InteractionProgress {
+                tool: call_name.to_string(),
+                status: "executing".to_string(),
+                args: call_args.clone(),
+                duration_ms: None,
+            });
+        }
+
+        // Stop spinner during tool execution (tools may print output)
+        stop_spinner(spinner).await;
+
+        let start = Instant::now();
+        let result: Value = match tool_service.execute(call_name, call_args.clone()).await {
+            Ok(v) => v,
+            Err(e) => {
+                // Return error as JSON so Gemini can see it and retry
+                serde_json::json!({"error": e.to_string()})
+            }
+        };
+        let duration = start.elapsed();
+
+        // Restart spinner for next tool (if not interactive)
+        if !has_interactive && spinner.is_none() {
+            *spinner = Some(Spinner::start());
+        }
+
+        tool_calls.push(call_name.to_string());
+        let has_error = result.get("error").is_some();
+
+        if let Some(cb) = progress_fn {
+            cb(InteractionProgress {
+                tool: call_name.to_string(),
+                status: "completed".to_string(),
+                args: call_args.clone(),
+                duration_ms: Some(duration.as_millis() as u64),
+            });
+        }
+
+        let call_tokens = estimate_tokens(call_args);
+        let response_tokens = estimate_tokens(&result);
+        let total_tool_tokens = call_tokens + response_tokens;
+        cumulative_tool_tokens += total_tool_tokens;
+        let cumulative_percent =
+            (f64::from(cumulative_tool_tokens) / f64::from(CONTEXT_WINDOW_LIMIT)) * 100.0;
+
+        let formatted = format_tool_result(
+            call_name,
+            duration,
+            total_tool_tokens,
+            cumulative_percent,
+            has_error,
+        );
+        log_event(&formatted);
+        eprintln!("{formatted}");
+
+        if has_error && let Some(error_msg) = result.get("error").and_then(|e: &Value| e.as_str()) {
+            let error_detail = format!("  └─ {}: {}", "error".red(), error_msg.dimmed());
+            log_event(&error_detail);
+            eprintln!("{error_detail}");
+        }
+
+        results.push(Content::function_result(
+            call_name.to_string(),
+            call_id.clone().expect("Function call ID required"),
+            result,
+        ));
+    }
+
+    ToolExecutionResult {
+        results,
+        cumulative_tool_tokens,
+        cancelled: false,
+    }
+}
+
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 pub async fn run_interaction(
     client: &Client,
@@ -765,7 +883,6 @@ pub async fn run_interaction(
         interaction = interaction.with_previous_interaction(prev_id);
     }
 
-    static CANCELLED: AtomicBool = AtomicBool::new(false);
     CANCELLED.store(false, Ordering::SeqCst); // Reset for each interaction
 
     ctrlc::set_handler(move || {
@@ -864,100 +981,31 @@ pub async fn run_interaction(
         flush_response(&mut response_text, &skin, stream_output, false);
         full_response.clear(); // Clear accumulated text before tools as we'll only return text after final tool
 
-        let mut results = Vec::new();
-        let has_interactive = accumulated_function_calls.iter().any(|(_, name, _)| name == "ask_user");
-        if !has_interactive {
-            spinner = Some(Spinner::start());
-        }
+        let tool_result = execute_tools(
+            tool_service,
+            &accumulated_function_calls,
+            &mut spinner,
+            &progress_fn,
+            &mut tool_calls,
+            cumulative_tool_tokens,
+        )
+        .await;
 
-        for (call_id, call_name, call_args) in &accumulated_function_calls {
-            if CANCELLED.load(Ordering::SeqCst) {
-                eprintln!("{}", "[cancelled]".yellow());
-                stop_spinner(&mut spinner).await;
-                return Ok(InteractionResult {
-                    id: last_id,
-                    response: full_response,
-                    context_size: current_context_size,
-                    total_tokens,
-                    tool_calls,
-                });
-            }
+        cumulative_tool_tokens = tool_result.cumulative_tool_tokens;
 
-            log_event(&format!(
-                "{} {} {}",
-                "CALL".magenta().bold(),
-                call_name.purple(),
-                format_tool_args(call_args).trim().dimmed()
-            ));
-
-            if let Some(ref cb) = progress_fn {
-                cb(InteractionProgress {
-                    tool: call_name.to_string(),
-                    status: "executing".to_string(),
-                    args: call_args.clone(),
-                    duration_ms: None,
-                });
-            }
-
-            // Stop spinner during tool execution (tools may print output)
+        if tool_result.cancelled {
+            eprintln!("{}", "[cancelled]".yellow());
             stop_spinner(&mut spinner).await;
-
-            let start = Instant::now();
-            let result: Value = match tool_service.execute(call_name, call_args.clone()).await {
-                Ok(v) => v,
-                Err(e) => {
-                    // Return error as JSON so Gemini can see it and retry
-                    serde_json::json!({"error": e.to_string()})
-                }
-            };
-            let duration = start.elapsed();
-
-            // Restart spinner for next tool (if not interactive)
-            if !has_interactive && spinner.is_none() {
-                spinner = Some(Spinner::start());
-            }
-
-            tool_calls.push(call_name.to_string());
-            let has_error = result.get("error").is_some();
-
-            if let Some(ref cb) = progress_fn {
-                cb(InteractionProgress {
-                    tool: call_name.to_string(),
-                    status: "completed".to_string(),
-                    args: call_args.clone(),
-                    duration_ms: Some(duration.as_millis() as u64),
-                });
-            }
-
-            let call_tokens = estimate_tokens(call_args);
-            let response_tokens = estimate_tokens(&result);
-            let total_tool_tokens = call_tokens + response_tokens;
-            cumulative_tool_tokens += total_tool_tokens;
-            let cumulative_percent =
-                (f64::from(cumulative_tool_tokens) / f64::from(CONTEXT_WINDOW_LIMIT)) * 100.0;
-
-            let formatted = format_tool_result(
-                call_name,
-                duration,
-                total_tool_tokens,
-                cumulative_percent,
-                has_error,
-            );
-            log_event(&formatted);
-            eprintln!("{formatted}");
-
-            if has_error && let Some(error_msg) = result.get("error").and_then(|e: &Value| e.as_str()) {
-                let error_detail = format!("  └─ {}: {}", "error".red(), error_msg.dimmed());
-                log_event(&error_detail);
-                eprintln!("{error_detail}");
-            }
-
-            results.push(Content::function_result(
-                call_name.to_string(),
-                call_id.clone().expect("Function call ID required"),
-                result,
-            ));
+            return Ok(InteractionResult {
+                id: last_id,
+                response: full_response,
+                context_size: current_context_size,
+                total_tokens,
+                tool_calls,
+            });
         }
+
+        let results = tool_result.results;
 
         stop_spinner(&mut spinner).await;
 
