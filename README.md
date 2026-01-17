@@ -40,11 +40,16 @@ clemini --mcp-server
 
 ### REPL Commands
 
-- `/help` - Show available commands
-- `/clear` - Clear conversation history
-- `/tokens` - Show token usage
-- `/stats` - Show session statistics
-- `/diff`, `/status`, `/log`, `/branch` - Git shortcuts
+- `/h`, `/help` - Show available commands
+- `/c`, `/clear` - Clear conversation history
+- `/q`, `/quit`, `/exit` - Exit the REPL
+- `/v`, `/version` - Show version and model
+- `/m`, `/model` - Show model name
+- `/pwd`, `/cwd` - Show current working directory
+- `/d`, `/diff` - Show git diff
+- `/s`, `/status` - Show git status
+- `/l`, `/log` - Show recent git log
+- `/b`, `/branch` - Show git branches
 - `! <command>` - Run shell command directly
 
 ## Development
