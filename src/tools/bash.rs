@@ -86,6 +86,23 @@ impl BashTool {
             .any(|pattern| command.contains(pattern))
     }
 
+    fn truncate_output(output: String, max_len: usize) -> String {
+        if output.len() > max_len {
+            // Find last valid UTF-8 boundary at or before max_len
+            let mut end = max_len;
+            while end > 0 && !output.is_char_boundary(end) {
+                end -= 1;
+            }
+            format!(
+                "{}...\n[truncated, {} bytes total]",
+                &output[..end],
+                output.len()
+            )
+        } else {
+            output
+        }
+    }
+
     fn confirm_execution(&self, command: &str) -> bool {
         let msg = format!("\n⚠️  This command may be destructive:\n    {}", command.bold());
         eprintln!("{}", msg);
@@ -296,25 +313,8 @@ impl CallableFunction for BashTool {
 
         // Truncate very long output
         let max_len = 50000;
-        let stdout_truncated = if captured_stdout.len() > max_len {
-            format!(
-                "{}...\n[truncated, {} bytes total]",
-                &captured_stdout[..max_len],
-                captured_stdout.len()
-            )
-        } else {
-            captured_stdout
-        };
-
-        let stderr_truncated = if captured_stderr.len() > max_len {
-            format!(
-                "{}...\n[truncated, {} bytes total]",
-                &captured_stderr[..max_len],
-                captured_stderr.len()
-            )
-        } else {
-            captured_stderr
-        };
+        let stdout_truncated = Self::truncate_output(captured_stdout, max_len);
+        let stderr_truncated = Self::truncate_output(captured_stderr, max_len);
 
         Ok(json!({
             "command": command,
