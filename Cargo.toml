@@ -8,7 +8,7 @@ license = "MIT"
 
 [dependencies]
 # AI
-genai-rs = "0.7"
+genai-rs = { git = "https://github.com/evansenter/genai-rs", branch = "main" }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }

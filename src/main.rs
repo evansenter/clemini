@@ -3,6 +3,7 @@ use clap::Parser;
 use colored::Colorize;
 use futures_util::StreamExt;
 use genai_rs::{AutoFunctionStreamChunk, Client, Content};
+use serde_json::Value;
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
 use std::env;
@@ -512,6 +513,35 @@ struct InteractionResult {
     tool_calls: u32,
 }
 
+fn format_tool_args(args: &Value) -> String {
+    let Some(obj) = args.as_object() else { return String::new() };
+
+    let mut parts = Vec::new();
+    for (k, v) in obj {
+        let val_str = match v {
+            Value::String(s) => {
+                let trimmed = s.replace('\n', " ");
+                if trimmed.len() > 40 {
+                    format!("\"{}...\"", &trimmed[..37])
+                } else {
+                    format!("\"{trimmed}\"")
+                }
+            }
+            Value::Number(n) => n.to_string(),
+            Value::Bool(b) => b.to_string(),
+            Value::Null => "null".to_string(),
+            _ => "...".to_string(),
+        };
+        parts.push(format!("{k}={val_str}"));
+    }
+
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!("{} ", parts.join(" "))
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 async fn run_interaction(
     client: &Client,
@@ -604,8 +634,9 @@ async fn run_interaction(
                         let elapsed_secs = result.duration.as_secs_f32();
 
                         eprintln!(
-                            "[{}] {}, {:.1}k tokens (+{}){}",
+                            "[{}] {}{}, {:.1}k tokens (+{}){}",
                             result.name.cyan(),
+                            format_tool_args(&result.args).dimmed(),
                             format!("{:.1}s", elapsed_secs).yellow(),
                             f64::from(current_context_size) / 1000.0,
                             tokens_added,
