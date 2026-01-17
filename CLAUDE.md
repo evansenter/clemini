@@ -38,6 +38,8 @@ The CLI has three modes: single-prompt (`-p "prompt"`), interactive REPL, and MC
 
 **Multi-turn conversations**: Stateless via `with_previous_interaction(interaction_id)`. The MCP server passes `interaction_id` through (no server-side session storage). Note: `system_instruction` is NOT inherited - must send on every turn.
 
+**When to reuse interaction_id**: Pass the previous interaction_id when iterating on the same task (e.g., sending feedback after reviewing clemini's changes, fixing errors it made). Start fresh (no interaction_id) for unrelated tasks. The ID encodes the full conversation history, so clemini remembers what files it modified and why.
+
 ## genai-rs Integration Notes
 
 When encountering API issues, file at: https://github.com/evansenter/genai-rs/issues
