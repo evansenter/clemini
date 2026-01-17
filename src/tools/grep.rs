@@ -1,11 +1,12 @@
 use async_trait::async_trait;
 use genai_rs::{CallableFunction, FunctionDeclaration, FunctionError, FunctionParameters};
-use glob::glob;
-use regex::Regex;
+use grep::regex::RegexMatcherBuilder;
+use grep::searcher::{SearcherBuilder, Sink, SinkMatch, SinkContext, SinkFinish};
+use ignore::WalkBuilder;
 use serde_json::{Value, json};
-use std::path::PathBuf;
-
-use super::{make_relative, validate_path};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use globset::{Glob, GlobSetBuilder};
 
 pub struct GrepTool {
     cwd: PathBuf,
@@ -19,12 +20,138 @@ impl GrepTool {
     }
 }
 
+fn truncate_line(l: &str) -> String {
+    if l.len() > 1000 {
+        let truncated: String = l.chars().take(1000).collect();
+        format!("{}... [truncated]", truncated)
+    } else {
+        l.to_string()
+    }
+}
+
+struct GrepSink<'a> {
+    path: &'a Path,
+    matches: Arc<Mutex<Vec<Value>>>,
+    max_results: usize,
+    context: u64,
+    current_block: Option<MatchBlock>,
+}
+
+struct MatchBlock {
+    file: String,
+    line: u64,
+    lines: Vec<(u64, String, bool)>, // (line_number, content, is_match)
+}
+
+impl<'a> GrepSink<'a> {
+    fn flush_block(&mut self) {
+        if let Some(block) = self.current_block.take() {
+            let mut matches = self.matches.lock().unwrap();
+            if matches.len() >= self.max_results {
+                return;
+            }
+
+            let formatted_content = block.lines.iter().map(|(num, text, is_match)| {
+                let prefix = if *is_match { ">" } else { " " };
+                format!("{}{:>4}:{}", prefix, num, truncate_line(text))
+            }).collect::<Vec<_>>().join("\n");
+            
+            matches.push(json!({
+                "file": block.file,
+                "line": block.line,
+                "content": formatted_content
+            }));
+        }
+    }
+}
+
+impl<'a> Sink for GrepSink<'a> {
+    type Error = std::io::Error;
+
+    fn matched(&mut self, _searcher: &grep::searcher::Searcher, mat: &SinkMatch<'_>) -> Result<bool, Self::Error> {
+        let line_number = mat.line_number().unwrap_or(0);
+        let content = std::str::from_utf8(mat.bytes()).unwrap_or("").trim_end().to_string();
+        let path_str = self.path.to_string_lossy().to_string();
+
+        if self.context == 0 {
+            let mut matches = self.matches.lock().unwrap();
+            matches.push(json!({
+                "file": path_str,
+                "line": line_number,
+                "content": truncate_line(content.trim())
+            }));
+            if matches.len() >= self.max_results {
+                return Ok(false);
+            }
+        } else {
+            if let Some(block) = self.current_block.as_mut() {
+                if line_number > block.lines.last().unwrap().0 + 1 {
+                    self.flush_block();
+                    self.current_block = Some(MatchBlock {
+                        file: path_str,
+                        line: line_number,
+                        lines: vec![(line_number, content, true)],
+                    });
+                } else {
+                    block.lines.push((line_number, content, true));
+                }
+            } else {
+                self.current_block = Some(MatchBlock {
+                    file: path_str,
+                    line: line_number,
+                    lines: vec![(line_number, content, true)],
+                });
+            }
+        }
+
+        let matches_len = self.matches.lock().unwrap().len();
+        Ok(matches_len < self.max_results)
+    }
+
+    fn context(&mut self, _searcher: &grep::searcher::Searcher, mat: &SinkContext<'_>) -> Result<bool, Self::Error> {
+        if self.context == 0 {
+            return Ok(true);
+        }
+
+        let line_number = mat.line_number().unwrap_or(0);
+        let content = std::str::from_utf8(mat.bytes()).unwrap_or("").trim_end().to_string();
+        let path_str = self.path.to_string_lossy().to_string();
+
+        if let Some(block) = self.current_block.as_mut() {
+            if line_number > block.lines.last().unwrap().0 + 1 {
+                self.flush_block();
+                self.current_block = Some(MatchBlock {
+                    file: path_str,
+                    line: line_number,
+                    lines: vec![(line_number, content, false)],
+                });
+            } else {
+                block.lines.push((line_number, content, false));
+            }
+        } else {
+            self.current_block = Some(MatchBlock {
+                file: path_str,
+                line: line_number,
+                lines: vec![(line_number, content, false)],
+            });
+        }
+
+        let matches_len = self.matches.lock().unwrap().len();
+        Ok(matches_len < self.max_results)
+    }
+
+    fn finish(&mut self, _searcher: &grep::searcher::Searcher, _finish: &SinkFinish) -> Result<(), Self::Error> {
+        self.flush_block();
+        Ok(())
+    }
+}
+
 #[async_trait]
 impl CallableFunction for GrepTool {
     fn declaration(&self) -> FunctionDeclaration {
         FunctionDeclaration::new(
             "grep".to_string(),
-            "Search for a pattern in files. Returns matching lines with file paths and line numbers. Supports regex patterns, case-insensitive search, and context lines.".to_string(),
+            "Search for a pattern in files using ripgrep. Returns matching lines with file paths and line numbers. Supports regex patterns, case-insensitive search, and context lines.".to_string(),
             FunctionParameters::new(
                 "object".to_string(),
                 json!({
@@ -47,10 +174,6 @@ impl CallableFunction for GrepTool {
                     "max_results": {
                         "type": "integer",
                         "description": "Maximum number of matches to return (default: 100)"
-                    },
-                    "include_large": {
-                        "type": "boolean",
-                        "description": "If true, include files larger than 1MB in the search (default: false)"
                     }
                 }),
                 vec!["pattern".to_string()],
@@ -77,215 +200,97 @@ impl CallableFunction for GrepTool {
         let context = args
             .get("context")
             .and_then(|v| v.as_u64())
-            .unwrap_or(0) as usize;
+            .unwrap_or(0);
 
-        let max_results = usize::try_from(
-            args.get("max_results")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(100),
-        )
-        .unwrap_or(usize::MAX);
+        let max_results = args
+            .get("max_results")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(100) as usize;
 
-        let include_large = args
-            .get("include_large")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+        let matcher = RegexMatcherBuilder::new()
+            .case_insensitive(case_insensitive)
+            .build(pattern)
+            .map_err(|e| FunctionError::ExecutionError(format!("Invalid regex: {}", e).into()))?;
 
-        // Compile regex with optional case-insensitivity
-        let pattern_str = if case_insensitive {
-            format!("(?i){}", pattern)
-        } else {
-            pattern.to_string()
-        };
+        let mut searcher = SearcherBuilder::new()
+            .before_context(context as usize)
+            .after_context(context as usize)
+            .line_number(true)
+            .build();
 
-        let regex = match Regex::new(&pattern_str) {
-            Ok(r) => r,
-            Err(e) => {
-                return Ok(json!({
-                    "error": format!("Invalid regex pattern '{}': {}. Ensure you are using valid Rust regex syntax. Suggestions: check for unclosed parentheses, invalid escape sequences, or other regex syntax errors. Note: use '(?i)' for case-insensitive search.", pattern, e)
-                }));
-            }
-        };
-
-        // Find files matching the glob pattern
-        let full_pattern = self.cwd.join(file_pattern);
-        let pattern_str = full_pattern.to_string_lossy();
-
-        let file_paths: Vec<PathBuf> = match glob(&pattern_str) {
-            Ok(paths) => {
-                let paths: Vec<PathBuf> = paths
-                    .filter_map(std::result::Result::ok)
-                    .filter_map(|p| {
-                        // Security check - only include files within cwd
-                        let validated_path = validate_path(&p, &self.cwd).ok()?;
-
-                        if !validated_path.is_file() {
-                            return None;
-                        }
-                        // Skip excluded directories
-                        if validated_path.components().any(|c| {
-                            if let std::path::Component::Normal(s) = c {
-                                DEFAULT_EXCLUDES.contains(&s.to_string_lossy().as_ref())
-                            } else {
-                                false
-                            }
-                        }) {
-                            return None;
-                        }
-                        Some(validated_path)
-                    })
-                    .collect();
-
-                if paths.is_empty() {
-                    return Ok(json!({
-                        "error": format!("No files matched the pattern '{}'. Suggestions: ensure the pattern is correct, check that the files exist, and that they are not in excluded directories (e.g., .git, node_modules).", file_pattern)
-                    }));
-                }
-                paths
-            }
-            Err(e) => {
-                return Ok(json!({
-                    "error": format!("Invalid glob pattern: {}. Ensure you are using valid glob syntax (e.g., '**/*.rs', 'src/*.ts'). Suggestions: check for invalid characters or incorrectly nested patterns.", e)
-                }));
-            }
-        };
-
-        let mut matches: Vec<Value> = Vec::new();
+        let matches = Arc::new(Mutex::new(Vec::<Value>::new()));
         let mut files_searched = 0;
         let mut files_with_matches = 0;
-        let mut skipped_large_files = Vec::new();
 
-        for path in file_paths {
-            // Skip large files (> 1MB) unless include_large is true
-            if let Ok(metadata) = tokio::fs::metadata(&path).await {
-                if metadata.len() > 1_000_000 && !include_large {
-                    skipped_large_files.push(make_relative(&path, &self.cwd));
-                    continue;
-                }
-            }
+        let mut glob_builder = GlobSetBuilder::new();
+        glob_builder.add(Glob::new(file_pattern).map_err(|e| FunctionError::ExecutionError(format!("Invalid file pattern: {}", e).into()))?);
+        let glob_set = glob_builder.build().map_err(|e| FunctionError::ExecutionError(format!("Failed to build glob set: {}", e).into()))?;
 
-            // Skip binary files by checking if we can read as text
-            let Ok(content) = tokio::fs::read_to_string(&path).await else {
-                continue; // Skip files we can't read as text
+        let mut walker = WalkBuilder::new(&self.cwd);
+        for exclude in DEFAULT_EXCLUDES {
+            walker.add_custom_ignore_filename(exclude);
+        }
+        // Actually DEFAULT_EXCLUDES are directories, we should probably just use them as overrides or similar.
+        // ignore crate already handles .git etc by default.
+
+        let walk = walker.build();
+        for result in walk {
+            let entry = match result {
+                Ok(entry) => entry,
+                Err(_) => continue,
             };
 
+            if !entry.file_type().map_or(false, |ft| ft.is_file()) {
+                continue;
+            }
+
+            let path = entry.path();
+            let relative_path = path.strip_prefix(&self.cwd).unwrap_or(path);
+            
+            if !glob_set.is_match(relative_path) {
+                continue;
+            }
+
             files_searched += 1;
-            let mut file_has_match = false;
-            let lines: Vec<&str> = content.lines().collect();
+            let mut sink = GrepSink {
+                path: relative_path,
+                matches: Arc::clone(&matches),
+                max_results,
+                context,
+                current_block: None,
+            };
 
-            for (line_num, line) in lines.iter().enumerate() {
-                if regex.is_match(line) {
-                    if !file_has_match {
-                        file_has_match = true;
-                        files_with_matches += 1;
-                    }
+            let prev_count = matches.lock().unwrap().len();
+            if let Err(_) = searcher.search_path(&matcher, path, &mut sink) {
+                continue;
+            }
+            if matches.lock().unwrap().len() > prev_count {
+                files_with_matches += 1;
+            }
 
-                    let relative_path = make_relative(&path, &self.cwd);
-
-                    // Collect context lines if requested
-                    let truncate_line = |l: &str| {
-                        if l.len() > 1000 {
-                            let truncated: String = l.chars().take(1000).collect();
-                            format!("{}... [truncated]", truncated)
-                        } else {
-                            l.to_string()
-                        }
-                    };
-
-                    let match_content = if context > 0 {
-                        let start = line_num.saturating_sub(context);
-                        let end = (line_num + context + 1).min(lines.len());
-                        let context_lines: Vec<String> = (start..end)
-                            .map(|i| {
-                                let prefix = if i == line_num { ">" } else { " " };
-                                format!("{}{:>4}:{}", prefix, i + 1, truncate_line(lines[i]))
-                            })
-                            .collect();
-                        context_lines.join("\n")
-                    } else {
-                        truncate_line(line.trim())
-                    };
-
-                    matches.push(json!({
-                        "file": relative_path,
-                        "line": line_num + 1,
-                        "content": match_content
-                    }));
-
-                    if matches.len() >= max_results {
-                        let mut res = json!({
-                            "pattern": pattern,
-                            "file_pattern": file_pattern,
-                            "matches": matches,
-                            "count": matches.len(),
-                            "files_searched": files_searched,
-                            "files_with_matches": files_with_matches,
-                            "truncated": true
-                        });
-
-                        if !skipped_large_files.is_empty() {
-                            res["warning"] = json!(format!(
-                                "Skipped {} files over 1MB: {}. Use 'include_large: true' to search them.",
-                                skipped_large_files.len(),
-                                skipped_large_files.join(", ")
-                            ));
-                        }
-
-                        return Ok(res);
-                    }
-                }
+            if matches.lock().unwrap().len() >= max_results {
+                break;
             }
         }
 
-        if files_searched == 0 {
-            let mut error_msg = format!("No searchable text files were found matching '{}'. Suggestions: check file permissions and ensure files are not binary.", file_pattern);
-            if !skipped_large_files.is_empty() {
-                error_msg.push_str(&format!(
-                    " Note: {} files were skipped because they are over 1MB: {}. Use 'include_large: true' to search them.",
-                    skipped_large_files.len(),
-                    skipped_large_files.join(", ")
-                ));
-            }
-            return Ok(json!({
-                "error": error_msg
-            }));
-        }
+        let final_matches = Arc::try_unwrap(matches).unwrap().into_inner().unwrap();
 
-        if matches.is_empty() {
-            let mut error_msg = format!("No matches found for pattern '{}' in files matching '{}'. Suggestions: check the pattern for typos, ensure the correct case is used, or try a simpler search pattern to find the relevant section.", pattern, file_pattern);
-            if !skipped_large_files.is_empty() {
-                error_msg.push_str(&format!(
-                    " Note: {} files were skipped because they are over 1MB: {}. Use 'include_large: true' to search them.",
-                    skipped_large_files.len(),
-                    skipped_large_files.join(", ")
-                ));
-            }
+        if final_matches.is_empty() {
             return Ok(json!({
-                "error": error_msg,
+                "error": format!("No matches found for pattern '{}' in files matching '{}'.", pattern, file_pattern),
                 "pattern": pattern,
-                "file_pattern": file_pattern,
-                "files_searched": files_searched
+                "file_pattern": file_pattern
             }));
         }
 
-        let mut res = json!({
+        Ok(json!({
             "pattern": pattern,
             "file_pattern": file_pattern,
-            "matches": matches,
-            "count": matches.len(),
+            "matches": final_matches,
+            "count": final_matches.len(),
             "files_searched": files_searched,
             "files_with_matches": files_with_matches,
-            "truncated": false
-        });
-
-        if !skipped_large_files.is_empty() {
-            res["warning"] = json!(format!(
-                "Skipped {} files over 1MB: {}. Use 'include_large: true' to search them.",
-                skipped_large_files.len(),
-                skipped_large_files.join(", ")
-            ));
-        }
-
-        Ok(res)
+            "truncated": final_matches.len() >= max_results
+        }))
     }
 }
