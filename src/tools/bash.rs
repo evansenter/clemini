@@ -204,7 +204,11 @@ impl CallableFunction for BashTool {
             let msg = format!("[bash CAUTION: {command}] (user confirmed)");
             crate::log_event(&msg);
         } else {
-            crate::log_event(&format!("[bash] running: \"{}\"", command).dimmed().to_string());
+            crate::log_event(
+                &format!("[bash] running: \"{}\"", command)
+                    .dimmed()
+                    .to_string(),
+            );
         }
 
         let mut child = Command::new("bash")

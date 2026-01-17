@@ -54,7 +54,7 @@ impl CallableFunction for AskUserTool {
                 }
             }
         }
-        eprint!("> ");  // Keep prompt on same line as input
+        eprint!("> "); // Keep prompt on same line as input
         let _ = io::stderr().flush();
 
         let mut answer = String::new();

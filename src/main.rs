@@ -793,7 +793,12 @@ fn format_tool_result(name: &str, duration: std::time::Duration, has_error: bool
         format!("{:.2}s", elapsed_secs)
     };
 
-    format!("[{}] {}{}", name.cyan(), duration_str.yellow(), error_suffix)
+    format!(
+        "[{}] {}{}",
+        name.cyan(),
+        duration_str.yellow(),
+        error_suffix
+    )
 }
 
 struct ToolExecutionResult {
@@ -1043,4 +1048,107 @@ pub async fn run_interaction(
         total_tokens,
         tool_calls,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::time::Duration;
+
+    #[test]
+    fn test_format_tool_args_empty() {
+        assert_eq!(format_tool_args(&json!({})), "");
+        assert_eq!(format_tool_args(&json!(null)), "");
+        assert_eq!(format_tool_args(&json!("not an object")), "");
+    }
+
+    #[test]
+    fn test_format_tool_args_types() {
+        let args = json!({
+            "bool": true,
+            "num": 42,
+            "null": null,
+            "str": "hello"
+        });
+        let formatted = format_tool_args(&args);
+        // serde_json::Map is sorted by key
+        assert_eq!(formatted, "bool=true null=null num=42 str=\"hello\" ");
+    }
+
+    #[test]
+    fn test_format_tool_args_complex_types() {
+        let args = json!({
+            "arr": [1, 2],
+            "obj": {"a": 1}
+        });
+        let formatted = format_tool_args(&args);
+        assert_eq!(formatted, "arr=... obj=... ");
+    }
+
+    #[test]
+    fn test_format_tool_args_truncation() {
+        let long_str = "a".repeat(100);
+        let args = json!({"long": long_str});
+        let formatted = format_tool_args(&args);
+        let expected_val = format!("\"{}...\"", "a".repeat(77));
+        assert_eq!(formatted, format!("long={} ", expected_val));
+    }
+
+    #[test]
+    fn test_format_tool_args_newlines() {
+        let args = json!({"text": "hello\nworld"});
+        let formatted = format_tool_args(&args);
+        assert_eq!(formatted, "text=\"hello world\" ");
+    }
+
+    #[test]
+    fn test_format_tool_result_duration() {
+        colored::control::set_override(false);
+
+        // < 1ms (100us) -> 3 decimals
+        assert_eq!(
+            format_tool_result("test", Duration::from_micros(100), false),
+            "[test] 0.000s"
+        );
+
+        // < 1ms (900us) -> 3 decimals
+        assert_eq!(
+            format_tool_result("test", Duration::from_micros(900), false),
+            "[test] 0.001s"
+        );
+
+        // >= 1ms (1.1ms) -> 2 decimals (shows 0.00s due to threshold)
+        assert_eq!(
+            format_tool_result("test", Duration::from_micros(1100), false),
+            "[test] 0.00s"
+        );
+
+        // >= 1ms (20ms) -> 2 decimals
+        assert_eq!(
+            format_tool_result("test", Duration::from_millis(20), false),
+            "[test] 0.02s"
+        );
+
+        // >= 1ms (1450ms) -> 2 decimals
+        assert_eq!(
+            format_tool_result("test", Duration::from_millis(1450), false),
+            "[test] 1.45s"
+        );
+
+        colored::control::unset_override();
+    }
+
+    #[test]
+    fn test_format_tool_result_error() {
+        colored::control::set_override(false);
+
+        let res = format_tool_result("test", Duration::from_millis(10), true);
+        assert_eq!(res, "[test] 0.01s ERROR");
+
+        let res = format_tool_result("test", Duration::from_millis(10), false);
+        assert_eq!(res, "[test] 0.01s");
+
+        colored::control::unset_override();
+    }
 }

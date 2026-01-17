@@ -48,7 +48,7 @@ impl CallableFunction for TodoWriteTool {
             .and_then(|v| v.as_array())
             .ok_or_else(|| FunctionError::ArgumentMismatch("Missing todos array".to_string()))?;
 
-        crate::log_event("");  // Leading newline before list
+        crate::log_event(""); // Leading newline before list
         for todo in todos {
             let content = todo.get("content").and_then(|v| v.as_str()).unwrap_or("");
             let status = todo
