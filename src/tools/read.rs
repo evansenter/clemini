@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use genai_rs::{CallableFunction, FunctionDeclaration, FunctionError, FunctionParameters};
 use serde_json::{Value, json};
 use std::path::PathBuf;
+use tokio::io::AsyncReadExt;
 use tracing::instrument;
 
 use super::resolve_and_validate_path;
@@ -65,6 +66,35 @@ impl CallableFunction for ReadTool {
             }
         };
 
+        // Check if binary
+        let mut file = match tokio::fs::File::open(&path).await {
+            Ok(f) => f,
+            Err(e) => {
+                return Ok(json!({
+                    "error": format!("Failed to read {}: {}. Ensure the file exists and is not a directory.", path.display(), e)
+                }));
+            }
+        };
+
+        let mut buffer = vec![0; 8192];
+        let bytes_read = match file.read(&mut buffer).await {
+            Ok(n) => n,
+            Err(e) => {
+                return Ok(json!({
+                    "error": format!("Failed to read {}: {}", path.display(), e)
+                }));
+            }
+        };
+        buffer.truncate(bytes_read);
+
+        if is_binary(&buffer) {
+            return Ok(json!({
+                "error": "File appears to be binary. This tool is for reading text files.",
+                "path": path.display().to_string(),
+                "is_binary": true
+            }));
+        }
+
         match tokio::fs::read_to_string(&path).await {
             Ok(contents) => {
                 let lines: Vec<&str> = contents.lines().collect();
@@ -109,6 +139,26 @@ impl CallableFunction for ReadTool {
             })),
         }
     }
+}
+
+fn is_binary(bytes: &[u8]) -> bool {
+    if bytes.is_empty() {
+        return false;
+    }
+
+    // Check for null bytes
+    if bytes.contains(&0) {
+        return true;
+    }
+
+    // Check for high proportion of non-printable characters
+    let non_printable = bytes
+        .iter()
+        .filter(|&&b| !b.is_ascii_graphic() && !b.is_ascii_whitespace())
+        .count();
+
+    // If more than 30% are non-printable, consider it binary
+    non_printable as f64 / bytes.len() as f64 > 0.3
 }
 
 #[cfg(test)]
@@ -213,5 +263,26 @@ mod tests {
                 .unwrap()
                 .contains("Showing lines 1-500")
         );
+    }
+
+    #[tokio::test]
+    async fn test_read_tool_binary_file() {
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().to_path_buf();
+        let file_path = cwd.join("binary.bin");
+        // PNG header + some nulls
+        fs::write(&file_path, b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0DIHDR").unwrap();
+
+        let tool = ReadTool::new(cwd.clone(), vec![cwd.clone()]);
+        let args = json!({ "file_path": "binary.bin" });
+
+        let result = tool.call(args).await.unwrap();
+        assert!(
+            result["error"]
+                .as_str()
+                .unwrap()
+                .contains("File appears to be binary")
+        );
+        assert_eq!(result["is_binary"], true);
     }
 }
