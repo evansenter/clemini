@@ -3,6 +3,7 @@ use colored::Colorize;
 use genai_rs::{CallableFunction, FunctionDeclaration, FunctionError, FunctionParameters};
 use regex::Regex;
 use serde_json::{Value, json};
+use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::LazyLock;
@@ -37,21 +38,37 @@ static BLOCKED_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     ]
 });
 
-/// Commands that require extra caution (logged but allowed).
+/// Commands that require extra caution (requires user confirmation).
 static CAUTION_PATTERNS: LazyLock<Vec<&str>> = LazyLock::new(|| {
     vec![
-        "sudo", "su ", "rm ", "mv ", "chmod", "chown", "kill", "pkill", "killall",
+        "sudo",
+        "su ",
+        "rm ",
+        "mv ",
+        "chmod",
+        "chown",
+        "kill",
+        "pkill",
+        "killall",
+        "git push --force",
+        "git push -f",
+        "git reset --hard",
+        "cargo publish",
+        "npm publish",
+        "docker rm",
+        "docker rmi",
     ]
 });
 
 pub struct BashTool {
     cwd: PathBuf,
     timeout_secs: u64,
+    is_mcp_mode: bool,
 }
 
 impl BashTool {
-    pub fn new(cwd: PathBuf, timeout_secs: u64) -> Self {
-        Self { cwd, timeout_secs }
+    pub fn new(cwd: PathBuf, timeout_secs: u64, is_mcp_mode: bool) -> Self {
+        Self { cwd, timeout_secs, is_mcp_mode }
     }
 
     fn is_blocked(command: &str) -> Option<String> {
@@ -67,6 +84,23 @@ impl BashTool {
         CAUTION_PATTERNS
             .iter()
             .any(|pattern| command.contains(pattern))
+    }
+
+    fn confirm_execution(&self, command: &str) -> bool {
+        let msg = format!("\n⚠️  This command may be destructive:\n    {}", command.bold());
+        eprintln!("{}", msg);
+        crate::log_event(&msg);
+
+        eprint!("Proceed? [y/N] ");
+        let _ = io::stderr().flush();
+
+        let mut answer = String::new();
+        if io::stdin().read_line(&mut answer).is_ok() {
+            let answer = answer.trim().to_lowercase();
+            answer == "y" || answer == "yes"
+        } else {
+            false
+        }
     }
 }
 
@@ -86,6 +120,10 @@ impl CallableFunction for BashTool {
                     "timeout_seconds": {
                         "type": "integer",
                         "description": format!("Maximum time to wait for the command (default: {})", self.timeout_secs)
+                    },
+                    "confirmed": {
+                        "type": "boolean",
+                        "description": "Set to true to confirm execution of a destructive command (required for caution commands in MCP mode)"
                     }
                 }),
                 vec!["command".to_string()],
@@ -105,6 +143,11 @@ impl CallableFunction for BashTool {
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(self.timeout_secs);
 
+        let confirmed = args
+            .get("confirmed")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+
         // Safety check
         if let Some(pattern) = Self::is_blocked(command) {
             let msg = format!("[bash BLOCKED: {command}] (matches pattern: {pattern})");
@@ -117,8 +160,26 @@ impl CallableFunction for BashTool {
         }
 
         if Self::needs_caution(command) {
-            let msg = format!("[bash CAUTION: {command}]");
-            eprintln!("{}", msg);
+            if self.is_mcp_mode {
+                if !confirmed {
+                    let msg = format!("[bash CAUTION: {command}] (requesting MCP confirmation)");
+                    crate::log_event(&msg);
+                    return Ok(json!({
+                        "needs_confirmation": true,
+                        "command": command,
+                        "message": format!("This command may be destructive: {}. Please confirm execution.", command)
+                    }));
+                }
+            } else if !confirmed && !self.confirm_execution(command) {
+                let msg = format!("[bash CANCELLED: {command}]");
+                eprintln!("{}", msg.yellow());
+                crate::log_event(&msg);
+                return Ok(json!({
+                    "error": "Command cancelled by user",
+                    "command": command
+                }));
+            }
+            let msg = format!("[bash CAUTION: {command}] (user confirmed)");
             crate::log_event(&msg);
         } else {
             let msg = format!("[bash] running: \"{}\"", command).dimmed();

@@ -4,15 +4,16 @@ Clemini is a Gemini-powered coding CLI built with [genai-rs](https://github.com/
 
 ## Features
 
-- **Interactive REPL**: A conversational interface for coding tasks.
-- **Single Prompt Mode**: Run one-off commands with `-p "your prompt"`.
-- **Tool Integration**: Built-in tools for file operations, bash execution, searching, and more.
-- **Self-Improving**: Optimized for working on its own codebase.
+- **Interactive REPL**: A conversational interface for coding tasks
+- **Single Prompt Mode**: Run one-off commands with `-p "your prompt"`
+- **MCP Server**: Expose clemini as an MCP tool for Claude Code (`--mcp-server`)
+- **Tool Integration**: Built-in tools for file operations, bash execution, searching, and more
+- **Self-Improving**: Optimized for working on its own codebase
 
 ## Prerequisites
 
-- Rust toolchain (2024 edition)
-- `GEMINI_API_KEY` environment variable set with a valid Google Gemini API key.
+- Rust toolchain (2024 edition, requires Rust 1.88+)
+- `GEMINI_API_KEY` environment variable set with a valid Google Gemini API key
 
 ## Installation
 
@@ -32,23 +33,50 @@ Run a single prompt:
 clemini -p "summarize the current directory"
 ```
 
+Start as MCP server (for Claude Code integration):
+```bash
+clemini --mcp-server
+```
+
+### REPL Commands
+
+- `/help` - Show available commands
+- `/clear` - Clear conversation history
+- `/tokens` - Show token usage
+- `/stats` - Show session statistics
+- `/diff`, `/status`, `/log`, `/branch` - Git shortcuts
+- `! <command>` - Run shell command directly
+
 ## Development
 
 ### Build & Test
 
 ```bash
-cargo check          # Fast type checking
-cargo build          # Debug build
-cargo test           # Run tests
-cargo clippy -- -D warnings  # Lint
-cargo fmt            # Format
+make check               # Fast type checking
+make build               # Debug build
+make release             # Release build
+make test                # Run tests
+make clippy              # Lint with warnings as errors
+make fmt                 # Format code
+make logs                # Tail human-readable logs
+make json-logs           # Tail JSON logs with jq formatting
 ```
 
 ### Environment Variables
 
-- `GEMINI_API_KEY`: Required for API access.
-- `LOUD_WIRE=1`: Log all HTTP requests and responses for debugging.
+- `GEMINI_API_KEY`: Required for API access
+- `LOUD_WIRE=1`: Log all HTTP requests and responses for debugging
+
+### Configuration
+
+Optional config file at `~/.clemini/config.toml`:
+```toml
+model = "gemini-3-flash-preview"
+bash_timeout = 30
+```
+
+Logs are stored in `~/.clemini/logs/` with daily rotation.
 
 ## License
 
-[MIT](LICENSE) (or specify your license)
+[MIT](LICENSE)

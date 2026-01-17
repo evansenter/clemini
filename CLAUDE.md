@@ -16,30 +16,31 @@ Clemini is a Gemini-powered coding CLI built with genai-rs. It's designed to be 
 ## Build & Test
 
 ```bash
-cargo check          # Fast type checking
-cargo build          # Debug build
-cargo build --release  # Release build
-cargo test           # Run tests
-cargo clippy -- -D warnings  # Lint
-cargo fmt            # Format
+make check               # Fast type checking
+make build               # Debug build
+make release             # Release build
+make test                # Run tests
+make clippy              # Lint with warnings as errors
+make fmt                 # Format code
+make logs                # Tail human-readable logs
+make json-logs           # Tail JSON logs with jq formatting
 ```
+
+Logs are stored in `~/.clemini/logs/` with daily rotation.
 
 ## Architecture
 
 The CLI has three modes: single-prompt (`-p "prompt"`), interactive REPL, and MCP server (`--mcp-server`).
 
-**Streaming with auto-functions**: Uses `create_stream_with_auto_functions()` which handles the tool execution loop automatically. The stream emits `ExecutingFunctions` before tool calls and `FunctionResults` after, with timing/token info.
+**Manual function calling**: Uses `create_stream()` for streaming responses, then manually executes tool calls accumulated from Delta chunks. This enables ctrl-c cancellation between tool calls. The tool execution loop in `run_interaction()` processes function calls, sends results back via `with_previous_interaction()`, and repeats until no more function calls.
 
 **Tool sandboxing**: All tools share a `cwd` via `CleminiToolService`. Path validation (`validate_path`) ensures operations stay within the working directory. Bash has regex blocklists for dangerous patterns.
 
-**Multi-turn conversations**: Server-side storage via `with_previous_interaction(interaction_id)`. Note: `system_instruction` is NOT inherited - must send on every turn.
+**Multi-turn conversations**: Stateless via `with_previous_interaction(interaction_id)`. The MCP server passes `interaction_id` through (no server-side session storage). Note: `system_instruction` is NOT inherited - must send on every turn.
 
 ## genai-rs Integration Notes
 
 When encountering API issues, file at: https://github.com/evansenter/genai-rs/issues
-
-Known issues:
-- [#367](https://github.com/evansenter/genai-rs/issues/367) - `InteractionBuilder` typestate makes conditional chaining awkward (PR #369 open)
 
 Debugging: `LOUD_WIRE=1` logs all HTTP requests/responses.
 
@@ -47,12 +48,13 @@ Debugging: `LOUD_WIRE=1` logs all HTTP requests/responses.
 
 - `GEMINI_API_KEY` - Required
 - Model: `gemini-3-flash-preview`
+- Config: `~/.clemini/config.toml` (optional)
 
 ## Conventions
 
 - Rust 2024 edition (let chains, etc.)
 - Tools return JSON: success data or `{"error": "..."}`
-- Logging format: `[tool_name] 0.5s, 1.2k tokens (+50)` per call, `[X→Y tok]` at end
+- Tool errors return as JSON (not propagated) so Gemini can see them and retry
 
 ## Development Process
 

@@ -237,7 +237,7 @@ async fn main() -> Result<()> {
     let client = Client::new(api_key);
 
     let cwd = std::fs::canonicalize(&args.cwd)?;
-    let tool_service = Arc::new(CleminiToolService::new(cwd.clone(), bash_timeout));
+    let tool_service = Arc::new(CleminiToolService::new(cwd.clone(), bash_timeout, args.mcp_server));
 
     let mut system_prompt = SYSTEM_PROMPT.to_string();
     if let Ok(claude_md) = std::fs::read_to_string(cwd.join("CLAUDE.md")) {

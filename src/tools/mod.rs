@@ -30,11 +30,12 @@ pub use write::WriteTool;
 pub struct CleminiToolService {
     cwd: PathBuf,
     bash_timeout: u64,
+    is_mcp_mode: bool,
 }
 
 impl CleminiToolService {
-    pub fn new(cwd: PathBuf, bash_timeout: u64) -> Self {
-        Self { cwd, bash_timeout }
+    pub fn new(cwd: PathBuf, bash_timeout: u64, is_mcp_mode: bool) -> Self {
+        Self { cwd, bash_timeout, is_mcp_mode }
     }
 
     pub async fn execute(&self, name: &str, args: Value) -> Result<Value> {
@@ -66,7 +67,7 @@ impl ToolService for CleminiToolService {
             Arc::new(ReadTool::new(self.cwd.clone())),
             Arc::new(WriteTool::new(self.cwd.clone())),
             Arc::new(EditTool::new(self.cwd.clone())),
-            Arc::new(BashTool::new(self.cwd.clone(), self.bash_timeout)),
+            Arc::new(BashTool::new(self.cwd.clone(), self.bash_timeout, self.is_mcp_mode)),
             Arc::new(GlobTool::new(self.cwd.clone())),
             Arc::new(GrepTool::new(self.cwd.clone())),
             Arc::new(WebFetchTool::new(self.cwd.clone())),
