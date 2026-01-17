@@ -1043,11 +1043,6 @@ pub async fn run_interaction(
         if accumulated_function_calls.is_empty() {
             // Render final text
             flush_response(&mut response_text, &skin, stream_output, true);
-            if let Some(usage) = &resp.usage {
-                let total_in = usage.total_input_tokens.unwrap_or(0);
-                let total_out = usage.total_output_tokens.unwrap_or(0);
-                eprintln!("[{}→{} tok]", total_in, total_out);
-            }
             break;
         }
 
