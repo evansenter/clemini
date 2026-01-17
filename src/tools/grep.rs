@@ -47,6 +47,10 @@ impl CallableFunction for GrepTool {
                     "max_results": {
                         "type": "integer",
                         "description": "Maximum number of matches to return (default: 100)"
+                    },
+                    "include_large": {
+                        "type": "boolean",
+                        "description": "If true, include files larger than 1MB in the search (default: false)"
                     }
                 }),
                 vec!["pattern".to_string()],
@@ -81,6 +85,11 @@ impl CallableFunction for GrepTool {
                 .unwrap_or(100),
         )
         .unwrap_or(usize::MAX);
+
+        let include_large = args
+            .get("include_large")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
 
         // Compile regex with optional case-insensitivity
         let pattern_str = if case_insensitive {
@@ -144,8 +153,17 @@ impl CallableFunction for GrepTool {
         let mut matches: Vec<Value> = Vec::new();
         let mut files_searched = 0;
         let mut files_with_matches = 0;
+        let mut skipped_large_files = Vec::new();
 
         for path in file_paths {
+            // Skip large files (> 1MB) unless include_large is true
+            if let Ok(metadata) = tokio::fs::metadata(&path).await {
+                if metadata.len() > 1_000_000 && !include_large {
+                    skipped_large_files.push(make_relative(&path, &self.cwd));
+                    continue;
+                }
+            }
+
             // Skip binary files by checking if we can read as text
             let Ok(content) = tokio::fs::read_to_string(&path).await else {
                 continue; // Skip files we can't read as text
@@ -165,18 +183,27 @@ impl CallableFunction for GrepTool {
                     let relative_path = make_relative(&path, &self.cwd);
 
                     // Collect context lines if requested
+                    let truncate_line = |l: &str| {
+                        if l.len() > 1000 {
+                            let truncated: String = l.chars().take(1000).collect();
+                            format!("{}... [truncated]", truncated)
+                        } else {
+                            l.to_string()
+                        }
+                    };
+
                     let match_content = if context > 0 {
                         let start = line_num.saturating_sub(context);
                         let end = (line_num + context + 1).min(lines.len());
                         let context_lines: Vec<String> = (start..end)
                             .map(|i| {
                                 let prefix = if i == line_num { ">" } else { " " };
-                                format!("{}{:>4}:{}", prefix, i + 1, lines[i])
+                                format!("{}{:>4}:{}", prefix, i + 1, truncate_line(lines[i]))
                             })
                             .collect();
                         context_lines.join("\n")
                     } else {
-                        line.trim().to_string()
+                        truncate_line(line.trim())
                     };
 
                     matches.push(json!({
@@ -186,7 +213,7 @@ impl CallableFunction for GrepTool {
                     }));
 
                     if matches.len() >= max_results {
-                        return Ok(json!({
+                        let mut res = json!({
                             "pattern": pattern,
                             "file_pattern": file_pattern,
                             "matches": matches,
@@ -194,28 +221,54 @@ impl CallableFunction for GrepTool {
                             "files_searched": files_searched,
                             "files_with_matches": files_with_matches,
                             "truncated": true
-                        }));
+                        });
+
+                        if !skipped_large_files.is_empty() {
+                            res["warning"] = json!(format!(
+                                "Skipped {} files over 1MB: {}. Use 'include_large: true' to search them.",
+                                skipped_large_files.len(),
+                                skipped_large_files.join(", ")
+                            ));
+                        }
+
+                        return Ok(res);
                     }
                 }
             }
         }
 
         if files_searched == 0 {
+            let mut error_msg = format!("No searchable text files were found matching '{}'. Suggestions: check file permissions and ensure files are not binary.", file_pattern);
+            if !skipped_large_files.is_empty() {
+                error_msg.push_str(&format!(
+                    " Note: {} files were skipped because they are over 1MB: {}. Use 'include_large: true' to search them.",
+                    skipped_large_files.len(),
+                    skipped_large_files.join(", ")
+                ));
+            }
             return Ok(json!({
-                "error": format!("No searchable text files were found matching '{}'. Suggestions: check file permissions and ensure files are not binary.", file_pattern)
+                "error": error_msg
             }));
         }
 
         if matches.is_empty() {
+            let mut error_msg = format!("No matches found for pattern '{}' in files matching '{}'. Suggestions: check the pattern for typos, ensure the correct case is used, or try a simpler search pattern to find the relevant section.", pattern, file_pattern);
+            if !skipped_large_files.is_empty() {
+                error_msg.push_str(&format!(
+                    " Note: {} files were skipped because they are over 1MB: {}. Use 'include_large: true' to search them.",
+                    skipped_large_files.len(),
+                    skipped_large_files.join(", ")
+                ));
+            }
             return Ok(json!({
-                "error": format!("No matches found for pattern '{}' in files matching '{}'. Suggestions: check the pattern for typos, ensure the correct case is used, or try a simpler search pattern to find the relevant section.", pattern, file_pattern),
+                "error": error_msg,
                 "pattern": pattern,
                 "file_pattern": file_pattern,
                 "files_searched": files_searched
             }));
         }
 
-        Ok(json!({
+        let mut res = json!({
             "pattern": pattern,
             "file_pattern": file_pattern,
             "matches": matches,
@@ -223,6 +276,16 @@ impl CallableFunction for GrepTool {
             "files_searched": files_searched,
             "files_with_matches": files_with_matches,
             "truncated": false
-        }))
+        });
+
+        if !skipped_large_files.is_empty() {
+            res["warning"] = json!(format!(
+                "Skipped {} files over 1MB: {}. Use 'include_large: true' to search them.",
+                skipped_large_files.len(),
+                skipped_large_files.join(", ")
+            ));
+        }
+
+        Ok(res)
     }
 }
