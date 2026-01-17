@@ -59,23 +59,23 @@ async fn handle_post(
 ) -> Json<JsonRpcResponse> {
     let mut detail = String::new();
     let mut msg_body = String::new();
-    if request.method == "tools/call" {
-        if let Some(params) = &request.params {
-            if let Some(name) = params.get("name").and_then(|v| v.as_str()) {
-                detail.push_str(&format!(" {}", name.purple()));
+    if request.method == "tools/call"
+        && let Some(params) = &request.params
+    {
+        if let Some(name) = params.get("name").and_then(|v| v.as_str()) {
+            detail.push_str(&format!(" {}", name.purple()));
+        }
+        if let Some(args) = params.get("arguments") {
+            if let Some(session_id) = args.get("session_id").and_then(|v| v.as_str()) {
+                detail.push_str(&format!(
+                    " {}={}",
+                    "session".dimmed(),
+                    format!("\"{}\"", session_id).yellow()
+                ));
             }
-            if let Some(args) = params.get("arguments") {
-                if let Some(session_id) = args.get("session_id").and_then(|v| v.as_str()) {
-                    detail.push_str(&format!(
-                        " {}={}",
-                        "session".dimmed(),
-                        format!("\"{}\"", session_id).yellow()
-                    ));
-                }
-                if let Some(msg) = args.get("message").and_then(|v| v.as_str()) {
-                    for line in msg.lines() {
-                        msg_body.push_str(&format!("\n> {}", line));
-                    }
+            if let Some(msg) = args.get("message").and_then(|v| v.as_str()) {
+                for line in msg.lines() {
+                    msg_body.push_str(&format!("\n> {}", line));
                 }
             }
         }
@@ -212,23 +212,23 @@ impl McpServer {
                 Ok(req) => {
                     let mut detail = String::new();
                     let mut msg_body = String::new();
-                    if req.method == "tools/call" {
-                        if let Some(params) = &req.params {
-                            if let Some(name) = params.get("name").and_then(|v| v.as_str()) {
-                                detail.push_str(&format!(" {}", name.purple()));
+                    if req.method == "tools/call"
+                        && let Some(params) = &req.params
+                    {
+                        if let Some(name) = params.get("name").and_then(|v| v.as_str()) {
+                            detail.push_str(&format!(" {}", name.purple()));
+                        }
+                        if let Some(args) = params.get("arguments") {
+                            if let Some(session_id) = args.get("session_id").and_then(|v| v.as_str()) {
+                                detail.push_str(&format!(
+                                    " {}={}",
+                                    "session".dimmed(),
+                                    format!("\"{}\"", session_id).yellow()
+                                ));
                             }
-                            if let Some(args) = params.get("arguments") {
-                                if let Some(session_id) = args.get("session_id").and_then(|v| v.as_str()) {
-                                    detail.push_str(&format!(
-                                        " {}={}",
-                                        "session".dimmed(),
-                                        format!("\"{}\"", session_id).yellow()
-                                    ));
-                                }
-                                if let Some(msg) = args.get("message").and_then(|v| v.as_str()) {
-                                    for line in msg.lines() {
-                                        msg_body.push_str(&format!("\n> {}", line));
-                                    }
+                            if let Some(msg) = args.get("message").and_then(|v| v.as_str()) {
+                                for line in msg.lines() {
+                                    msg_body.push_str(&format!("\n> {}", line));
                                 }
                             }
                         }
@@ -300,19 +300,18 @@ impl McpServer {
                                 format!("\"{}\"", session_id).yellow()
                             ));
                         }
-                        if let Some(content) = res.get("content").and_then(|v| v.as_array()) {
-                            if let Some(text) = content
-                                .get(0)
+                        if let Some(content) = res.get("content").and_then(|v| v.as_array())
+                            && let Some(text) = content
+                                .first()
                                 .and_then(|v| v.get("text"))
                                 .and_then(|v| v.as_str())
-                            {
-                                resp_body.push_str(&format!("\n{}", text));
-                            }
+                        {
+                            resp_body.push_str(&format!("\n{}", text));
                         }
-                    } else if let Some(err) = &response.error {
-                        if let Some(msg) = err.get("message").and_then(|v| v.as_str()) {
-                            resp_body.push_str(&format!("\n{}", msg.red()));
-                        }
+                    } else if let Some(err) = &response.error
+                        && let Some(msg) = err.get("message").and_then(|v| v.as_str())
+                    {
+                        resp_body.push_str(&format!("\n{}", msg.red()));
                     }
                     if let Ok(resp_str) = serde_json::to_string(&response) {
                         crate::log_event(&format!(

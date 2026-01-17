@@ -40,6 +40,7 @@ axum = "0.8"
 async-stream = "0.3"
 tower-http = { version = "0.6", features = ["cors"] }
 chrono = "0.4"
+ctrlc = "3.4"
 grep = "0.3"
 ignore = "0.4"
 globset = "0.4"

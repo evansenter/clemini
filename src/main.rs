@@ -7,7 +7,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
-use tokio_util::sync::CancellationToken;
 use std::env;
 use std::io::{self, IsTerminal, Read, Write};
 use std::time::Instant;
@@ -25,18 +24,17 @@ const CONTEXT_WINDOW_LIMIT: u32 = 1_000_000;
 
 pub fn log_event(message: &str) {
     colored::control::set_override(true);
-    if let Ok(path) = std::env::var("CLEMINI_LOG") {
-        if let Ok(mut file) = std::fs::OpenOptions::new()
+    if let Ok(path) = std::env::var("CLEMINI_LOG")
+        && let Ok(mut file) = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(path)
-        {
-            let now = std::time::SystemTime::now();
-            let datetime: chrono::DateTime<chrono::Local> = now.into();
-            let timestamp = datetime.format("%H:%M:%S%.3f").to_string();
-            use std::io::Write;
-            let _ = writeln!(file, "[{}] {}", timestamp, message);
-        }
+    {
+        let now = std::time::SystemTime::now();
+        let datetime: chrono::DateTime<chrono::Local> = now.into();
+        let timestamp = datetime.format("%H:%M:%S%.3f").to_string();
+        use std::io::Write;
+        let _ = writeln!(file, "[{}] {}", timestamp, message);
     }
 }
 
@@ -60,6 +58,7 @@ const SYSTEM_PROMPT: &str = r#"You are clemini, a coding assistant that helps us
 - `edit` - Surgical string replacement. Use `replace_all: true` to rename variables or update recurring patterns. Default is unique match only.
 - `write_file` - Create new files or completely rewrite existing ones.
 - `bash` - Run shell commands. Use for: git, builds, tests, `ls`, complex pipelines.
+- `gh` - Use this via `bash` when looking up PR or issue information about projects.
 - `web_search` - Search the web via DuckDuckGo for current information.
 - `web_fetch` - Fetch content from a specific URL.
 - `ask_user` - **Use this when uncertain.** Ask clarifying questions rather than guessing wrong.
@@ -693,18 +692,15 @@ pub async fn run_interaction(
         interaction = interaction.with_previous_interaction(prev_id);
     }
 
-    let cancel_token = CancellationToken::new();
-    let c_token = cancel_token.clone();
-    let ctrl_c_task = tokio::spawn(async move {
-        let _ = tokio::signal::ctrl_c().await;
-        c_token.cancel();
-    });
+    static CANCELLED: AtomicBool = AtomicBool::new(false);
+    CANCELLED.store(false, Ordering::SeqCst); // Reset for each interaction
 
-    let mut stream = Box::pin(
-        interaction
-            .create_stream_with_auto_functions()
-            .take_until(cancel_token.cancelled()),
-    );
+    ctrlc::set_handler(move || {
+        eprintln!("\n{}", "[ctrl-c received]".yellow());
+        CANCELLED.store(true, Ordering::SeqCst);
+    }).ok();
+
+    let mut stream = Box::pin(interaction.create_stream_with_auto_functions());
 
     let mut last_id = previous_interaction_id.map(String::from);
     let mut current_context_size: u32 = 0;
@@ -717,6 +713,11 @@ pub async fn run_interaction(
     let mut spinner: Option<Spinner> = None;
 
     while let Some(event) = stream.next().await {
+        // Check for cancellation at each iteration
+        if CANCELLED.load(Ordering::SeqCst) {
+            eprintln!("{}", "[cancelled]".yellow());
+            break;
+        }
         match event {
             Ok(event) => match &event.chunk {
                 AutoFunctionStreamChunk::Delta(content) => {
@@ -739,7 +740,7 @@ pub async fn run_interaction(
                             "{} {} {}",
                             "CALL".magenta().bold(),
                             call.name.purple(),
-                            format_tool_args(&call.args).trim().dimmed()
+                            format_tool_args(call.args).trim().dimmed()
                         ));
                         if let Some(ref cb) = progress_fn {
                             cb(InteractionProgress {
@@ -831,18 +832,11 @@ pub async fn run_interaction(
                 _ => {}
             },
             Err(e) => {
-                ctrl_c_task.abort();
                 let err_msg = e.to_string();
                 eprintln!("\n{}", format!("[stream error: {err_msg}]").bright_red());
                 return Err(anyhow::anyhow!(err_msg));
             }
         }
-    }
-
-    ctrl_c_task.abort();
-
-    if cancel_token.is_cancelled() {
-        eprintln!("\n{}", "(tool execution cancelled by user)".yellow());
     }
 
     // Render any remaining text (e.g., if stream ended abruptly or on error)

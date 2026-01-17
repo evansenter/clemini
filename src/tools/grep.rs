@@ -1,8 +1,9 @@
 use async_trait::async_trait;
 use genai_rs::{CallableFunction, FunctionDeclaration, FunctionError, FunctionParameters};
 use grep::regex::RegexMatcherBuilder;
-use grep::searcher::{SearcherBuilder, Sink, SinkMatch, SinkContext, SinkFinish};
+use grep::searcher::{SearcherBuilder, Sink, SinkMatch, SinkContext, SinkFinish, BinaryDetection};
 use ignore::WalkBuilder;
+use ignore::overrides::OverrideBuilder;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -13,6 +14,7 @@ pub struct GrepTool {
 }
 
 const DEFAULT_EXCLUDES: &[&str] = &[".git", "node_modules", "target", "__pycache__", ".venv"];
+const MAX_LINE_LENGTH: usize = 1000;
 
 impl GrepTool {
     pub fn new(cwd: PathBuf) -> Self {
@@ -21,8 +23,8 @@ impl GrepTool {
 }
 
 fn truncate_line(l: &str) -> String {
-    if l.len() > 1000 {
-        let truncated: String = l.chars().take(1000).collect();
+    if l.len() > MAX_LINE_LENGTH {
+        let truncated: String = l.chars().take(MAX_LINE_LENGTH).collect();
         format!("{}... [truncated]", truncated)
     } else {
         l.to_string()
@@ -83,25 +85,23 @@ impl<'a> Sink for GrepSink<'a> {
             if matches.len() >= self.max_results {
                 return Ok(false);
             }
-        } else {
-            if let Some(block) = self.current_block.as_mut() {
-                if line_number > block.lines.last().unwrap().0 + 1 {
-                    self.flush_block();
-                    self.current_block = Some(MatchBlock {
-                        file: path_str,
-                        line: line_number,
-                        lines: vec![(line_number, content, true)],
-                    });
-                } else {
-                    block.lines.push((line_number, content, true));
-                }
-            } else {
+        } else if let Some(block) = self.current_block.as_mut() {
+            if line_number > block.lines.last().unwrap().0 + 1 {
+                self.flush_block();
                 self.current_block = Some(MatchBlock {
                     file: path_str,
                     line: line_number,
                     lines: vec![(line_number, content, true)],
                 });
+            } else {
+                block.lines.push((line_number, content, true));
             }
+        } else {
+            self.current_block = Some(MatchBlock {
+                file: path_str,
+                line: line_number,
+                lines: vec![(line_number, content, true)],
+            });
         }
 
         let matches_len = self.matches.lock().unwrap().len();
@@ -216,6 +216,7 @@ impl CallableFunction for GrepTool {
             .before_context(context as usize)
             .after_context(context as usize)
             .line_number(true)
+            .binary_detection(BinaryDetection::quit(b'\x00'))
             .build();
 
         let matches = Arc::new(Mutex::new(Vec::<Value>::new()));
@@ -226,13 +227,14 @@ impl CallableFunction for GrepTool {
         glob_builder.add(Glob::new(file_pattern).map_err(|e| FunctionError::ExecutionError(format!("Invalid file pattern: {}", e).into()))?);
         let glob_set = glob_builder.build().map_err(|e| FunctionError::ExecutionError(format!("Failed to build glob set: {}", e).into()))?;
 
-        let mut walker = WalkBuilder::new(&self.cwd);
+        let mut override_builder = OverrideBuilder::new(&self.cwd);
         for exclude in DEFAULT_EXCLUDES {
-            walker.add_custom_ignore_filename(exclude);
+            override_builder.add(&format!("!{}", exclude)).map_err(|e| FunctionError::ExecutionError(format!("Invalid exclude: {}", e).into()))?;
         }
-        // Actually DEFAULT_EXCLUDES are directories, we should probably just use them as overrides or similar.
-        // ignore crate already handles .git etc by default.
+        let overrides = override_builder.build().map_err(|e| FunctionError::ExecutionError(format!("Failed to build overrides: {}", e).into()))?;
 
+        let mut walker = WalkBuilder::new(&self.cwd);
+        walker.overrides(overrides);
         let walk = walker.build();
         for result in walk {
             let entry = match result {
@@ -240,7 +242,7 @@ impl CallableFunction for GrepTool {
                 Err(_) => continue,
             };
 
-            if !entry.file_type().map_or(false, |ft| ft.is_file()) {
+            if !entry.file_type().is_some_and(|ft| ft.is_file()) {
                 continue;
             }
 
@@ -261,7 +263,7 @@ impl CallableFunction for GrepTool {
             };
 
             let prev_count = matches.lock().unwrap().len();
-            if let Err(_) = searcher.search_path(&matcher, path, &mut sink) {
+            if searcher.search_path(&matcher, path, &mut sink).is_err() {
                 continue;
             }
             if matches.lock().unwrap().len() > prev_count {
