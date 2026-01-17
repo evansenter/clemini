@@ -204,6 +204,7 @@ impl McpServer {
 
         let stdin = io::stdin();
         let mut reader = BufReader::new(stdin).lines();
+        let mut current_task: Option<tokio::task::JoinHandle<()>> = None;
 
         while let Some(line) = reader.next_line().await? {
             if line.trim().is_empty() {
@@ -261,6 +262,12 @@ impl McpServer {
 
             // JSON-RPC notifications don't get responses
             if request.method.starts_with("notifications/") {
+                if request.method == "notifications/cancelled"
+                    && let Some(handle) = current_task.take()
+                {
+                    handle.abort();
+                    crate::log_event(&format!("{} task cancelled by client", "ABORTED".red()));
+                }
                 continue;
             }
 
@@ -269,7 +276,7 @@ impl McpServer {
                 let self_clone = Arc::clone(&self);
                 let tx_clone = tx.clone();
                 let request_clone = request.clone();
-                tokio::spawn(async move {
+                current_task = Some(tokio::spawn(async move {
                     let response = match self_clone
                         .handle_request(request_clone.clone(), tx_clone.clone())
                         .await
@@ -326,7 +333,7 @@ impl McpServer {
                         ));
                         let _ = tx_clone.send(format!("{}\n", resp_str));
                     }
-                });
+                }));
                 continue;
             }
 
