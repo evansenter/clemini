@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use genai_rs::{CallableFunction, FunctionDeclaration, FunctionError, FunctionParameters};
 use serde_json::{Value, json};
 use std::path::PathBuf;
+use strsim::normalized_levenshtein;
 use tracing::instrument;
 
 use super::resolve_and_validate_path;
@@ -19,6 +20,45 @@ impl EditTool {
 
 fn offset_to_line(content: &str, offset: usize) -> usize {
     content[..offset].lines().count() + 1
+}
+
+/// Find strings in content similar to the target.
+/// Returns up to `max_suggestions` matches with similarity >= `threshold`.
+fn find_similar_strings(
+    content: &str,
+    target: &str,
+    max_suggestions: usize,
+    threshold: f64,
+) -> Vec<(String, usize, f64)> {
+    let target_lines: Vec<&str> = target.lines().collect();
+    let target_line_count = target_lines.len();
+    let content_lines: Vec<&str> = content.lines().collect();
+
+    let mut candidates: Vec<(String, usize, f64)> = Vec::new();
+
+    // For single-line targets, compare against individual lines
+    if target_line_count == 1 {
+        for (i, line) in content_lines.iter().enumerate() {
+            let similarity = normalized_levenshtein(target, line);
+            if similarity >= threshold && similarity < 1.0 {
+                candidates.push((line.to_string(), i + 1, similarity));
+            }
+        }
+    } else {
+        // For multi-line targets, use sliding window
+        for i in 0..=content_lines.len().saturating_sub(target_line_count) {
+            let window = content_lines[i..i + target_line_count].join("\n");
+            let similarity = normalized_levenshtein(target, &window);
+            if similarity >= threshold && similarity < 1.0 {
+                candidates.push((window, i + 1, similarity));
+            }
+        }
+    }
+
+    // Sort by similarity descending
+    candidates.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+    candidates.truncate(max_suggestions);
+    candidates
 }
 
 #[async_trait]
@@ -104,10 +144,39 @@ impl CallableFunction for EditTool {
         let matches: Vec<_> = content.match_indices(old_string).collect();
 
         if matches.is_empty() {
-            return Ok(json!({
-                "error": format!("The 'old_string' was not found in {}. Ensure the string matches exactly, including whitespace and indentation. Use 'read_file' to confirm the file's current content.", file_path),
+            let suggestions = find_similar_strings(&content, old_string, 3, 0.6);
+
+            let mut response = json!({
+                "error": format!(
+                    "The 'old_string' was not found in {}. Ensure the string matches exactly, including whitespace and indentation.",
+                    file_path
+                ),
                 "file_path": file_path
-            }));
+            });
+
+            if !suggestions.is_empty() {
+                let suggestion_details: Vec<Value> = suggestions
+                    .iter()
+                    .map(|(text, line, similarity)| {
+                        json!({
+                            "line": line,
+                            "similarity": format!("{:.0}%", similarity * 100.0),
+                            "text": if text.len() > 100 {
+                                format!("{}...", &text[..100])
+                            } else {
+                                text.clone()
+                            }
+                        })
+                    })
+                    .collect();
+
+                response["suggestions"] = json!(suggestion_details);
+                response["hint"] = json!(
+                    "Similar content found. Check for whitespace differences or use read_file to verify current content."
+                );
+            }
+
+            return Ok(response);
         }
 
         if !replace_all && matches.len() > 1 {
@@ -310,6 +379,48 @@ mod tests {
 
         let saved_content = fs::read_to_string(&file_path).unwrap();
         assert_eq!(saved_content, "hello 🦀");
+    }
+
+    #[tokio::test]
+    async fn test_edit_tool_fuzzy_suggestions() {
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().to_path_buf();
+        let file_path = cwd.join("test.txt");
+        fs::write(&file_path, "fn hello_world() {\n    println!(\"hi\");\n}").unwrap();
+
+        let tool = EditTool::new(cwd.clone(), vec![cwd.clone()]);
+        let args = json!({
+            "file_path": "test.txt",
+            "old_string": "fn hello_wrold() {",  // typo
+            "new_string": "fn greet() {"
+        });
+
+        let result = tool.call(args).await.unwrap();
+        assert!(result["error"].as_str().unwrap().contains("not found"));
+        assert!(result["suggestions"].is_array());
+        assert!(!result["suggestions"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_edit_tool_no_suggestions_when_nothing_similar() {
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().to_path_buf();
+        let file_path = cwd.join("test.txt");
+        fs::write(&file_path, "completely different content").unwrap();
+
+        let tool = EditTool::new(cwd.clone(), vec![cwd.clone()]);
+        let args = json!({
+            "file_path": "test.txt",
+            "old_string": "xyz123abc",
+            "new_string": "replacement"
+        });
+
+        let result = tool.call(args).await.unwrap();
+        assert!(result["error"].as_str().unwrap().contains("not found"));
+        assert!(
+            result.get("suggestions").is_none()
+                || result["suggestions"].as_array().unwrap().is_empty()
+        );
     }
 
     #[tokio::test]
