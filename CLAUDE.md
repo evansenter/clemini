@@ -32,8 +32,7 @@ The CLI has two modes: single-prompt (`-p "prompt"`) and interactive REPL.
 When encountering API issues, file at: https://github.com/evansenter/genai-rs/issues
 
 Known issues:
-- [#367](https://github.com/evansenter/genai-rs/issues/367) - `InteractionBuilder` typestate makes conditional chaining awkward
-- [#368](https://github.com/evansenter/genai-rs/issues/368) - `FunctionExecutionResult` missing args field for logging
+- [#367](https://github.com/evansenter/genai-rs/issues/367) - `InteractionBuilder` typestate makes conditional chaining awkward (PR #369 open)
 
 Debugging: `LOUD_WIRE=1` logs all HTTP requests/responses.
 
