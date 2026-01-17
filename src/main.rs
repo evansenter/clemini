@@ -107,7 +107,7 @@ This is NOT optional. Users need to follow your thought process. One line per st
 - `edit` - Surgical string replacement. Use `replace_all: true` for renaming across a file.
 - `write_file` - Create new files or completely overwrite existing ones.
 - `glob` - Find files by pattern: `**/*.rs`, `src/**/*.ts`
-- `grep` - Search file contents with regex. Use `context: N` for surrounding lines.
+- `grep` - Search file contents. **Always prefer this over `bash grep`.** Use `context: N` for surrounding lines.
 - `bash` - Shell commands: git, builds, tests. For GitHub, use `gh`: `gh issue view 34`, `gh pr view`.
 - `ask_user` - **Use when uncertain.** Ask clarifying questions rather than guessing.
 - `todo_write` - **Use for 3+ step tasks.** Break work into trackable items, show progress visibly.
