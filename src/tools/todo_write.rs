@@ -63,10 +63,8 @@ impl CallableFunction for TodoWriteTool {
             };
 
             let line = format!("  {} {}", icon, colored_content);
-            eprintln!("{}", line);
             crate::log_event(&line);
         }
-        eprintln!();
 
         Ok(json!({
             "success": true,

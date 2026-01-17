@@ -45,20 +45,16 @@ impl CallableFunction for AskUserTool {
 
         let options = args.get("options").and_then(|v| v.as_array());
 
-        let q_line = format!("\n{}", question);
-        eprintln!("{}", q_line);
-        crate::log_event(&q_line);
+        crate::log_event(&format!("\n{}", question));
 
         if let Some(opts) = options {
             for (i, opt) in opts.iter().enumerate() {
                 if let Some(opt_str) = opt.as_str() {
-                    let opt_line = format!("{}. {}", i + 1, opt_str);
-                    eprintln!("{}", opt_line);
-                    crate::log_event(&opt_line);
+                    crate::log_event(&format!("{}. {}", i + 1, opt_str));
                 }
             }
         }
-        eprint!("> ");
+        eprint!("> ");  // Keep prompt on same line as input
         let _ = io::stderr().flush();
 
         let mut answer = String::new();
