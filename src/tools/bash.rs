@@ -204,7 +204,7 @@ impl CallableFunction for BashTool {
             let msg = format!("[bash CAUTION: {command}] (user confirmed)");
             crate::log_event(&msg);
         } else {
-            crate::log_event(
+            crate::log_event_raw(
                 &format!("[bash] running: \"{}\"", command)
                     .dimmed()
                     .to_string(),
@@ -254,10 +254,10 @@ impl CallableFunction for BashTool {
                         match line {
                             Ok(Some(line)) => {
                                 if logged_stdout_lines < MAX_LOG_LINES {
-                                    crate::log_event(&line.dimmed().to_string());
+                                    crate::log_event_raw(&line.dimmed().to_string());
                                     logged_stdout_lines += 1;
                                 } else if logged_stdout_lines == MAX_LOG_LINES {
-                                    crate::log_event(&"[...more stdout...]".dimmed().to_string());
+                                    crate::log_event_raw(&"[...more stdout...]".dimmed().to_string());
                                     logged_stdout_lines += 1;
                                 }
                                 captured_stdout.push_str(&line);
@@ -272,10 +272,10 @@ impl CallableFunction for BashTool {
                         match line {
                             Ok(Some(line)) => {
                                 if logged_stderr_lines < MAX_LOG_LINES {
-                                    crate::log_event(&line.dimmed().to_string());
+                                    crate::log_event_raw(&line.dimmed().to_string());
                                     logged_stderr_lines += 1;
                                 } else if logged_stderr_lines == MAX_LOG_LINES {
-                                    crate::log_event(&"[...more stderr...]".dimmed().to_string());
+                                    crate::log_event_raw(&"[...more stderr...]".dimmed().to_string());
                                     logged_stderr_lines += 1;
                                 }
                                 captured_stderr.push_str(&line);
