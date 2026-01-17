@@ -90,9 +90,14 @@ fn write_to_log_file(path: impl Into<PathBuf>, rendered: &str) -> std::io::Resul
         .append(true)
         .open(path.into())?;
 
-    for line in rendered.trim_end().lines() {
-        let timestamp = chrono::Local::now().format("%H:%M:%S%.3f");
-        writeln!(file, "[{}] {}", timestamp, line)?;
+    let rendered = rendered.trim_end();
+    if rendered.is_empty() {
+        writeln!(file)?;
+    } else {
+        for line in rendered.lines() {
+            let timestamp = chrono::Local::now().format("%H:%M:%S%.3f");
+            writeln!(file, "[{}] {}", timestamp, line)?;
+        }
     }
     Ok(())
 }

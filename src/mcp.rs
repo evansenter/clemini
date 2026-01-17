@@ -88,13 +88,18 @@ async fn handle_post(
     Json(request): Json<JsonRpcRequest>,
 ) -> Json<JsonRpcResponse> {
     let (detail, msg_body) = format_request_log(&request.method, &request.params);
+    crate::log_event("");
     crate::log_event(&format!(
-        "{} {}{}{}",
+        "{} {}{}",
         "IN".green(),
         request.method.bold(),
         detail,
-        msg_body
     ));
+    if !msg_body.is_empty() {
+        crate::log_event("");
+        crate::log_event(msg_body.trim());
+        crate::log_event("");
+    }
 
     // For HTTP, we use the server's broadcast channel for notifications
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
@@ -107,6 +112,7 @@ async fn handle_post(
 
     match server.handle_request(request.clone(), tx).await {
         Ok(response) => {
+            crate::log_event("");
             crate::log_event(&format!(
                 "{} {} ({})",
                 "OUT".cyan(),
@@ -212,13 +218,18 @@ impl McpServer {
             let request: JsonRpcRequest = match serde_json::from_str::<JsonRpcRequest>(&line) {
                 Ok(req) => {
                     let (detail, msg_body) = format_request_log(&req.method, &req.params);
+                    crate::log_event("");
                     crate::log_event(&format!(
-                        "{} {}{}{}",
+                        "{} {}{}",
                         "IN".green(),
                         req.method.bold(),
                         detail,
-                        msg_body
                     ));
+                    if !msg_body.is_empty() {
+                        crate::log_event("");
+                        crate::log_event(msg_body.trim());
+                        crate::log_event("");
+                    }
                     req
                 }
                 Err(e) => {
@@ -289,14 +300,19 @@ impl McpServer {
                         resp_body.push_str(&format!("\n{}", msg.red()));
                     }
                     if let Ok(resp_str) = serde_json::to_string(&response) {
+                        crate::log_event("");
                         crate::log_event(&format!(
-                            "{} {} ({}){}{}",
+                            "{} {} ({}){}",
                             "OUT".cyan(),
                             request_clone.method.bold(),
                             format_status(&response),
                             detail,
-                            resp_body
                         ));
+                        if !resp_body.is_empty() {
+                            crate::log_event("");
+                            crate::log_event(resp_body.trim());
+                            crate::log_event("");
+                        }
                         let _ = tx_clone.send(format!("{}\n", resp_str));
                     }
                 }));
@@ -306,6 +322,7 @@ impl McpServer {
             // Handle other requests synchronously
             let response = self.handle_request(request.clone(), tx.clone()).await?;
             let resp_str = serde_json::to_string(&response)?;
+            crate::log_event("");
             crate::log_event(&format!(
                 "{} {} ({})",
                 "OUT".cyan(),
