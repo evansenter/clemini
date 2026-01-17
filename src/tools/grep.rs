@@ -24,7 +24,7 @@ impl CallableFunction for GrepTool {
     fn declaration(&self) -> FunctionDeclaration {
         FunctionDeclaration::new(
             "grep".to_string(),
-            "Search for a pattern in files. Returns matching lines with file paths and line numbers. Supports regex patterns.".to_string(),
+            "Search for a pattern in files. Returns matching lines with file paths and line numbers. Supports regex patterns, case-insensitive search, and context lines.".to_string(),
             FunctionParameters::new(
                 "object".to_string(),
                 json!({
@@ -35,6 +35,14 @@ impl CallableFunction for GrepTool {
                     "file_pattern": {
                         "type": "string",
                         "description": "Glob pattern for files to search (e.g., '**/*.rs', 'src/*.ts'). Defaults to '**/*' if not specified."
+                    },
+                    "case_insensitive": {
+                        "type": "boolean",
+                        "description": "If true, perform case-insensitive matching (default: false)"
+                    },
+                    "context": {
+                        "type": "integer",
+                        "description": "Number of lines to show before and after each match (default: 0)"
                     },
                     "max_results": {
                         "type": "integer",
@@ -57,6 +65,16 @@ impl CallableFunction for GrepTool {
             .and_then(|v| v.as_str())
             .unwrap_or("**/*");
 
+        let case_insensitive = args
+            .get("case_insensitive")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        let context = args
+            .get("context")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as usize;
+
         let max_results = usize::try_from(
             args.get("max_results")
                 .and_then(serde_json::Value::as_u64)
@@ -64,8 +82,14 @@ impl CallableFunction for GrepTool {
         )
         .unwrap_or(usize::MAX);
 
-        // Compile regex
-        let regex = match Regex::new(pattern) {
+        // Compile regex with optional case-insensitivity
+        let pattern_str = if case_insensitive {
+            format!("(?i){}", pattern)
+        } else {
+            pattern.to_string()
+        };
+
+        let regex = match Regex::new(&pattern_str) {
             Ok(r) => r,
             Err(e) => {
                 return Ok(json!({
@@ -129,8 +153,9 @@ impl CallableFunction for GrepTool {
 
             files_searched += 1;
             let mut file_has_match = false;
+            let lines: Vec<&str> = content.lines().collect();
 
-            for (line_num, line) in content.lines().enumerate() {
+            for (line_num, line) in lines.iter().enumerate() {
                 if regex.is_match(line) {
                     if !file_has_match {
                         file_has_match = true;
@@ -139,10 +164,25 @@ impl CallableFunction for GrepTool {
 
                     let relative_path = make_relative(&path, &self.cwd);
 
+                    // Collect context lines if requested
+                    let match_content = if context > 0 {
+                        let start = line_num.saturating_sub(context);
+                        let end = (line_num + context + 1).min(lines.len());
+                        let context_lines: Vec<String> = (start..end)
+                            .map(|i| {
+                                let prefix = if i == line_num { ">" } else { " " };
+                                format!("{}{:>4}:{}", prefix, i + 1, lines[i])
+                            })
+                            .collect();
+                        context_lines.join("\n")
+                    } else {
+                        line.trim().to_string()
+                    };
+
                     matches.push(json!({
                         "file": relative_path,
                         "line": line_num + 1,
-                        "content": line.trim()
+                        "content": match_content
                     }));
 
                     if matches.len() >= max_results {
