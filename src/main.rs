@@ -602,7 +602,7 @@ pub async fn run_interaction(
 ) -> Result<InteractionResult> {
     // Build the interaction - system instruction must be sent on every turn
     // (it's NOT inherited via previousInteractionId per genai-rs docs)
-    let interaction = client
+    let mut interaction = client
         .interaction()
         .with_model(model)
         .with_tool_service(tool_service.clone())
@@ -610,13 +610,11 @@ pub async fn run_interaction(
         .with_content(vec![Content::text(input)])
         .with_max_function_call_loops(100);
 
-    let mut stream = if let Some(prev_id) = previous_interaction_id {
-        interaction
-            .with_previous_interaction(prev_id)
-            .create_stream_with_auto_functions()
-    } else {
-        interaction.create_stream_with_auto_functions()
-    };
+    if let Some(prev_id) = previous_interaction_id {
+        interaction = interaction.with_previous_interaction(prev_id);
+    }
+
+    let mut stream = interaction.create_stream_with_auto_functions();
 
     let mut last_id: Option<String> = None;
     let mut current_context_size: u32 = 0;
@@ -652,7 +650,7 @@ pub async fn run_interaction(
                         let turn_tokens = usage.total_input_tokens.unwrap_or(0)
                             + usage.total_output_tokens.unwrap_or(0);
                         current_context_size = turn_tokens;
-                        total_tokens += turn_tokens;
+                        total_tokens = turn_tokens;
                     }
 
                     // Start spinner if not an interactive tool
@@ -666,16 +664,9 @@ pub async fn run_interaction(
                     // Stop spinner
                     stop_spinner(&mut spinner).await;
 
-                    // Calculate tokens added by function results.
-                    // Note: This is a crude estimate (approx. 4 chars per token).
-                    let mut tokens_added: u32 = 0;
                     for result in results {
                         tool_calls.push(result.name.clone());
-                        let result_str = result.result.to_string();
-                        tokens_added += u32::try_from(result_str.len() / 4).unwrap_or(u32::MAX); // ~4 chars per token
                     }
-                    current_context_size += tokens_added;
-                    // We don't add to total_tokens here because the next turn's input usage will include these.
 
                     // Log each result with timing and tokens
                     for result in results {
@@ -688,12 +679,11 @@ pub async fn run_interaction(
                         let elapsed_secs = result.duration.as_secs_f32();
 
                         eprintln!(
-                            "[{}] {}{}, {:.1}k tokens (+{}){}",
+                            "[{}] {}{}, {:.1}k tokens{}",
                             result.name.cyan(),
                             format_tool_args(&result.args).dimmed(),
                             format!("{:.1}s", elapsed_secs).yellow(),
                             f64::from(current_context_size) / 1000.0,
-                            tokens_added,
                             error_suffix
                         );
                     }
@@ -705,19 +695,11 @@ pub async fn run_interaction(
                     flush_response(&mut response_text, &skin, stream_output, true);
 
                     // Log final token usage
-                    // Note: Don't replace current_context_size here - keep our accumulated estimate
-                    // because the API may return 0 for input tokens in the final auto-function response.
                     if let Some(usage) = &resp.usage {
                         let total_in = usage.total_input_tokens.unwrap_or(0);
                         let total_out = usage.total_output_tokens.unwrap_or(0);
-                        // Only update context if API reports meaningful values
-                        if total_in > 0 {
-                            current_context_size = total_in + total_out;
-                        } else {
-                            // API returned 0 input tokens - add only output to our estimate
-                            current_context_size += total_out;
-                        }
-                        total_tokens += total_in + total_out;
+                        current_context_size = total_in + total_out;
+                        total_tokens = current_context_size;
                         eprintln!(
                             "[{}→{} tok]",
                             total_in,
