@@ -92,18 +92,17 @@ pub fn set_output_sink(sink: Arc<dyn OutputSink>) {
 pub fn log_event(message: &str) {
     if let Some(sink) = OUTPUT_SINK.get() {
         sink.emit(message, true);
-    } else {
-        log_event_to_file(message, true);
     }
+    // No fallback - OUTPUT_SINK is always set in production before logging.
+    // Skipping prevents test pollution of shared log files.
 }
 
 /// Log without markdown rendering (for protocol messages with long content)
 pub fn log_event_raw(message: &str) {
     if let Some(sink) = OUTPUT_SINK.get() {
         sink.emit(message, false);
-    } else {
-        log_event_to_file(message, false);
     }
+    // No fallback - see log_event comment
 }
 
 /// Log to file only (skip terminal output even with TerminalSink)
