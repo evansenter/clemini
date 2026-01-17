@@ -60,6 +60,8 @@ Debugging: `LOUD_WIRE=1` logs all HTTP requests/responses.
 
 **Always verify compilation** - After making changes, run `cargo check` or `cargo clippy -- -D warnings` before reporting completion. Never leave code in a non-compiling state.
 
+**Restart clemini MCP after feature changes** - After implementing changes that affect the MCP server (SYSTEM_PROMPT, tools, mcp.rs), run `clemini_rebuild` to restart the server with the new code.
+
 **Minimal scope** - Only implement what was asked. Don't add "nice to have" features beyond the request. For example, if asked for a stdio server, don't also add HTTP support.
 
 **Complete dependency management** - When using a new crate, ensure it's added to Cargo.toml with the proper features before writing code that depends on it. Never reference crates that aren't in dependencies.
