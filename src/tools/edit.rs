@@ -17,6 +17,10 @@ impl EditTool {
     }
 }
 
+fn offset_to_line(content: &str, offset: usize) -> usize {
+    content[..offset].lines().count() + 1
+}
+
 #[async_trait]
 impl CallableFunction for EditTool {
     fn declaration(&self) -> FunctionDeclaration {
@@ -107,10 +111,22 @@ impl CallableFunction for EditTool {
         }
 
         if !replace_all && matches.len() > 1 {
+            let lines: Vec<_> = matches
+                .iter()
+                .map(|(offset, _)| offset_to_line(&content, *offset))
+                .collect();
+
+            let lines_str = lines
+                .iter()
+                .map(|l| l.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+
             return Ok(json!({
-                "error": format!("The 'old_string' was found {} times in {}. It must be unique to ensure the correct replacement. Provide more surrounding context to make it unique, or set 'replace_all' to true.", matches.len(), file_path),
+                "error": format!("The 'old_string' was found {} times in {} at lines {}. It must be unique to ensure the correct replacement. Provide more surrounding context to make it unique, or set 'replace_all' to true.", matches.len(), file_path, lines_str),
                 "file_path": file_path,
-                "occurrences": matches.len()
+                "occurrences": matches.len(),
+                "lines": lines
             }));
         }
 
@@ -197,7 +213,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let cwd = dir.path().to_path_buf();
         let file_path = cwd.join("test.txt");
-        fs::write(&file_path, "repeat repeat").unwrap();
+        fs::write(&file_path, "repeat\nrepeat").unwrap();
 
         let tool = EditTool::new(cwd.clone(), vec![cwd.clone()]);
         let args = json!({
@@ -208,6 +224,9 @@ mod tests {
 
         let result = tool.call(args).await.unwrap();
         assert!(result["error"].as_str().unwrap().contains("must be unique"));
+        assert!(result["error"].as_str().unwrap().contains("at lines 1, 2"));
+        assert_eq!(result["occurrences"], 2);
+        assert_eq!(result["lines"], json!([1, 2]));
     }
 
     #[tokio::test]

@@ -242,7 +242,7 @@ This is NOT optional. Users need to follow your thought process. One line per st
 ## Tools
 - `read_file(file_path, offset?, limit?)` - Read files. Use `limit: 100` for first read. If `truncated: true`, continue with `offset`.
 - `edit(file_path, old_string, new_string, replace_all?)` - Surgical string replacement. Params are TOP-LEVEL, not nested in operations.
-- `write_file(file_path, contents)` - Create new files or completely overwrite existing ones.
+- `write_file(file_path, content)` - Create new files or completely overwrite existing ones.
 - `glob` - Find files by pattern: `**/*.rs`, `src/**/*.ts`
 - `grep` - Search file contents. **Always prefer this over `bash grep`.** Use `context: N` for surrounding lines.
 - `bash` - Shell commands: git, builds, tests. For GitHub, use `gh`: `gh issue view 34`, `gh pr view`.
