@@ -122,14 +122,22 @@ impl CallableFunction for EditTool {
 
         // Write the file
         match tokio::fs::write(&path, &new_content).await {
-            Ok(()) => Ok(json!({
-                "file_path": file_path,
-                "success": true,
-                "old_length": old_string.len(),
-                "new_length": new_string.len(),
-                "file_size": new_content.len(),
-                "replacements": count
-            })),
+            Ok(()) => {
+                // Log the diff
+                let diff_output = crate::diff::format_diff(old_string, new_string, 2);
+                if !diff_output.is_empty() {
+                    crate::log_event_raw(&diff_output);
+                }
+
+                Ok(json!({
+                    "file_path": file_path,
+                    "success": true,
+                    "old_length": old_string.len(),
+                    "new_length": new_string.len(),
+                    "file_size": new_content.len(),
+                    "replacements": count
+                }))
+            }
             Err(e) => Ok(json!({
                 "error": format!("Failed to write {}: {}. Check file permissions.", path.display(), e)
             })),

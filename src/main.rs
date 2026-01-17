@@ -15,6 +15,7 @@ use termimad::MadSkin;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
+mod diff;
 mod mcp;
 mod tools;
 
