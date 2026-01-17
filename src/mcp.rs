@@ -11,8 +11,8 @@ use crate::tools::CleminiToolService;
 
 #[derive(Debug, Deserialize)]
 pub struct JsonRpcRequest {
-    #[serde(rename = "jsonrpc")]
-    pub _jsonrpc: String,
+    #[serde(rename = "jsonrpc", default)]
+    pub _jsonrpc: Option<String>,
     pub method: String,
     pub params: Option<Value>,
     pub id: Option<Value>,
@@ -21,7 +21,9 @@ pub struct JsonRpcRequest {
 #[derive(Debug, Serialize)]
 pub struct JsonRpcResponse {
     pub jsonrpc: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<Value>,
     pub id: Option<Value>,
 }
@@ -57,7 +59,7 @@ impl McpServer {
                 continue;
             }
 
-            let request: JsonRpcRequest = match serde_json::from_str(&line) {
+            let request: JsonRpcRequest = match serde_json::from_str::<JsonRpcRequest>(&line) {
                 Ok(req) => req,
                 Err(e) => {
                     let error_resp = JsonRpcResponse {
@@ -76,6 +78,11 @@ impl McpServer {
                     continue;
                 }
             };
+
+            // JSON-RPC notifications don't get responses
+            if request.method.starts_with("notifications/") {
+                continue;
+            }
 
             let response = self.handle_request(request).await?;
             stdout
@@ -125,7 +132,7 @@ impl McpServer {
 
     async fn handle_initialize(&self, _params: Option<Value>) -> Result<Value> {
         Ok(json!({
-            "protocolVersion": "2024-11-05",
+            "protocolVersion": "2025-11-25",
             "capabilities": {
                 "tools": {}
             },

@@ -145,7 +145,8 @@ async fn main() -> Result<()> {
 
     let bash_timeout = args.timeout.or(config.bash_timeout).unwrap_or(60);
 
-    let api_key = env::var("GEMINI_API_KEY").expect("GEMINI_API_KEY environment variable not set");
+    let api_key = env::var("GEMINI_API_KEY")
+        .map_err(|e| anyhow::anyhow!("GEMINI_API_KEY environment variable not set: {}", e))?;
     let client = Client::new(api_key);
 
     let cwd = std::fs::canonicalize(&args.cwd)?;
