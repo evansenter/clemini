@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use std::path::PathBuf;
 use tracing::instrument;
 
-use super::{DEFAULT_EXCLUDES, make_relative, validate_path};
+use super::{DEFAULT_EXCLUDES, make_relative, resolve_and_validate_path, validate_path};
 
 pub struct GlobTool {
     cwd: PathBuf,
@@ -30,6 +30,10 @@ impl CallableFunction for GlobTool {
                     "pattern": {
                         "type": "string",
                         "description": "Glob pattern to match (e.g., '**/*.rs', 'src/**/*.ts', '*.json')"
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "Directory to search in (relative to cwd or absolute), defaults to cwd"
                     }
                 }),
                 vec!["pattern".to_string()],
@@ -44,8 +48,24 @@ impl CallableFunction for GlobTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| FunctionError::ArgumentMismatch("Missing pattern".to_string()))?;
 
-        // Construct full pattern from cwd
-        let full_pattern = self.cwd.join(pattern);
+        let search_path = args.get("path").and_then(|v| v.as_str());
+
+        // Resolve and validate the search path
+        let base_dir = if let Some(p) = search_path {
+            match resolve_and_validate_path(p, &self.cwd, &self.allowed_paths) {
+                Ok(p) => p,
+                Err(e) => {
+                    return Ok(json!({
+                        "error": format!("Access denied for path '{}': {}. Path must be within allowed paths.", p, e)
+                    }));
+                }
+            }
+        } else {
+            self.cwd.clone()
+        };
+
+        // Construct full pattern from base_dir
+        let full_pattern = base_dir.join(pattern);
         let pattern_str = full_pattern.to_string_lossy();
 
         // Logging handled by main.rs event loop
@@ -92,7 +112,7 @@ impl CallableFunction for GlobTool {
 
                 if matches.is_empty() {
                     // Check if the pattern matches a directory
-                    let full_path = self.cwd.join(pattern);
+                    let full_path = base_dir.join(pattern);
                     if validate_path(&full_path, &self.allowed_paths).is_ok_and(|p| p.is_dir()) {
                         return Ok(json!({
                             "error": format!("The pattern '{}' matches a directory, but this tool is for finding files. Suggestion: use '{}/*' to find files within this directory or '{}/**/*' for recursive search.", pattern, pattern, pattern)
@@ -173,5 +193,37 @@ mod tests {
                 .unwrap()
                 .contains("No files matched")
         );
+    }
+
+    #[tokio::test]
+    async fn test_glob_tool_with_path() {
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().to_path_buf();
+        let subdir = cwd.join("subdir");
+        fs::create_dir(&subdir).unwrap();
+        fs::write(subdir.join("test.txt"), "hello").unwrap();
+        fs::write(cwd.join("root.txt"), "world").unwrap();
+
+        let tool = GlobTool::new(cwd.clone(), vec![cwd.clone()]);
+
+        // Search in subdir
+        let args = json!({
+            "pattern": "*.txt",
+            "path": "subdir"
+        });
+
+        let result = tool.call(args).await.unwrap();
+        let matches = result["matches"].as_array().unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].as_str().unwrap(), "subdir/test.txt");
+
+        // Search in root (default)
+        let args = json!({
+            "pattern": "*.txt"
+        });
+        let result = tool.call(args).await.unwrap();
+        let matches = result["matches"].as_array().unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].as_str().unwrap(), "root.txt");
     }
 }
