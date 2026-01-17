@@ -3,8 +3,7 @@ use clap::Parser;
 use colored::Colorize;
 use futures_util::StreamExt;
 use genai_rs::{CallableFunction, Client, Content, StreamChunk, ToolService};
-use rustyline::DefaultEditor;
-use rustyline::error::ReadlineError;
+use reedline::{DefaultPrompt, FileBackedHistory, Reedline, Signal};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::env;
@@ -359,16 +358,18 @@ async fn run_repl(
     stream_output: bool,
     system_prompt: String,
 ) -> Result<()> {
-    let mut rl = DefaultEditor::new()?;
-
     let history_path = home::home_dir().map(|mut p| {
         p.push(".clemini_history");
         p
     });
 
+    let mut line_editor = Reedline::create();
     if let Some(ref path) = history_path {
-        let _ = rl.load_history(path);
+        let history = Box::new(FileBackedHistory::with_file(1000, path.to_path_buf())?);
+        line_editor = line_editor.with_history(history);
     }
+
+    let prompt = DefaultPrompt::default();
 
     let mut last_interaction_id: Option<String> = None;
     let mut last_estimated_context_size: u32 = 0;
@@ -379,10 +380,9 @@ async fn run_repl(
     let mut total_session_tokens = 0;
 
     loop {
-        let readline = rl.readline("> ");
-        match readline {
-            Ok(line) => {
-                let input = line.trim();
+        match line_editor.read_line(&prompt) {
+            Ok(Signal::Success(buffer)) => {
+                let input = buffer.trim();
                 if input.is_empty() {
                     continue;
                 }
@@ -509,13 +509,10 @@ async fn run_repl(
                 if let Some(cmd) = input.strip_prefix('!') {
                     let cmd = cmd.trim();
                     if !cmd.is_empty() {
-                        rl.add_history_entry(input)?;
                         run_shell_command(cmd);
                     }
                     continue;
                 }
-
-                rl.add_history_entry(input)?;
 
                 match run_interaction(
                     client,
@@ -541,10 +538,10 @@ async fn run_repl(
                     }
                 }
             }
-            Err(ReadlineError::Interrupted) => {
+            Ok(Signal::CtrlC) => {
                 eprintln!("[interrupted]");
             }
-            Err(ReadlineError::Eof) => {
+            Ok(Signal::CtrlD) => {
                 break;
             }
             Err(err) => {
@@ -552,10 +549,6 @@ async fn run_repl(
                 break;
             }
         }
-    }
-
-    if let Some(ref path) = history_path {
-        rl.save_history(path)?;
     }
 
     Ok(())

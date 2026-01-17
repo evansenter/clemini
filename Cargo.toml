@@ -18,7 +18,7 @@ async-trait = "0.1"
 
 # CLI
 clap = { version = "4", features = ["derive"] }
-rustyline = "14"
+reedline = "0.38"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
