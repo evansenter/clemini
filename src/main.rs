@@ -106,6 +106,11 @@ pub fn log_event_raw(message: &str) {
     }
 }
 
+/// Log to file only (skip terminal output even with TerminalSink)
+pub fn log_to_file(message: &str) {
+    log_event_to_file(message, true);
+}
+
 fn log_event_to_file(message: &str, render_markdown: bool) {
     colored::control::set_override(true);
 
@@ -696,7 +701,8 @@ fn flush_response(
     force_newline: bool,
 ) {
     if !response_text.is_empty() {
-        log_event(&format!("> {}", response_text.trim()));
+        // Log to file only - don't duplicate to terminal since we're rendering it
+        log_to_file(&format!("> {}", response_text.trim()));
         if stream_output {
             let width = termimad::terminal_size().0.max(20);
             let mut visual_lines = 0;
