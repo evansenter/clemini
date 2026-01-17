@@ -169,6 +169,14 @@ impl McpServer {
                             }
                         }
                     }
+                },
+                {
+                    "name": "clemini_rebuild",
+                    "description": "Rebuild clemini and restart the server",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {}
+                    }
                 }
             ]
         }))
@@ -187,7 +195,42 @@ impl McpServer {
         match name {
             "clemini_chat" => self.call_clemini_chat(arguments).await,
             "clemini_reset" => self.call_clemini_reset(arguments).await,
+            "clemini_rebuild" => self.call_clemini_rebuild(arguments).await,
             _ => Err(anyhow!("Unknown tool: {}", name)),
+        }
+    }
+
+    async fn call_clemini_rebuild(&self, _arguments: &Value) -> Result<Value> {
+        #[cfg(unix)]
+        {
+            let status = std::process::Command::new("cargo")
+                .args(["build", "--release"])
+                .status()?;
+
+            if !status.success() {
+                return Ok(json!({
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": format!("Build failed with status: {}", status)
+                        }
+                    ],
+                    "isError": true
+                }));
+            }
+
+            use std::os::unix::process::CommandExt;
+
+            let args: Vec<String> = std::env::args().collect();
+            let mut cmd = std::process::Command::new("target/release/clemini");
+            cmd.args(&args[1..]);
+
+            let err = cmd.exec();
+            Err(anyhow!("Failed to exec: {}", err))
+        }
+        #[cfg(not(unix))]
+        {
+            Err(anyhow!("clemini_rebuild is only supported on Unix systems"))
         }
     }
 
