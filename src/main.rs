@@ -79,9 +79,11 @@ pub fn log_event(message: &str) {
         .append(true)
         .open(&log_path)
     {
-        let timestamp = chrono::Local::now().format("%H:%M:%S%.3f");
         use std::io::Write;
-        let _ = writeln!(file, "[{}] {}", timestamp, rendered.trim_end());
+        for line in rendered.trim_end().lines() {
+            let timestamp = chrono::Local::now().format("%H:%M:%S%.3f");
+            let _ = writeln!(file, "[{}] {}", timestamp, line);
+        }
     }
 
     // Also write to CLEMINI_LOG if set (backwards compat)
@@ -91,9 +93,11 @@ pub fn log_event(message: &str) {
             .append(true)
             .open(path)
     {
-        let timestamp = chrono::Local::now().format("%H:%M:%S%.3f");
         use std::io::Write;
-        let _ = writeln!(file, "[{}] {}", timestamp, rendered.trim_end());
+        for line in rendered.trim_end().lines() {
+            let timestamp = chrono::Local::now().format("%H:%M:%S%.3f");
+            let _ = writeln!(file, "[{}] {}", timestamp, line);
+        }
     }
 }
 
@@ -901,6 +905,9 @@ pub async fn run_interaction(
                 });
             }
 
+            // Stop spinner during tool execution (tools may print output)
+            stop_spinner(&mut spinner).await;
+
             let start = Instant::now();
             let result: Value = match tool_service.execute(call_name, call_args.clone()).await {
                 Ok(v) => v,
@@ -910,6 +917,11 @@ pub async fn run_interaction(
                 }
             };
             let duration = start.elapsed();
+
+            // Restart spinner for next tool (if not interactive)
+            if !has_interactive && spinner.is_none() {
+                spinner = Some(Spinner::start());
+            }
 
             tool_calls.push(call_name.to_string());
             let has_error = result.get("error").is_some();
