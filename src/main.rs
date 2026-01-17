@@ -9,9 +9,8 @@ use serde_json::Value;
 use std::env;
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::LazyLock;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, LazyLock, OnceLock};
 use std::time::Instant;
 use termimad::MadSkin;
 use tokio_util::sync::CancellationToken;
@@ -55,18 +54,60 @@ static SKIN: LazyLock<MadSkin> = LazyLock::new(|| {
     skin
 });
 
+pub trait OutputSink: Send + Sync {
+    fn emit(&self, message: &str, render_markdown: bool);
+}
+
+/// Writes to log files only (current behavior of log_event)
+pub struct FileSink;
+
+impl OutputSink for FileSink {
+    fn emit(&self, message: &str, render_markdown: bool) {
+        log_event_to_file(message, render_markdown);
+    }
+}
+
+/// Writes to stderr AND log files (for REPL mode)
+pub struct TerminalSink;
+
+impl OutputSink for TerminalSink {
+    fn emit(&self, message: &str, render_markdown: bool) {
+        let rendered = if render_markdown {
+            SKIN.term_text(message).to_string()
+        } else {
+            message.to_string()
+        };
+        eprintln!("{}", rendered);
+        log_event_to_file(message, render_markdown);
+    }
+}
+
+static OUTPUT_SINK: OnceLock<Arc<dyn OutputSink>> = OnceLock::new();
+
+pub fn set_output_sink(sink: Arc<dyn OutputSink>) {
+    let _ = OUTPUT_SINK.set(sink);
+}
+
 /// Log to human-readable file with ANSI colors preserved
 /// Uses same naming as rolling::daily: clemini.log.YYYY-MM-DD
 pub fn log_event(message: &str) {
-    log_event_internal(message, true)
+    if let Some(sink) = OUTPUT_SINK.get() {
+        sink.emit(message, true);
+    } else {
+        log_event_to_file(message, true);
+    }
 }
 
 /// Log without markdown rendering (for protocol messages with long content)
 pub fn log_event_raw(message: &str) {
-    log_event_internal(message, false)
+    if let Some(sink) = OUTPUT_SINK.get() {
+        sink.emit(message, false);
+    } else {
+        log_event_to_file(message, false);
+    }
 }
 
-fn log_event_internal(message: &str, render_markdown: bool) {
+fn log_event_to_file(message: &str, render_markdown: bool) {
     colored::control::set_override(true);
 
     // Optionally render markdown (can wrap long lines)
@@ -268,6 +309,7 @@ async fn main() -> Result<()> {
 
     // MCP server mode - handle early before consuming stdin or printing banner
     if args.mcp_server {
+        set_output_sink(Arc::new(FileSink));
         let mcp_server = Arc::new(mcp::McpServer::new(
             client,
             tool_service,
@@ -321,6 +363,7 @@ async fn main() -> Result<()> {
     };
 
     if let Some(prompt) = combined_prompt {
+        set_output_sink(Arc::new(TerminalSink));
         // Non-interactive mode: run single prompt
         let cancellation_token = CancellationToken::new();
         let ct_clone = cancellation_token.clone();
@@ -343,6 +386,7 @@ async fn main() -> Result<()> {
         )
         .await?;
     } else {
+        set_output_sink(Arc::new(TerminalSink));
         // Interactive REPL mode
         run_repl(
             &client,
