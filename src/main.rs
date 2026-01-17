@@ -886,6 +886,9 @@ pub async fn run_interaction(
                                 eprintln!("{error_detail}");
                             }
                     }
+
+                    // Clear accumulated response - only return text after final tool execution
+                    full_response.clear();
                 }
                 AutoFunctionStreamChunk::Complete(resp) => {
                     last_id.clone_from(&resp.id);
