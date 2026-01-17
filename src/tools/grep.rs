@@ -12,19 +12,16 @@ use tracing::instrument;
 
 pub struct GrepTool {
     cwd: PathBuf,
-    _allowed_paths: Vec<PathBuf>,
+    allowed_paths: Vec<PathBuf>,
 }
 
-use crate::tools::DEFAULT_EXCLUDES;
+use crate::tools::{DEFAULT_EXCLUDES, validate_path};
 
 const MAX_LINE_LENGTH: usize = 1000;
 
 impl GrepTool {
     pub fn new(cwd: PathBuf, allowed_paths: Vec<PathBuf>) -> Self {
-        Self {
-            cwd,
-            _allowed_paths: allowed_paths,
-        }
+        Self { cwd, allowed_paths }
     }
 }
 
@@ -284,6 +281,12 @@ impl CallableFunction for GrepTool {
             }
 
             let path = entry.path();
+
+            // Validate path is within allowed paths
+            if validate_path(path, &self.allowed_paths).is_err() {
+                continue;
+            }
+
             let relative_path = path.strip_prefix(&self.cwd).unwrap_or(path);
 
             if !glob_set.is_match(relative_path) {
@@ -414,7 +417,12 @@ mod tests {
         let result = tool.call(args).await.unwrap();
         let matches = result["matches"].as_array().unwrap();
         assert_eq!(matches.len(), 1);
-        assert!(matches[0]["content"].as_str().unwrap().contains("[special] (chars)"));
+        assert!(
+            matches[0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("[special] (chars)")
+        );
     }
 
     #[tokio::test]
@@ -459,5 +467,34 @@ mod tests {
         let matches = result["matches"].as_array().unwrap();
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0]["file"], "subdir/test.txt");
+    }
+
+    #[tokio::test]
+    async fn test_grep_security_boundary() {
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().to_path_buf();
+        let allowed_dir = cwd.join("allowed");
+        let restricted_dir = cwd.join("restricted");
+        fs::create_dir(&allowed_dir).unwrap();
+        fs::create_dir(&restricted_dir).unwrap();
+
+        fs::write(allowed_dir.join("test.txt"), "secret in allowed").unwrap();
+        fs::write(restricted_dir.join("test.txt"), "secret in restricted").unwrap();
+
+        // Tool is configured with cwd, but ONLY allowed_dir is in allowed_paths
+        let tool = GrepTool::new(cwd.clone(), vec![allowed_dir.clone()]);
+
+        let args = json!({
+            "pattern": "secret"
+        });
+
+        let result = tool.call(args).await.unwrap();
+        let matches = result["matches"].as_array().unwrap();
+
+        // Should only find the one in allowed_dir
+        assert_eq!(matches.len(), 1);
+        let file_path = matches[0]["file"].as_str().unwrap();
+        assert!(file_path.contains("allowed"));
+        assert!(!file_path.contains("restricted"));
     }
 }
