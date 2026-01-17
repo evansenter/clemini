@@ -45,6 +45,7 @@ pub struct McpServer {
     client: Client,
     tool_service: Arc<CleminiToolService>,
     model: String,
+    system_prompt: String,
     sessions: Mutex<HashMap<String, McpSession>>,
     notification_tx: broadcast::Sender<String>,
 }
@@ -141,12 +142,13 @@ async fn handle_sse(
 }
 
 impl McpServer {
-    pub fn new(client: Client, tool_service: Arc<CleminiToolService>, model: String) -> Self {
+    pub fn new(client: Client, tool_service: Arc<CleminiToolService>, model: String, system_prompt: String) -> Self {
         let (notification_tx, _) = broadcast::channel(100);
         Self {
             client,
             tool_service,
             model,
+            system_prompt,
             sessions: Mutex::new(HashMap::new()),
             notification_tx,
         }
@@ -551,6 +553,7 @@ impl McpServer {
             &self.model,
             false,
             Some(progress_fn),
+            &self.system_prompt,
         )
         .await?;
 

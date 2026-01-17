@@ -42,6 +42,7 @@ const SYSTEM_PROMPT: &str = r#"You are clemini, a coding assistant. Be concise. 
 
 ## Workflow
 1. **Understand** - Read files before editing. Never guess at contents.
+   - Given an issue/ticket number? Fetch it first with `web_fetch`.
 2. **Plan** - For complex tasks, briefly state your approach before implementing.
 3. **Execute** - Make changes, narrating each step in one line.
 4. **Verify** - Run tests/checks. Compilation passing ≠ working code.
@@ -175,9 +176,18 @@ async fn main() -> Result<()> {
     let cwd = std::fs::canonicalize(&args.cwd)?;
     let tool_service = Arc::new(CleminiToolService::new(cwd.clone(), bash_timeout));
 
+    let mut system_prompt = SYSTEM_PROMPT.to_string();
+    if let Ok(claude_md) = std::fs::read_to_string(cwd.join("CLAUDE.md")) {
+        let claude_md = claude_md.trim();
+        if !claude_md.is_empty() {
+            system_prompt.push_str("\n\n## Project Context\n\n");
+            system_prompt.push_str(claude_md);
+        }
+    }
+
     // MCP server mode - handle early before consuming stdin or printing banner
     if args.mcp_server {
-        let mcp_server = Arc::new(mcp::McpServer::new(client, tool_service, model));
+        let mcp_server = Arc::new(mcp::McpServer::new(client, tool_service, model, system_prompt));
         if args.http {
             mcp_server.run_http(args.port).await?;
         } else {
@@ -223,10 +233,10 @@ async fn main() -> Result<()> {
 
     if let Some(prompt) = combined_prompt {
         // Non-interactive mode: run single prompt
-        let _ = run_interaction(&client, &tool_service, &prompt, None, &model, args.stream, None).await?;
+        let _ = run_interaction(&client, &tool_service, &prompt, None, &model, args.stream, None, &system_prompt).await?;
     } else {
         // Interactive REPL mode
-        run_repl(&client, &tool_service, cwd, &model, args.stream).await?;
+        run_repl(&client, &tool_service, cwd, &model, args.stream, system_prompt).await?;
     }
 
     Ok(())
@@ -238,6 +248,7 @@ async fn run_repl(
     cwd: std::path::PathBuf,
     model: &str,
     stream_output: bool,
+    system_prompt: String,
 ) -> Result<()> {
     let mut rl = DefaultEditor::new()?;
 
@@ -402,6 +413,7 @@ async fn run_repl(
                     model,
                     stream_output,
                     None,
+                    &system_prompt,
                 )
                 .await
                 {
@@ -666,7 +678,7 @@ fn format_tool_result(
     )
 }
 
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 pub async fn run_interaction(
     client: &Client,
     tool_service: &Arc<CleminiToolService>,
@@ -675,6 +687,7 @@ pub async fn run_interaction(
     model: &str,
     stream_output: bool,
     progress_fn: Option<Arc<dyn Fn(InteractionProgress) + Send + Sync>>,
+    system_prompt: &str,
 ) -> Result<InteractionResult> {
     // Build the interaction - system instruction must be sent on every turn
     // (it's NOT inherited via previousInteractionId per genai-rs docs)
@@ -682,7 +695,7 @@ pub async fn run_interaction(
         .interaction()
         .with_model(model)
         .with_tool_service(tool_service.clone())
-        .with_system_instruction(SYSTEM_PROMPT)
+        .with_system_instruction(system_prompt)
         .with_content(vec![Content::text(input)])
         .with_max_function_call_loops(100);
 
