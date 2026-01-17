@@ -30,7 +30,7 @@ Logs are stored in `~/.clemini/logs/` with daily rotation.
 
 ## Architecture
 
-The CLI has three modes: single-prompt (`-p "prompt"`), interactive REPL, and MCP server (`--mcp-server`).
+The CLI has three modes: single-prompt (`-p "prompt"`), interactive REPL, and MCP server (`--mcp-server`). The interactive REPL uses a full-screen TUI by default; use `--no-tui` for plain terminal output.
 
 **Manual function calling**: Uses `create_stream()` for streaming responses, then manually executes tool calls accumulated from Delta chunks. This enables ctrl-c cancellation between tool calls. The tool execution loop in `run_interaction()` processes function calls, sends results back via `with_previous_interaction()`, and repeats until no more function calls.
 
@@ -56,6 +56,7 @@ Debugging: `LOUD_WIRE=1` logs all HTTP requests/responses.
 
 ## Documentation
 
+- [docs/TUI.md](docs/TUI.md) - TUI architecture (ratatui, event loop, output channels)
 - [docs/TEXT_RENDERING.md](docs/TEXT_RENDERING.md) - Output formatting guidelines (colors, truncation, spacing)
 
 ## Conventions

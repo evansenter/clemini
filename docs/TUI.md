@@ -82,7 +82,8 @@ enum TuiMessage {
 
 The `App` struct maintains a `VecDeque<String>` of chat lines:
 
-- `append_to_chat()`: Splits text by newlines, adds each as a separate line
+- `append_to_chat(text)`: Splits text by newlines, adds each as a separate line
+- `append_to_chat("")`: Explicitly adds a blank line (used for spacing after user messages and tool results)
 - `append_streaming()`: Appends to the current line, handles embedded newlines
 
 This distinction prevents streaming chunks from creating stair-step patterns.
@@ -122,6 +123,7 @@ Uses `tui-textarea` widget with:
 - Multi-line input support
 - Basic editing (cursor movement, delete, etc.)
 - History navigation via Up/Down arrows
+- Cursor line style set to default (removes underline)
 
 ## Differences from Plain REPL
 
