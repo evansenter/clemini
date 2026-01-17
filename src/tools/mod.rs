@@ -160,3 +160,10 @@ pub fn make_relative(path: &std::path::Path, cwd: &std::path::Path) -> String {
         .to_string_lossy()
         .to_string()
 }
+
+pub fn create_http_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .user_agent(concat!("clemini/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))
+}

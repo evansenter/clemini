@@ -40,12 +40,10 @@ impl CallableFunction for WebFetchTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| FunctionError::ArgumentMismatch("Missing url".to_string()))?;
 
-        let client = match reqwest::Client::builder()
-            .user_agent("clemini/0.1.0")
-            .build() {
-                Ok(c) => c,
-                Err(e) => return Ok(json!({ "error": format!("Failed to create HTTP client: {}", e) })),
-            };
+        let client = match super::create_http_client() {
+            Ok(c) => c,
+            Err(e) => return Ok(json!({ "error": e })),
+        };
 
         match client.get(url).send().await {
             Ok(resp) => {
