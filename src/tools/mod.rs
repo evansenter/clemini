@@ -26,6 +26,8 @@ pub use web_fetch::WebFetchTool;
 pub use web_search::WebSearchTool;
 pub use write::WriteTool;
 
+pub const DEFAULT_EXCLUDES: &[&str] = &[".git", "node_modules", "target", "__pycache__", ".venv"];
+
 /// Tool service that provides file and command execution capabilities.
 pub struct CleminiToolService {
     cwd: PathBuf,

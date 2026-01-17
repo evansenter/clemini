@@ -5,13 +5,11 @@ use serde_json::{Value, json};
 use std::path::PathBuf;
 use tracing::instrument;
 
-use super::{make_relative, validate_path};
+use super::{make_relative, validate_path, DEFAULT_EXCLUDES};
 
 pub struct GlobTool {
     cwd: PathBuf,
 }
-
-const DEFAULT_EXCLUDES: &[&str] = &[".git", "node_modules", "target", "__pycache__", ".venv"];
 
 impl GlobTool {
     pub fn new(cwd: PathBuf) -> Self {

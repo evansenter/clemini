@@ -14,7 +14,8 @@ pub struct GrepTool {
     cwd: PathBuf,
 }
 
-const DEFAULT_EXCLUDES: &[&str] = &[".git", "node_modules", "target", "__pycache__", ".venv"];
+use crate::tools::DEFAULT_EXCLUDES;
+
 const MAX_LINE_LENGTH: usize = 1000;
 
 impl GrepTool {
