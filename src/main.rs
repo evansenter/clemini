@@ -2,7 +2,7 @@ use anyhow::Result;
 use clap::Parser;
 use colored::Colorize;
 use futures_util::StreamExt;
-use genai_rs::{AutoFunctionStreamChunk, Client, Content};
+use genai_rs::{CallableFunction, Client, Content, StreamChunk, ToolService};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use rustyline::DefaultEditor;
@@ -737,15 +737,20 @@ pub async fn run_interaction(
     progress_fn: Option<Arc<dyn Fn(InteractionProgress) + Send + Sync>>,
     system_prompt: &str,
 ) -> Result<InteractionResult> {
+    let functions: Vec<_> = tool_service
+        .tools()
+        .iter()
+        .map(|t: &Arc<dyn CallableFunction>| t.declaration())
+        .collect();
+
     // Build the interaction - system instruction must be sent on every turn
     // (it's NOT inherited via previousInteractionId per genai-rs docs)
     let mut interaction = client
         .interaction()
         .with_model(model)
-        .with_tool_service(tool_service.clone())
+        .add_functions(functions.clone())
         .with_system_instruction(system_prompt)
-        .with_content(vec![Content::text(input)])
-        .with_max_function_call_loops(100);
+        .with_content(vec![Content::text(input)]);
 
     if let Some(prev_id) = previous_interaction_id {
         interaction = interaction.with_previous_interaction(prev_id);
@@ -759,163 +764,191 @@ pub async fn run_interaction(
         CANCELLED.store(true, Ordering::SeqCst);
     }).ok();
 
-    let mut stream = Box::pin(interaction.create_stream_with_auto_functions());
+    let mut stream = Box::pin(interaction.create_stream());
 
     let mut last_id = previous_interaction_id.map(String::from);
     let mut current_context_size: u32 = 0;
     let mut cumulative_tool_tokens: u32 = 0;
     let mut total_tokens: u32 = 0;
-    let mut tool_start_time: Option<Instant> = None;
     let mut tool_calls: Vec<String> = Vec::new();
     let mut response_text = String::new();
     let mut full_response = String::new();
     let skin = MadSkin::default();
     let mut spinner: Option<Spinner> = None;
 
-    while let Some(event) = stream.next().await {
-        // Check for cancellation at each iteration
-        if CANCELLED.load(Ordering::SeqCst) {
-            eprintln!("{}", "[cancelled]".yellow());
-            break;
-        }
-        match event {
-            Ok(event) => match &event.chunk {
-                AutoFunctionStreamChunk::Delta(content) => {
-                    if let Some(text) = content.as_text() {
-                        if stream_output {
-                            print!("{text}");
-                            io::stdout().flush()?;
-                        }
-                        response_text.push_str(text);
-                        full_response.push_str(text);
-                    }
-                }
-                AutoFunctionStreamChunk::ExecutingFunctions(resp) => {
-                    tool_start_time = Some(Instant::now());
-                    // Capture interaction ID early for conversation continuity
-                    last_id.clone_from(&resp.id);
+    const MAX_ITERATIONS: usize = 100;
+    for _ in 0..MAX_ITERATIONS {
+        let mut response: Option<genai_rs::InteractionResponse> = None;
+        let mut accumulated_function_calls: Vec<(Option<String>, String, Value)> = Vec::new();
+        response_text.clear();
 
-                    for call in resp.function_calls() {
-                        log_event(&format!(
-                            "{} {} {}",
-                            "CALL".magenta().bold(),
-                            call.name.purple(),
-                            format_tool_args(call.args).trim().dimmed()
-                        ));
-                        if let Some(ref cb) = progress_fn {
-                            cb(InteractionProgress {
-                                tool: call.name.to_string(),
-                                status: "executing".to_string(),
-                                args: call.args.clone(),
-                                duration_ms: None,
-                            });
-                        }
-                    }
+        while let Some(event) = stream.next().await {
+            // Check for cancellation at each iteration
+            if CANCELLED.load(Ordering::SeqCst) {
+                eprintln!("{}", "[cancelled]".yellow());
+                stop_spinner(&mut spinner).await;
+                return Ok(InteractionResult {
+                    id: last_id,
+                    response: full_response,
+                    context_size: current_context_size,
+                    total_tokens,
+                    tool_calls,
+                });
+            }
 
-                    // Render any text before tool execution
-                    flush_response(&mut response_text, &skin, stream_output, false);
-
-                    // Update token count from the response that triggered function calls
-                    if let Some(usage) = &resp.usage {
-                        let turn_tokens = usage.total_tokens.unwrap_or_else(|| {
-                            usage.total_input_tokens.unwrap_or(0)
-                                + usage.total_output_tokens.unwrap_or(0)
-                        });
-                        if turn_tokens > 0 {
-                            current_context_size = turn_tokens;
-                            total_tokens = turn_tokens;
-                        }
-                    }
-
-                    // Start spinner if not an interactive tool
-                    stop_spinner(&mut spinner).await;
-                    let has_interactive = resp.function_calls().iter().any(|c| c.name == "ask_user");
-                    if !has_interactive {
-                        spinner = Some(Spinner::start());
-                    }
-                }
-                AutoFunctionStreamChunk::FunctionResults(results) => {
-                    // Stop spinner
-                    stop_spinner(&mut spinner).await;
-
-                    let manual_duration = tool_start_time.map(|t| t.elapsed()).unwrap_or_default();
-
-                    for result in results {
-                        tool_calls.push(result.name.clone());
-
-                        let has_error = result.result.get("error").is_some();
-
-                        let duration = if result.duration.as_nanos() == 0 {
-                            manual_duration
-                        } else {
-                            result.duration
-                        };
-
-                        if let Some(ref cb) = progress_fn {
-                            cb(InteractionProgress {
-                                tool: result.name.clone(),
-                                status: "completed".to_string(),
-                                args: result.args.clone(),
-                                duration_ms: Some(duration.as_millis() as u64),
-                            });
-                        }
-
-                        let call_tokens = estimate_tokens(&result.args);
-                        let response_tokens = estimate_tokens(&result.result);
-                        let total_tool_tokens = call_tokens + response_tokens;
-                        cumulative_tool_tokens += total_tool_tokens;
-                        let cumulative_percent = (f64::from(cumulative_tool_tokens)
-                            / f64::from(CONTEXT_WINDOW_LIMIT))
-                            * 100.0;
-
-                        let formatted = format_tool_result(
-                            &result.name,
-                            &result.args,
-                            duration,
-                            total_tool_tokens,
-                            cumulative_percent,
-                            has_error,
-                        );
-                        log_event(&formatted);
-                        eprintln!("{formatted}");
-
-                        if has_error
-                            && let Some(error_msg) = result.result.get("error").and_then(|e| e.as_str()) {
-                                let error_detail = format!("  └─ {}: {}", "error".red(), error_msg.dimmed());
-                                log_event(&error_detail);
-                                eprintln!("{error_detail}");
+            match event {
+                Ok(event) => match &event.chunk {
+                    StreamChunk::Delta(content) => {
+                        if let Some(text) = content.as_text() {
+                            if stream_output {
+                                print!("{text}");
+                                io::stdout().flush()?;
                             }
+                            response_text.push_str(text);
+                            full_response.push_str(text);
+                        }
+                        // Accumulate function calls from Delta chunks (streaming doesn't put them in Complete)
+                        if let Content::FunctionCall { id, name, args } = content {
+                            accumulated_function_calls.push((id.clone(), name.clone(), args.clone()));
+                        }
                     }
-
-                    // Clear accumulated response - only return text after final tool execution
-                    full_response.clear();
-                }
-                AutoFunctionStreamChunk::Complete(resp) => {
-                    last_id.clone_from(&resp.id);
-
-                    // Render accumulated text as markdown
-                    flush_response(&mut response_text, &skin, stream_output, true);
-
-                    // Log final token usage
-                    if let Some(usage) = &resp.usage {
-                        let total_in = usage.total_input_tokens.unwrap_or(0);
-                        let total_out = usage.total_output_tokens.unwrap_or(0);
-                        current_context_size = total_in + total_out;
-                        total_tokens = current_context_size;
-                        eprintln!("[{}→{} tok]", total_in, total_out);
+                    StreamChunk::Complete(resp) => {
+                        response = Some(resp.clone());
                     }
+                    _ => {}
+                },
+                Err(e) => {
+                    let err_msg = e.to_string();
+                    eprintln!("\n{}", format!("[stream error: {err_msg}]").bright_red());
+                    return Err(anyhow::anyhow!(err_msg));
                 }
-                AutoFunctionStreamChunk::MaxLoopsReached(_) => {
-                    eprintln!("\n{}", "[max tool loops reached]".bright_red());
-                }
-                _ => {}
-            },
-            Err(e) => {
-                let err_msg = e.to_string();
-                eprintln!("\n{}", format!("[stream error: {err_msg}]").bright_red());
-                return Err(anyhow::anyhow!(err_msg));
             }
         }
+
+        let resp = response.ok_or_else(|| anyhow::anyhow!("Stream ended without completion"))?;
+        last_id = resp.id.clone();
+
+        // Update token count
+        if let Some(usage) = &resp.usage {
+            let turn_tokens = usage.total_tokens.unwrap_or_else(|| {
+                usage.total_input_tokens.unwrap_or(0) + usage.total_output_tokens.unwrap_or(0)
+            });
+            if turn_tokens > 0 {
+                current_context_size = turn_tokens;
+                total_tokens = turn_tokens;
+            }
+        }
+
+        // Use accumulated function calls from Delta chunks (streaming mode doesn't populate Complete.outputs)
+        if accumulated_function_calls.is_empty() {
+            // Render final text
+            flush_response(&mut response_text, &skin, stream_output, true);
+            if let Some(usage) = &resp.usage {
+                let total_in = usage.total_input_tokens.unwrap_or(0);
+                let total_out = usage.total_output_tokens.unwrap_or(0);
+                eprintln!("[{}→{} tok]", total_in, total_out);
+            }
+            break;
+        }
+
+        // Process function calls (accumulated from Delta chunks)
+        flush_response(&mut response_text, &skin, stream_output, false);
+        full_response.clear(); // Clear accumulated text before tools as we'll only return text after final tool
+
+        let mut results = Vec::new();
+        let has_interactive = accumulated_function_calls.iter().any(|(_, name, _)| name == "ask_user");
+        if !has_interactive {
+            spinner = Some(Spinner::start());
+        }
+
+        for (call_id, call_name, call_args) in &accumulated_function_calls {
+            if CANCELLED.load(Ordering::SeqCst) {
+                eprintln!("{}", "[cancelled]".yellow());
+                stop_spinner(&mut spinner).await;
+                return Ok(InteractionResult {
+                    id: last_id,
+                    response: full_response,
+                    context_size: current_context_size,
+                    total_tokens,
+                    tool_calls,
+                });
+            }
+
+            log_event(&format!(
+                "{} {} {}",
+                "CALL".magenta().bold(),
+                call_name.purple(),
+                format_tool_args(call_args).trim().dimmed()
+            ));
+
+            if let Some(ref cb) = progress_fn {
+                cb(InteractionProgress {
+                    tool: call_name.to_string(),
+                    status: "executing".to_string(),
+                    args: call_args.clone(),
+                    duration_ms: None,
+                });
+            }
+
+            let start = Instant::now();
+            let result: Value = tool_service.execute(call_name, call_args.clone()).await?;
+            let duration = start.elapsed();
+
+            tool_calls.push(call_name.to_string());
+            let has_error = result.get("error").is_some();
+
+            if let Some(ref cb) = progress_fn {
+                cb(InteractionProgress {
+                    tool: call_name.to_string(),
+                    status: "completed".to_string(),
+                    args: call_args.clone(),
+                    duration_ms: Some(duration.as_millis() as u64),
+                });
+            }
+
+            let call_tokens = estimate_tokens(call_args);
+            let response_tokens = estimate_tokens(&result);
+            let total_tool_tokens = call_tokens + response_tokens;
+            cumulative_tool_tokens += total_tool_tokens;
+            let cumulative_percent =
+                (f64::from(cumulative_tool_tokens) / f64::from(CONTEXT_WINDOW_LIMIT)) * 100.0;
+
+            let formatted = format_tool_result(
+                call_name,
+                call_args,
+                duration,
+                total_tool_tokens,
+                cumulative_percent,
+                has_error,
+            );
+            log_event(&formatted);
+            eprintln!("{formatted}");
+
+            if has_error && let Some(error_msg) = result.get("error").and_then(|e: &Value| e.as_str()) {
+                let error_detail = format!("  └─ {}: {}", "error".red(), error_msg.dimmed());
+                log_event(&error_detail);
+                eprintln!("{error_detail}");
+            }
+
+            results.push(Content::function_result(
+                call_name.to_string(),
+                call_id.clone().expect("Function call ID required"),
+                result,
+            ));
+        }
+
+        stop_spinner(&mut spinner).await;
+
+        // Create new stream for the next turn
+        stream = Box::pin(
+            client
+                .interaction()
+                .with_model(model)
+                .with_previous_interaction(last_id.as_ref().unwrap())
+                .with_system_instruction(system_prompt)
+                .with_content(results)
+                .create_stream(),
+        );
     }
 
     // Render any remaining text (e.g., if stream ended abruptly or on error)

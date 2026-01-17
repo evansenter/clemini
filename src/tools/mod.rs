@@ -9,7 +9,9 @@ mod web_fetch;
 mod web_search;
 mod write;
 
+use anyhow::Result;
 use genai_rs::{CallableFunction, ToolService};
+use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -33,6 +35,15 @@ pub struct CleminiToolService {
 impl CleminiToolService {
     pub fn new(cwd: PathBuf, bash_timeout: u64) -> Self {
         Self { cwd, bash_timeout }
+    }
+
+    pub async fn execute(&self, name: &str, args: Value) -> Result<Value> {
+        let tools = self.tools();
+        let tool = tools
+            .iter()
+            .find(|t| t.declaration().name() == name)
+            .ok_or_else(|| anyhow::anyhow!("Tool not found: {}", name))?;
+        tool.call(args).await.map_err(|e| anyhow::anyhow!(e))
     }
 }
 
