@@ -210,30 +210,39 @@ impl McpServer {
     async fn call_clemini_rebuild(&self, _arguments: &Value) -> Result<Value> {
         #[cfg(unix)]
         {
-            let status = std::process::Command::new("cargo")
-                .args(["build", "--release"])
-                .status()?;
-
-            if !status.success() {
-                return Ok(json!({
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": format!("Build failed with status: {}", status)
-                        }
-                    ],
-                    "isError": true
-                }));
-            }
-
-            use std::os::unix::process::CommandExt;
-
+            // Spawn build in background thread so we can return response immediately
             let args: Vec<String> = std::env::args().collect();
-            let mut cmd = std::process::Command::new("target/release/clemini");
-            cmd.args(&args[1..]);
+            std::thread::spawn(move || {
+                // Small delay to let the response go out
+                std::thread::sleep(std::time::Duration::from_millis(100));
 
-            let err = cmd.exec();
-            Err(anyhow!("Failed to exec: {}", err))
+                let status = std::process::Command::new("cargo")
+                    .args(["build", "--release"])
+                    .status();
+
+                match status {
+                    Ok(s) if s.success() => {
+                        use std::os::unix::process::CommandExt;
+                        let mut cmd = std::process::Command::new("target/release/clemini");
+                        cmd.args(&args[1..]);
+                        let _ = cmd.exec(); // This replaces the process
+                    }
+                    _ => {
+                        // Build failed, just exit - CC will show the disconnect
+                        std::process::exit(1);
+                    }
+                }
+            });
+
+            Ok(json!({
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "Rebuilding clemini... Connection will restart when complete."
+                    }
+                ],
+                "isError": false
+            }))
         }
         #[cfg(not(unix))]
         {
