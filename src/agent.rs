@@ -7,16 +7,14 @@
 //! - Future streaming-first architecture (#59)
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use anyhow::Result;
-use colored::Colorize;
 use futures_util::StreamExt;
 use genai_rs::{
     CallableFunction, Client, Content, FunctionExecutionResult, InteractionResponse,
     OwnedFunctionCallInfo, StreamChunk, ToolService,
 };
-use serde::Serialize;
 use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -78,88 +76,9 @@ pub struct InteractionResult {
     pub tool_calls: Vec<String>,
 }
 
-/// Progress update for tool execution (used by TUI for Activity display).
-#[derive(Debug, Serialize, Clone)]
-pub struct InteractionProgress {
-    pub tool: String,
-    pub status: String, // "executing" or "completed"
-    pub args: Value,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub duration_ms: Option<u64>,
-}
-
 struct ToolExecutionResult {
     results: Vec<Content>,
     cancelled: bool,
-}
-
-/// Format function call arguments for display.
-#[allow(dead_code)]
-pub fn format_tool_args(args: &Value) -> String {
-    let Some(obj) = args.as_object() else {
-        return String::new();
-    };
-
-    let mut parts = Vec::new();
-    for (k, v) in obj {
-        let val_str = match v {
-            Value::String(s) => {
-                let trimmed = s.replace('\n', " ");
-                if trimmed.len() > 80 {
-                    format!("\"{}...\"", &trimmed[..77])
-                } else {
-                    format!("\"{trimmed}\"")
-                }
-            }
-            Value::Number(n) => n.to_string(),
-            Value::Bool(b) => b.to_string(),
-            Value::Null => "null".to_string(),
-            _ => "...".to_string(),
-        };
-        parts.push(format!("{k}={val_str}"));
-    }
-
-    if parts.is_empty() {
-        String::new()
-    } else {
-        format!("{} ", parts.join(" "))
-    }
-}
-
-/// Rough token estimate: ~4 chars per token.
-#[allow(dead_code)]
-pub fn estimate_tokens(value: &Value) -> u32 {
-    (value.to_string().len() / 4) as u32
-}
-
-/// Format tool result for display.
-#[allow(dead_code)]
-pub fn format_tool_result(
-    name: &str,
-    duration: Duration,
-    estimated_tokens: u32,
-    has_error: bool,
-) -> String {
-    let error_suffix = if has_error {
-        " ERROR".bright_red().bold().to_string()
-    } else {
-        String::new()
-    };
-    let elapsed_secs = duration.as_secs_f32();
-
-    let duration_str = if elapsed_secs < 0.001 {
-        format!("{:.3}s", elapsed_secs)
-    } else {
-        format!("{:.2}s", elapsed_secs)
-    };
-
-    format!(
-        "[{}] {}, ~{} tok{}",
-        name.cyan(),
-        duration_str.yellow(),
-        estimated_tokens,
-        error_suffix
-    )
 }
 
 /// Check context window usage and send warning event if needed.
@@ -177,7 +96,6 @@ fn check_context_window(total_tokens: u32, events_tx: &mpsc::Sender<AgentEvent>)
 async fn execute_tools(
     tool_service: &Arc<CleminiToolService>,
     accumulated_function_calls: &[(Option<String>, String, Value)],
-    progress_fn: &Option<Arc<dyn Fn(InteractionProgress) + Send + Sync>>,
     tool_calls: &mut Vec<String>,
     cancellation_token: &CancellationToken,
     events_tx: &mpsc::Sender<AgentEvent>,
@@ -203,15 +121,6 @@ async fn execute_tools(
             };
         }
 
-        if let Some(cb) = progress_fn {
-            cb(InteractionProgress {
-                tool: call_name.to_string(),
-                status: "executing".to_string(),
-                args: call_args.clone(),
-                duration_ms: None,
-            });
-        }
-
         let start = Instant::now();
         let result: Value = match tool_service.execute(call_name, call_args.clone()).await {
             Ok(v) => v,
@@ -223,15 +132,6 @@ async fn execute_tools(
         let duration = start.elapsed();
 
         tool_calls.push(call_name.to_string());
-
-        if let Some(cb) = progress_fn {
-            cb(InteractionProgress {
-                tool: call_name.to_string(),
-                status: "completed".to_string(),
-                args: call_args.clone(),
-                duration_ms: Some(duration.as_millis() as u64),
-            });
-        }
 
         // Send ToolResult event using genai-rs FunctionExecutionResult
         let execution_result = FunctionExecutionResult::new(
@@ -267,7 +167,6 @@ async fn execute_tools(
 /// * `model` - Model name (e.g., "gemini-3-flash-preview")
 /// * `system_prompt` - System instruction
 /// * `events_tx` - Channel to send AgentEvents to UI
-/// * `progress_fn` - Optional callback for TUI Activity updates
 /// * `cancellation_token` - Token for cancellation
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 pub async fn run_interaction(
@@ -278,7 +177,6 @@ pub async fn run_interaction(
     model: &str,
     system_prompt: &str,
     events_tx: mpsc::Sender<AgentEvent>,
-    progress_fn: Option<Arc<dyn Fn(InteractionProgress) + Send + Sync>>,
     cancellation_token: CancellationToken,
 ) -> Result<InteractionResult> {
     let functions: Vec<_> = tool_service
@@ -381,7 +279,6 @@ pub async fn run_interaction(
         let tool_result = execute_tools(
             tool_service,
             &accumulated_function_calls,
-            &progress_fn,
             &mut tool_calls,
             &cancellation_token,
             &events_tx,
@@ -438,110 +335,6 @@ pub async fn run_interaction(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn test_format_tool_args_empty() {
-        assert_eq!(format_tool_args(&json!({})), "");
-        assert_eq!(format_tool_args(&json!(null)), "");
-        assert_eq!(format_tool_args(&json!("not an object")), "");
-    }
-
-    #[test]
-    fn test_format_tool_args_types() {
-        let args = json!({
-            "bool": true,
-            "num": 42,
-            "null": null,
-            "str": "hello"
-        });
-        let formatted = format_tool_args(&args);
-        // serde_json::Map is sorted by key
-        assert_eq!(formatted, "bool=true null=null num=42 str=\"hello\" ");
-    }
-
-    #[test]
-    fn test_format_tool_args_complex_types() {
-        let args = json!({
-            "arr": [1, 2],
-            "obj": {"a": 1}
-        });
-        let formatted = format_tool_args(&args);
-        assert_eq!(formatted, "arr=... obj=... ");
-    }
-
-    #[test]
-    fn test_format_tool_args_truncation() {
-        let long_str = "a".repeat(100);
-        let args = json!({"long": long_str});
-        let formatted = format_tool_args(&args);
-        let expected_val = format!("\"{}...\"", "a".repeat(77));
-        assert_eq!(formatted, format!("long={} ", expected_val));
-    }
-
-    #[test]
-    fn test_format_tool_args_newlines() {
-        let args = json!({"text": "hello\nworld"});
-        let formatted = format_tool_args(&args);
-        assert_eq!(formatted, "text=\"hello world\" ");
-    }
-
-    #[test]
-    fn test_estimate_tokens() {
-        // ~4 chars per token
-        assert_eq!(estimate_tokens(&json!("hello")), 1); // "hello" = 7 chars / 4 = 1
-        assert_eq!(estimate_tokens(&json!({"key": "value"})), 3); // {"key":"value"} = 15 chars / 4 = 3
-    }
-
-    #[test]
-    fn test_format_tool_result_duration() {
-        colored::control::set_override(false);
-
-        // < 1ms (100us) -> 3 decimals
-        assert_eq!(
-            format_tool_result("test", Duration::from_micros(100), 10, false),
-            "[test] 0.000s, ~10 tok"
-        );
-
-        // < 1ms (900us) -> 3 decimals
-        assert_eq!(
-            format_tool_result("test", Duration::from_micros(900), 10, false),
-            "[test] 0.001s, ~10 tok"
-        );
-
-        // >= 1ms (1.1ms) -> 2 decimals (shows 0.00s due to threshold)
-        assert_eq!(
-            format_tool_result("test", Duration::from_micros(1100), 10, false),
-            "[test] 0.00s, ~10 tok"
-        );
-
-        // >= 1ms (20ms) -> 2 decimals
-        assert_eq!(
-            format_tool_result("test", Duration::from_millis(20), 10, false),
-            "[test] 0.02s, ~10 tok"
-        );
-
-        // >= 1ms (1450ms) -> 2 decimals
-        assert_eq!(
-            format_tool_result("test", Duration::from_millis(1450), 10, false),
-            "[test] 1.45s, ~10 tok"
-        );
-
-        colored::control::unset_override();
-    }
-
-    #[test]
-    fn test_format_tool_result_error() {
-        colored::control::set_override(false);
-
-        let res = format_tool_result("test", Duration::from_millis(10), 25, true);
-        assert_eq!(res, "[test] 0.01s, ~25 tok ERROR");
-
-        let res = format_tool_result("test", Duration::from_millis(10), 25, false);
-        assert_eq!(res, "[test] 0.01s, ~25 tok");
-
-        colored::control::unset_override();
-    }
 
     #[test]
     fn test_check_context_window_below_threshold() {

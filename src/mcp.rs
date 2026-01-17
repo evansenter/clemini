@@ -20,7 +20,7 @@ use tower_http::cors::CorsLayer;
 use tracing::instrument;
 // Note: info! macro goes to JSON logs only. For human-readable logs, use crate::log_event()
 
-use crate::agent::{AgentEvent, InteractionProgress, run_interaction};
+use crate::agent::{AgentEvent, run_interaction};
 use crate::tools::CleminiToolService;
 
 #[derive(Debug, Deserialize, Clone)]
@@ -525,20 +525,49 @@ impl McpServer {
             .or_else(|| arguments.get("session_id")) // Backwards compat
             .and_then(|v| v.as_str());
 
+        // Create channel for agent events
+        let (events_tx, mut events_rx) = mpsc::channel::<AgentEvent>(100);
+
+        // Spawn task to send progress notifications from agent events
         let tx_clone = tx.clone();
-        let progress_fn = Arc::new(move |p: InteractionProgress| {
-            let notification = json!({
-                "jsonrpc": "2.0",
-                "method": "notifications/progress",
-                "params": p
-            });
-            if let Ok(s) = serde_json::to_string(&notification) {
-                let _ = tx_clone.send(format!("{}\n", s));
+        tokio::spawn(async move {
+            while let Some(event) = events_rx.recv().await {
+                let notification = match &event {
+                    AgentEvent::ToolExecuting(calls) => {
+                        for call in calls {
+                            let notif = json!({
+                                "jsonrpc": "2.0",
+                                "method": "notifications/progress",
+                                "params": {
+                                    "tool": call.name,
+                                    "status": "executing",
+                                    "args": call.args
+                                }
+                            });
+                            if let Ok(s) = serde_json::to_string(&notif) {
+                                let _ = tx_clone.send(format!("{}\n", s));
+                            }
+                        }
+                        continue;
+                    }
+                    AgentEvent::ToolResult(result) => {
+                        json!({
+                            "jsonrpc": "2.0",
+                            "method": "notifications/progress",
+                            "params": {
+                                "tool": result.name,
+                                "status": "completed",
+                                "duration_ms": result.duration.as_millis() as u64
+                            }
+                        })
+                    }
+                    _ => continue,
+                };
+                if let Ok(s) = serde_json::to_string(&notification) {
+                    let _ = tx_clone.send(format!("{}\n", s));
+                }
             }
         });
-
-        // Create channel for agent events (MCP doesn't need streaming events)
-        let (events_tx, _events_rx) = mpsc::channel::<AgentEvent>(1);
 
         let result = run_interaction(
             &self.client,
@@ -548,7 +577,6 @@ impl McpServer {
             &self.model,
             &self.system_prompt,
             events_tx,
-            Some(progress_fn),
             cancellation_token,
         )
         .await?;

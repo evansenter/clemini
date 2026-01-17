@@ -68,16 +68,14 @@ impl TodoWriteTool {
 
         // Warn if some items were skipped
         if skipped_empty > 0 {
-            tracing::warn!(
-                "Skipped {} todo item(s) with empty content",
-                skipped_empty
-            );
+            tracing::warn!("Skipped {} todo item(s) with empty content", skipped_empty);
         }
 
         // Error if ALL items were empty
         if todos.is_empty() && skipped_empty > 0 {
             return Err(FunctionError::ArgumentMismatch(
-                "All todo items have empty content - provide meaningful task descriptions".to_string(),
+                "All todo items have empty content - provide meaningful task descriptions"
+                    .to_string(),
             ));
         }
 

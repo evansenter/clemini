@@ -6,6 +6,7 @@ use futures_util::StreamExt;
 use genai_rs::Client;
 use ratatui::DefaultTerminal;
 use serde::Deserialize;
+use serde_json::Value;
 use std::env;
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::PathBuf;
@@ -23,7 +24,7 @@ mod mcp;
 mod tools;
 mod tui;
 
-use agent::{AgentEvent, InteractionProgress, InteractionResult, run_interaction};
+use agent::{AgentEvent, InteractionResult, run_interaction};
 use tools::CleminiToolService;
 
 const DEFAULT_MODEL: &str = "gemini-3-flash-preview";
@@ -485,7 +486,6 @@ async fn main() -> Result<()> {
             &model,
             &system_prompt,
             events_tx,
-            None,
             cancellation_token,
         )
         .await?;
@@ -526,7 +526,8 @@ async fn main() -> Result<()> {
 /// Events from the async interaction task
 enum AppEvent {
     StreamChunk(String),
-    ToolProgress(InteractionProgress),
+    ToolExecuting { name: String, args: Value },
+    ToolCompleted { name: String, duration_ms: u64 },
     InteractionComplete(Result<InteractionResult>),
     ContextWarning(String),
 }
@@ -638,7 +639,6 @@ async fn run_plain_repl(
             model,
             &system_prompt,
             events_tx,
-            None,
             cancellation_token,
         )
         .await
@@ -855,6 +855,20 @@ async fn run_tui_event_loop(
                                             AgentEvent::TextDelta(text) => {
                                                 let _ = app_tx.try_send(AppEvent::StreamChunk(text));
                                             }
+                                            AgentEvent::ToolExecuting(calls) => {
+                                                for call in calls {
+                                                    let _ = app_tx.try_send(AppEvent::ToolExecuting {
+                                                        name: call.name.clone(),
+                                                        args: call.args.clone(),
+                                                    });
+                                                }
+                                            }
+                                            AgentEvent::ToolResult(result) => {
+                                                let _ = app_tx.try_send(AppEvent::ToolCompleted {
+                                                    name: result.name.clone(),
+                                                    duration_ms: result.duration.as_millis() as u64,
+                                                });
+                                            }
                                             AgentEvent::ContextWarning { percentage, .. } => {
                                                 let msg = if percentage > 95.0 {
                                                     format!(
@@ -866,17 +880,11 @@ async fn run_tui_event_loop(
                                                 };
                                                 let _ = app_tx.try_send(AppEvent::ContextWarning(msg));
                                             }
-                                            // Other events handled via progress_fn or final result
+                                            // Complete and Cancelled handled via InteractionComplete
                                             _ => {}
                                         }
                                     }
                                 });
-
-                                let progress_tx = tx.clone();
-                                let progress_fn: Option<Arc<dyn Fn(InteractionProgress) + Send + Sync>> =
-                                    Some(Arc::new(move |progress: InteractionProgress| {
-                                        let _ = progress_tx.try_send(AppEvent::ToolProgress(progress));
-                                    }));
 
                                 let result = run_interaction(
                                     &client,
@@ -886,7 +894,6 @@ async fn run_tui_event_loop(
                                     &model,
                                     &system_prompt,
                                     events_tx,
-                                    progress_fn,
                                     cancellation_token,
                                 )
                                 .await;
@@ -949,35 +956,33 @@ async fn run_tui_event_loop(
                     AppEvent::StreamChunk(text) => {
                         app.append_streaming(&text);
                     }
-                    AppEvent::ToolProgress(progress) => {
-                        if progress.status == "executing" {
-                            app.set_activity(tui::Activity::Executing(progress.tool.clone()));
-                            // Display tool call in chat
-                            let args_str = agent::format_tool_args(&progress.args);
-                            let msg = format!(
-                                "{} {} {}",
-                                "🔧".dimmed(),
-                                progress.tool.cyan(),
-                                args_str.dimmed()
-                            );
-                            app.append_to_chat(&msg);
-                        } else if progress.status == "completed" {
-                            // Tool completed - show duration if available
-                            if let Some(duration_ms) = progress.duration_ms {
-                                let duration_str = if duration_ms < 1000 {
-                                    format!("{}ms", duration_ms)
-                                } else {
-                                    format!("{:.1}s", duration_ms as f64 / 1000.0)
-                                };
-                                let msg = format!(
-                                    "  {} {}",
-                                    "└─".dimmed(),
-                                    duration_str.dimmed()
-                                );
-                                app.append_to_chat(&msg);
-                            }
-                            app.append_to_chat(""); // Single blank line after tool completes
-                        }
+                    AppEvent::ToolExecuting { name, args } => {
+                        app.set_activity(tui::Activity::Executing(name.clone()));
+                        // Display tool call in chat
+                        let args_str = events::format_tool_args(&args);
+                        let msg = format!(
+                            "{} {} {}",
+                            "🔧".dimmed(),
+                            name.cyan(),
+                            args_str.dimmed()
+                        );
+                        app.append_to_chat(&msg);
+                    }
+                    AppEvent::ToolCompleted { name, duration_ms } => {
+                        // Tool completed - show duration
+                        let duration_str = if duration_ms < 1000 {
+                            format!("{}ms", duration_ms)
+                        } else {
+                            format!("{:.1}s", duration_ms as f64 / 1000.0)
+                        };
+                        let msg = format!(
+                            "  {} {} {}",
+                            "└─".dimmed(),
+                            name.dimmed(),
+                            duration_str.dimmed()
+                        );
+                        app.append_to_chat(&msg);
+                        app.append_to_chat(""); // Single blank line after tool completes
                     }
                     AppEvent::InteractionComplete(result) => {
                         app.set_activity(tui::Activity::Idle);
@@ -1154,7 +1159,7 @@ mod event_handling_tests {
     #[test]
     fn test_tool_executing_format() {
         let args = json!({"file_path": "src/main.rs", "limit": 100});
-        let formatted = agent::format_tool_args(&args);
+        let formatted = events::format_tool_args(&args);
 
         // Args should be formatted as key=value pairs
         assert!(formatted.contains("file_path="));
@@ -1167,7 +1172,7 @@ mod event_handling_tests {
         colored::control::set_override(false);
 
         let formatted =
-            agent::format_tool_result("read_file", Duration::from_millis(25), 150, false);
+            events::format_tool_result("read_file", Duration::from_millis(25), 150, false);
 
         assert!(formatted.contains("[read_file]"));
         assert!(formatted.contains("0.02s") || formatted.contains("0.03s")); // timing can vary
@@ -1182,7 +1187,7 @@ mod event_handling_tests {
         colored::control::set_override(false);
 
         let formatted =
-            agent::format_tool_result("write_file", Duration::from_millis(10), 50, true);
+            events::format_tool_result("write_file", Duration::from_millis(10), 50, true);
 
         assert!(formatted.contains("[write_file]"));
         assert!(formatted.contains("ERROR"));
