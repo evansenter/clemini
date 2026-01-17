@@ -72,8 +72,8 @@ impl ToolService for CleminiToolService {
             Arc::new(BashTool::new(self.cwd.clone(), self.bash_timeout, self.is_mcp_mode)),
             Arc::new(GlobTool::new(self.cwd.clone())),
             Arc::new(GrepTool::new(self.cwd.clone())),
-            Arc::new(WebFetchTool::new(self.cwd.clone())),
-            Arc::new(WebSearchTool::new(self.cwd.clone())),
+            Arc::new(WebFetchTool::new()),
+            Arc::new(WebSearchTool::new()),
             Arc::new(AskUserTool::new()),
             Arc::new(TodoWriteTool::new()),
         ]
