@@ -1,10 +1,12 @@
 use async_trait::async_trait;
+use colored::Colorize;
 use genai_rs::{CallableFunction, FunctionDeclaration, FunctionError, FunctionParameters};
 use regex::Regex;
 use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::LazyLock;
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
 /// Blocked command patterns that are always rejected.
@@ -116,62 +118,116 @@ impl CallableFunction for BashTool {
 
         // Logging is handled by main.rs event loop with timing info
 
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(timeout_secs),
-            Command::new("bash")
-                .arg("-c")
-                .arg(command)
-                .current_dir(&self.cwd)
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .output(),
-        )
-        .await;
+        let mut child = Command::new("bash")
+            .arg("-c")
+            .arg(command)
+            .current_dir(&self.cwd)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| FunctionError::ExecutionError(format!("Failed to spawn process: {}", e).into()))?;
 
-        match result {
-            Ok(Ok(output)) => {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                let exit_code = output.status.code().unwrap_or(-1);
+        let stdout = child.stdout.take().unwrap();
+        let stderr = child.stderr.take().unwrap();
 
-                // Truncate very long output
-                let max_len = 50000;
-                let stdout_truncated = if stdout.len() > max_len {
-                    format!(
-                        "{}...\n[truncated, {} bytes total]",
-                        &stdout[..max_len],
-                        stdout.len()
-                    )
-                } else {
-                    stdout.to_string()
-                };
+        let mut stdout_reader = BufReader::new(stdout).lines();
+        let mut stderr_reader = BufReader::new(stderr).lines();
 
-                let stderr_truncated = if stderr.len() > max_len {
-                    format!(
-                        "{}...\n[truncated, {} bytes total]",
-                        &stderr[..max_len],
-                        stderr.len()
-                    )
-                } else {
-                    stderr.to_string()
-                };
+        let mut captured_stdout = String::new();
+        let mut captured_stderr = String::new();
 
-                Ok(json!({
-                    "command": command,
-                    "exit_code": exit_code,
-                    "stdout": stdout_truncated,
-                    "stderr": stderr_truncated,
-                    "success": output.status.success()
-                }))
+        let mut stdout_done = false;
+        let mut stderr_done = false;
+        let mut process_exited = false;
+        let mut exit_status_final = None;
+
+        let timeout_duration = std::time::Duration::from_secs(timeout_secs);
+        
+        let timed_out = match tokio::time::timeout(timeout_duration, async {
+            loop {
+                if process_exited && stdout_done && stderr_done {
+                    break;
+                }
+
+                tokio::select! {
+                    line = stdout_reader.next_line(), if !stdout_done => {
+                        match line {
+                            Ok(Some(line)) => {
+                                eprintln!("{}", line.dimmed());
+                                captured_stdout.push_str(&line);
+                                captured_stdout.push('\n');
+                            }
+                            _ => {
+                                stdout_done = true;
+                            }
+                        }
+                    }
+                    line = stderr_reader.next_line(), if !stderr_done => {
+                        match line {
+                            Ok(Some(line)) => {
+                                eprintln!("{}", line.dimmed());
+                                captured_stderr.push_str(&line);
+                                captured_stderr.push('\n');
+                            }
+                            _ => {
+                                stderr_done = true;
+                            }
+                        }
+                    }
+                    status = child.wait(), if !process_exited => {
+                        process_exited = true;
+                        exit_status_final = status.ok();
+                    }
+                }
             }
-            Ok(Err(e)) => Ok(json!({
-                "error": format!("Failed to execute command: {}", e),
-                "command": command
-            })),
-            Err(_) => Ok(json!({
+        }).await {
+            Ok(_) => false,
+            Err(_) => {
+                let _ = child.kill().await;
+                true
+            }
+        };
+
+        if timed_out {
+            return Ok(json!({
                 "error": format!("Command timed out after {} seconds", timeout_secs),
-                "command": command
-            })),
+                "command": command,
+                "stdout": captured_stdout,
+                "stderr": captured_stderr,
+            }));
         }
+
+        let exit_code = exit_status_final.and_then(|s| s.code()).unwrap_or(-1);
+        let success = exit_status_final.map(|s| s.success()).unwrap_or(false);
+
+        // Truncate very long output
+        let max_len = 50000;
+        let stdout_truncated = if captured_stdout.len() > max_len {
+            format!(
+                "{}...\n[truncated, {} bytes total]",
+                &captured_stdout[..max_len],
+                captured_stdout.len()
+            )
+        } else {
+            captured_stdout
+        };
+
+        let stderr_truncated = if captured_stderr.len() > max_len {
+            format!(
+                "{}...\n[truncated, {} bytes total]",
+                &captured_stderr[..max_len],
+                captured_stderr.len()
+            )
+        } else {
+            captured_stderr
+        };
+
+        Ok(json!({
+            "command": command,
+            "exit_code": exit_code,
+            "stdout": stdout_truncated,
+            "stderr": stderr_truncated,
+            "success": success
+        }))
     }
 }
