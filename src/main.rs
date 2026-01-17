@@ -500,9 +500,27 @@ async fn stop_spinner(spinner: &mut Option<Spinner>) {
 
 fn flush_response(response_text: &mut String, skin: &MadSkin, stream_output: bool, force_newline: bool) {
     if !response_text.is_empty() {
-        if !stream_output {
-            skin.print_text(response_text);
+        if stream_output {
+            let width = termimad::terminal_size().0.max(20);
+            let mut visual_lines = 0;
+            for line in response_text.split('\n') {
+                let len = line.chars().count();
+                if len == 0 {
+                    visual_lines += 1;
+                } else {
+                    visual_lines += (len as u16 + width - 1) / width;
+                }
+            }
+            for i in 0..visual_lines {
+                if i == 0 {
+                    print!("\r\x1B[2K");
+                } else {
+                    print!("\x1B[F\x1B[2K");
+                }
+            }
+            let _ = io::stdout().flush();
         }
+        skin.print_text(response_text);
         response_text.clear();
         println!();
     } else if force_newline {
@@ -658,10 +676,18 @@ async fn run_interaction(
                     flush_response(&mut response_text, &skin, stream_output, true);
 
                     // Log final token usage
+                    // Note: Don't replace current_context_size here - keep our accumulated estimate
+                    // because the API may return 0 for input tokens in the final auto-function response.
                     if let Some(usage) = &resp.usage {
                         let total_in = usage.total_input_tokens.unwrap_or(0);
                         let total_out = usage.total_output_tokens.unwrap_or(0);
-                        current_context_size = total_in + total_out;
+                        // Only update context if API reports meaningful values
+                        if total_in > 0 {
+                            current_context_size = total_in + total_out;
+                        } else {
+                            // API returned 0 input tokens - add only output to our estimate
+                            current_context_size += total_out;
+                        }
                         total_tokens += total_in + total_out;
                         eprintln!(
                             "[{}→{} tok]",
