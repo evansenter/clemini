@@ -74,6 +74,14 @@ fn format_request_log(method: &str, params: &Option<Value>) -> (String, String) 
     (detail, msg_body)
 }
 
+fn format_status(response: &JsonRpcResponse) -> colored::ColoredString {
+    if response.error.is_some() {
+        "ERROR".red()
+    } else {
+        "OK".green()
+    }
+}
+
 #[instrument(skip(server, request))]
 async fn handle_post(
     State(server): State<Arc<McpServer>>,
@@ -99,21 +107,11 @@ async fn handle_post(
 
     match server.handle_request(request.clone(), tx).await {
         Ok(response) => {
-            let status = if response.error.is_some() {
-                "ERROR"
-            } else {
-                "OK"
-            };
-            let status_color = if response.error.is_some() {
-                status.red()
-            } else {
-                status.green()
-            };
             crate::log_event(&format!(
                 "{} {} ({})",
                 "OUT".cyan(),
                 request.method.bold(),
-                status_color
+                format_status(&response)
             ));
             Json(response)
         }
@@ -267,16 +265,6 @@ impl McpServer {
                             id: request_clone.id.clone(),
                         },
                     };
-                    let status = if response.error.is_some() {
-                        "ERROR"
-                    } else {
-                        "OK"
-                    };
-                    let status_color = if response.error.is_some() {
-                        status.red()
-                    } else {
-                        status.green()
-                    };
                     let mut detail = String::new();
                     let mut resp_body = String::new();
                     if let Some(res) = &response.result {
@@ -305,7 +293,7 @@ impl McpServer {
                             "{} {} ({}){}{}",
                             "OUT".cyan(),
                             request_clone.method.bold(),
-                            status_color,
+                            format_status(&response),
                             detail,
                             resp_body
                         ));
@@ -322,11 +310,7 @@ impl McpServer {
                 "{} {} ({})",
                 "OUT".cyan(),
                 request.method.bold(),
-                if response.error.is_some() {
-                    "ERROR".red()
-                } else {
-                    "OK".green()
-                }
+                format_status(&response)
             ));
             let _ = tx.send(format!("{}\n", resp_str));
         }
