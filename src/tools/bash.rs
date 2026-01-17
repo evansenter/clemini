@@ -175,7 +175,6 @@ impl CallableFunction for BashTool {
         // Safety check
         if let Some(pattern) = Self::is_blocked(command) {
             let msg = format!("[bash BLOCKED: {command}] (matches pattern: {pattern})");
-            eprintln!("{}", msg);
             crate::log_event(&msg);
             return Ok(json!({
                 "error": format!("Command blocked: matches pattern '{pattern}'"),
@@ -196,7 +195,6 @@ impl CallableFunction for BashTool {
                 }
             } else if !confirmed && !self.confirm_execution(command) {
                 let msg = format!("[bash CANCELLED: {command}]");
-                eprintln!("{}", msg.yellow());
                 crate::log_event(&msg);
                 return Ok(json!({
                     "error": "Command cancelled by user",
@@ -206,9 +204,8 @@ impl CallableFunction for BashTool {
             let msg = format!("[bash CAUTION: {command}] (user confirmed)");
             crate::log_event(&msg);
         } else {
-            let msg = format!("[bash] running: \"{}\"", command).dimmed();
-            eprintln!("{}", msg);
-            crate::log_event(&msg.to_string());
+            let msg = format!("[bash] running: \"{}\"", command);
+            crate::log_event(&msg);
         }
 
         let mut child = Command::new("bash")
@@ -254,14 +251,10 @@ impl CallableFunction for BashTool {
                         match line {
                             Ok(Some(line)) => {
                                 if logged_stdout_lines < MAX_LOG_LINES {
-                                    let dimmed = line.dimmed();
-                                    eprintln!("{}", dimmed);
-                                    crate::log_event(&dimmed.to_string());
+                                    crate::log_event(&line);
                                     logged_stdout_lines += 1;
                                 } else if logged_stdout_lines == MAX_LOG_LINES {
-                                    let msg = "[...more stdout...]";
-                                    eprintln!("{}", msg.dimmed());
-                                    crate::log_event(msg);
+                                    crate::log_event("[...more stdout...]");
                                     logged_stdout_lines += 1;
                                 }
                                 captured_stdout.push_str(&line);
@@ -276,14 +269,10 @@ impl CallableFunction for BashTool {
                         match line {
                             Ok(Some(line)) => {
                                 if logged_stderr_lines < MAX_LOG_LINES {
-                                    let dimmed = line.dimmed();
-                                    eprintln!("{}", dimmed);
-                                    crate::log_event(&dimmed.to_string());
+                                    crate::log_event(&line);
                                     logged_stderr_lines += 1;
                                 } else if logged_stderr_lines == MAX_LOG_LINES {
-                                    let msg = "[...more stderr...]";
-                                    eprintln!("{}", msg.dimmed());
-                                    crate::log_event(msg);
+                                    crate::log_event("[...more stderr...]");
                                     logged_stderr_lines += 1;
                                 }
                                 captured_stderr.push_str(&line);

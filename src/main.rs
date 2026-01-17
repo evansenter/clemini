@@ -14,6 +14,7 @@ use std::sync::LazyLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 use termimad::MadSkin;
+use tokio_util::sync::CancellationToken;
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
 mod mcp;
@@ -53,8 +54,6 @@ static SKIN: LazyLock<MadSkin> = LazyLock::new(|| {
     }
     skin
 });
-
-static CANCELLED: AtomicBool = AtomicBool::new(false);
 
 /// Log to human-readable file with ANSI colors preserved
 /// Uses same naming as rolling::daily: clemini.log.YYYY-MM-DD
@@ -323,6 +322,14 @@ async fn main() -> Result<()> {
 
     if let Some(prompt) = combined_prompt {
         // Non-interactive mode: run single prompt
+        let cancellation_token = CancellationToken::new();
+        let ct_clone = cancellation_token.clone();
+        ctrlc::set_handler(move || {
+            eprintln!("\n{}", "[ctrl-c received]".yellow());
+            ct_clone.cancel();
+        })
+        .ok();
+
         let _ = run_interaction(
             &client,
             &tool_service,
@@ -332,6 +339,7 @@ async fn main() -> Result<()> {
             args.stream,
             None,
             &system_prompt,
+            cancellation_token,
         )
         .await?;
     } else {
@@ -514,6 +522,14 @@ async fn run_repl(
                     continue;
                 }
 
+                let cancellation_token = CancellationToken::new();
+                let ct_clone = cancellation_token.clone();
+                ctrlc::set_handler(move || {
+                    eprintln!("\n{}", "[ctrl-c received]".yellow());
+                    ct_clone.cancel();
+                })
+                .ok();
+
                 match run_interaction(
                     client,
                     tool_service,
@@ -523,6 +539,7 @@ async fn run_repl(
                     stream_output,
                     None,
                     &system_prompt,
+                    cancellation_token,
                 )
                 .await
                 {
@@ -800,6 +817,7 @@ async fn execute_tools(
     progress_fn: &Option<Arc<dyn Fn(InteractionProgress) + Send + Sync>>,
     tool_calls: &mut Vec<String>,
     mut cumulative_tool_tokens: u32,
+    cancellation_token: &CancellationToken,
 ) -> ToolExecutionResult {
     let mut results = Vec::new();
     let has_interactive = accumulated_function_calls
@@ -811,7 +829,7 @@ async fn execute_tools(
     }
 
     for (call_id, call_name, call_args) in accumulated_function_calls {
-        if CANCELLED.load(Ordering::SeqCst) {
+        if cancellation_token.is_cancelled() {
             return ToolExecutionResult {
                 results,
                 cumulative_tool_tokens,
@@ -912,6 +930,7 @@ pub async fn run_interaction(
     stream_output: bool,
     progress_fn: Option<Arc<dyn Fn(InteractionProgress) + Send + Sync>>,
     system_prompt: &str,
+    cancellation_token: CancellationToken,
 ) -> Result<InteractionResult> {
     let functions: Vec<_> = tool_service
         .tools()
@@ -931,14 +950,6 @@ pub async fn run_interaction(
     if let Some(prev_id) = previous_interaction_id {
         interaction = interaction.with_previous_interaction(prev_id);
     }
-
-    CANCELLED.store(false, Ordering::SeqCst); // Reset for each interaction
-
-    ctrlc::set_handler(move || {
-        eprintln!("\n{}", "[ctrl-c received]".yellow());
-        CANCELLED.store(true, Ordering::SeqCst);
-    })
-    .ok();
 
     let mut stream = Box::pin(interaction.create_stream());
 
@@ -960,7 +971,7 @@ pub async fn run_interaction(
 
         while let Some(event) = stream.next().await {
             // Check for cancellation at each iteration
-            if CANCELLED.load(Ordering::SeqCst) {
+            if cancellation_token.is_cancelled() {
                 eprintln!("{}", "[cancelled]".yellow());
                 stop_spinner(&mut spinner).await;
                 return Ok(InteractionResult {
@@ -1042,6 +1053,7 @@ pub async fn run_interaction(
             &progress_fn,
             &mut tool_calls,
             cumulative_tool_tokens,
+            &cancellation_token,
         )
         .await;
 

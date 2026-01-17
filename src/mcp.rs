@@ -15,6 +15,7 @@ use std::sync::Arc;
 use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::broadcast;
 use tokio::sync::mpsc::{self, UnboundedSender};
+use tokio_util::sync::CancellationToken;
 use tower_http::cors::CorsLayer;
 use tracing::instrument;
 // Note: info! macro goes to JSON logs only. For human-readable logs, use crate::log_event()
@@ -112,7 +113,11 @@ async fn handle_post(
         }
     });
 
-    match server.handle_request(request.clone(), tx).await {
+    let cancellation_token = CancellationToken::new();
+    match server
+        .handle_request(request.clone(), tx, cancellation_token)
+        .await
+    {
         Ok(response) => {
             crate::log_event("");
             crate::log_event(&format!(
@@ -215,7 +220,7 @@ impl McpServer {
 
         let stdin = io::stdin();
         let mut reader = BufReader::new(stdin).lines();
-        let mut current_task: Option<tokio::task::JoinHandle<()>> = None;
+        let mut current_task: Option<(tokio::task::JoinHandle<()>, CancellationToken)> = None;
 
         while let Some(line) = reader.next_line().await? {
             if line.trim().is_empty() {
@@ -252,8 +257,9 @@ impl McpServer {
             // JSON-RPC notifications don't get responses
             if request.method.starts_with("notifications/") {
                 if request.method == "notifications/cancelled"
-                    && let Some(handle) = current_task.take()
+                    && let Some((handle, token)) = current_task.take()
                 {
+                    token.cancel();
                     handle.abort();
                     crate::log_event(&format!("{} task cancelled by client", "ABORTED".red()));
                 }
@@ -265,9 +271,11 @@ impl McpServer {
                 let self_clone = Arc::clone(&self);
                 let tx_clone = tx.clone();
                 let request_clone = request.clone();
-                current_task = Some(tokio::spawn(async move {
+                let cancellation_token = CancellationToken::new();
+                let ct_clone = cancellation_token.clone();
+                let handle = tokio::spawn(async move {
                     let response = match self_clone
-                        .handle_request(request_clone.clone(), tx_clone.clone())
+                        .handle_request(request_clone.clone(), tx_clone.clone(), ct_clone)
                         .await
                     {
                         Ok(r) => r,
@@ -320,12 +328,16 @@ impl McpServer {
                         }
                         let _ = tx_clone.send(format!("{}\n", resp_str));
                     }
-                }));
+                });
+                current_task = Some((handle, cancellation_token));
                 continue;
             }
 
             // Handle other requests synchronously
-            let response = self.handle_request(request.clone(), tx.clone()).await?;
+            let cancellation_token = CancellationToken::new();
+            let response = self
+                .handle_request(request.clone(), tx.clone(), cancellation_token)
+                .await?;
             let resp_str = serde_json::to_string(&response)?;
             crate::log_event("");
             crate::log_event(&format!(
@@ -344,12 +356,16 @@ impl McpServer {
         &self,
         request: JsonRpcRequest,
         tx: UnboundedSender<String>,
+        cancellation_token: CancellationToken,
     ) -> Result<JsonRpcResponse> {
         let id = request.id.clone();
         let result = match request.method.as_str() {
             "initialize" => self.handle_initialize(request.params).await,
             "tools/list" => self.handle_tools_list().await,
-            "tools/call" => self.handle_tools_call(request.params, tx).await,
+            "tools/call" => {
+                self.handle_tools_call(request.params, tx, cancellation_token)
+                    .await
+            }
             "notifications/initialized" => {
                 return Ok(JsonRpcResponse {
                     jsonrpc: "2.0".to_string(),
@@ -430,6 +446,7 @@ impl McpServer {
         &self,
         params: Option<Value>,
         tx: UnboundedSender<String>,
+        cancellation_token: CancellationToken,
     ) -> Result<Value> {
         let params = params.ok_or_else(|| anyhow!("Missing parameters"))?;
         let name = params
@@ -441,7 +458,10 @@ impl McpServer {
             .ok_or_else(|| anyhow!("Missing tool arguments"))?;
 
         match name {
-            "clemini_chat" => self.call_clemini_chat(arguments, tx).await,
+            "clemini_chat" => {
+                self.call_clemini_chat(arguments, tx, cancellation_token)
+                    .await
+            }
             "clemini_rebuild" => self.call_clemini_rebuild(arguments).await,
             _ => Err(anyhow!("Unknown tool: {}", name)),
         }
@@ -494,6 +514,7 @@ impl McpServer {
         &self,
         arguments: &Value,
         tx: UnboundedSender<String>,
+        cancellation_token: CancellationToken,
     ) -> Result<Value> {
         let message = arguments
             .get("message")
@@ -525,6 +546,7 @@ impl McpServer {
             false,
             Some(progress_fn),
             &self.system_prompt,
+            cancellation_token,
         )
         .await?;
 
