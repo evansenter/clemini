@@ -74,31 +74,25 @@ pub fn log_event(message: &str) {
     let today = chrono::Local::now().format("%Y-%m-%d");
     let log_path = log_dir.join(format!("clemini.log.{}", today));
 
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)
-    {
-        use std::io::Write;
-        for line in rendered.trim_end().lines() {
-            let timestamp = chrono::Local::now().format("%H:%M:%S%.3f");
-            let _ = writeln!(file, "[{}] {}", timestamp, line);
-        }
-    }
+    let _ = write_to_log_file(&log_path, &rendered);
 
     // Also write to CLEMINI_LOG if set (backwards compat)
-    if let Ok(path) = std::env::var("CLEMINI_LOG")
-        && let Ok(mut file) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-    {
-        use std::io::Write;
-        for line in rendered.trim_end().lines() {
-            let timestamp = chrono::Local::now().format("%H:%M:%S%.3f");
-            let _ = writeln!(file, "[{}] {}", timestamp, line);
-        }
+    if let Ok(path) = std::env::var("CLEMINI_LOG") {
+        let _ = write_to_log_file(PathBuf::from(path), &rendered);
     }
+}
+
+fn write_to_log_file(path: impl Into<PathBuf>, rendered: &str) -> std::io::Result<()> {
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path.into())?;
+
+    for line in rendered.trim_end().lines() {
+        let timestamp = chrono::Local::now().format("%H:%M:%S%.3f");
+        writeln!(file, "[{}] {}", timestamp, line)?;
+    }
+    Ok(())
 }
 
 const SYSTEM_PROMPT: &str = r#"You are clemini, a coding assistant. Be concise. Get things done.
