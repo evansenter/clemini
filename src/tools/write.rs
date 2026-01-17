@@ -85,3 +85,64 @@ impl CallableFunction for WriteTool {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn test_write_tool_success() {
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().to_path_buf();
+        let tool = WriteTool::new(cwd.clone());
+        let file_path = "test.txt";
+        let content = "hello world";
+
+        let args = json!({
+            "file_path": file_path,
+            "content": content
+        });
+
+        let result = tool.call(args).await.unwrap();
+        assert!(result["success"].as_bool().unwrap());
+        assert_eq!(result["bytes_written"], content.len());
+
+        let saved_content = fs::read_to_string(cwd.join(file_path)).unwrap();
+        assert_eq!(saved_content, content);
+    }
+
+    #[tokio::test]
+    async fn test_write_tool_overwrite() {
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().to_path_buf();
+        let file_path = cwd.join("test.txt");
+        fs::write(&file_path, "old content").unwrap();
+
+        let tool = WriteTool::new(cwd.clone());
+        let args = json!({
+            "file_path": "test.txt",
+            "content": "new content"
+        });
+
+        let result = tool.call(args).await.unwrap();
+        assert!(result["success"].as_bool().unwrap());
+
+        let saved_content = fs::read_to_string(&file_path).unwrap();
+        assert_eq!(saved_content, "new content");
+    }
+
+    #[tokio::test]
+    async fn test_write_tool_outside_cwd() {
+        let dir = tempdir().unwrap();
+        let tool = WriteTool::new(dir.path().to_path_buf());
+        let args = json!({
+            "file_path": "../outside.txt",
+            "content": "data"
+        });
+
+        let result = tool.call(args).await.unwrap();
+        assert!(result["error"].as_str().unwrap().contains("Access denied"));
+    }
+}

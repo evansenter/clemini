@@ -136,3 +136,91 @@ impl CallableFunction for EditTool {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn test_edit_tool_success() {
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().to_path_buf();
+        let file_path = cwd.join("test.txt");
+        fs::write(&file_path, "original content").unwrap();
+
+        let tool = EditTool::new(cwd.clone());
+        let args = json!({
+            "file_path": "test.txt",
+            "old_string": "original",
+            "new_string": "updated"
+        });
+
+        let result = tool.call(args).await.unwrap();
+        assert!(result["success"].as_bool().unwrap());
+        assert_eq!(result["replacements"], 1);
+
+        let saved_content = fs::read_to_string(&file_path).unwrap();
+        assert_eq!(saved_content, "updated content");
+    }
+
+    #[tokio::test]
+    async fn test_edit_tool_not_found() {
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().to_path_buf();
+        let file_path = cwd.join("test.txt");
+        fs::write(&file_path, "content").unwrap();
+
+        let tool = EditTool::new(cwd.clone());
+        let args = json!({
+            "file_path": "test.txt",
+            "old_string": "missing",
+            "new_string": "whatever"
+        });
+
+        let result = tool.call(args).await.unwrap();
+        assert!(result["error"].as_str().unwrap().contains("was not found"));
+    }
+
+    #[tokio::test]
+    async fn test_edit_tool_not_unique() {
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().to_path_buf();
+        let file_path = cwd.join("test.txt");
+        fs::write(&file_path, "repeat repeat").unwrap();
+
+        let tool = EditTool::new(cwd.clone());
+        let args = json!({
+            "file_path": "test.txt",
+            "old_string": "repeat",
+            "new_string": "once"
+        });
+
+        let result = tool.call(args).await.unwrap();
+        assert!(result["error"].as_str().unwrap().contains("must be unique"));
+    }
+
+    #[tokio::test]
+    async fn test_edit_tool_replace_all() {
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().to_path_buf();
+        let file_path = cwd.join("test.txt");
+        fs::write(&file_path, "repeat repeat").unwrap();
+
+        let tool = EditTool::new(cwd.clone());
+        let args = json!({
+            "file_path": "test.txt",
+            "old_string": "repeat",
+            "new_string": "replaced",
+            "replace_all": true
+        });
+
+        let result = tool.call(args).await.unwrap();
+        assert!(result["success"].as_bool().unwrap());
+        assert_eq!(result["replacements"], 2);
+
+        let saved_content = fs::read_to_string(&file_path).unwrap();
+        assert_eq!(saved_content, "replaced replaced");
+    }
+}

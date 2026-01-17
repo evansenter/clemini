@@ -1,15 +1,15 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use axum::{
+    Json, Router,
     extract::State,
     response::sse::{Event, Sse},
     routing::{get, post},
-    Json, Router,
 };
 use colored::Colorize;
 use futures_util::stream::Stream;
 use genai_rs::Client;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::convert::Infallible;
 use std::sync::Arc;
 use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -19,8 +19,8 @@ use tower_http::cors::CorsLayer;
 use tracing::instrument;
 // Note: info! macro goes to JSON logs only. For human-readable logs, use crate::log_event()
 
-use crate::tools::CleminiToolService;
 use crate::InteractionProgress;
+use crate::tools::CleminiToolService;
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct JsonRpcRequest {
@@ -52,7 +52,9 @@ pub struct McpServer {
 fn format_request_log(method: &str, params: &Option<Value>) -> (String, String) {
     let mut detail = String::new();
     let mut msg_body = String::new();
-    if method == "tools/call" && let Some(params) = params {
+    if method == "tools/call"
+        && let Some(params) = params
+    {
         if let Some(name) = params.get("name").and_then(|v| v.as_str()) {
             detail.push_str(&format!(" {}", name.purple()));
         }
@@ -145,7 +147,12 @@ async fn handle_sse(
 }
 
 impl McpServer {
-    pub fn new(client: Client, tool_service: Arc<CleminiToolService>, model: String, system_prompt: String) -> Self {
+    pub fn new(
+        client: Client,
+        tool_service: Arc<CleminiToolService>,
+        model: String,
+        system_prompt: String,
+    ) -> Self {
         let (notification_tx, _) = broadcast::channel(100);
         Self {
             client,
@@ -219,12 +226,7 @@ impl McpServer {
                 Ok(req) => {
                     let (detail, msg_body) = format_request_log(&req.method, &req.params);
                     crate::log_event("");
-                    crate::log_event(&format!(
-                        "{} {}{}",
-                        "IN".green(),
-                        req.method.bold(),
-                        detail,
-                    ));
+                    crate::log_event(&format!("{} {}{}", "IN".green(), req.method.bold(), detail,));
                     if !msg_body.is_empty() {
                         crate::log_event("");
                         crate::log_event(msg_body.trim());
@@ -279,7 +281,9 @@ impl McpServer {
                     let mut detail = String::new();
                     let mut resp_body = String::new();
                     if let Some(res) = &response.result {
-                        if let Some(interaction_id) = res.get("interaction_id").and_then(|v| v.as_str()) {
+                        if let Some(interaction_id) =
+                            res.get("interaction_id").and_then(|v| v.as_str())
+                        {
                             detail.push_str(&format!(
                                 " {}={}",
                                 "interaction".dimmed(),
@@ -352,7 +356,7 @@ impl McpServer {
                     result: Some(json!({})),
                     error: None,
                     id,
-                })
+                });
             }
             _ => Err(anyhow!("Method not found: {}", request.method)),
         };

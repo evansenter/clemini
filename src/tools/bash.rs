@@ -68,7 +68,11 @@ pub struct BashTool {
 
 impl BashTool {
     pub fn new(cwd: PathBuf, timeout_secs: u64, is_mcp_mode: bool) -> Self {
-        Self { cwd, timeout_secs, is_mcp_mode }
+        Self {
+            cwd,
+            timeout_secs,
+            is_mcp_mode,
+        }
     }
 
     fn is_blocked(command: &str) -> Option<String> {
@@ -104,7 +108,10 @@ impl BashTool {
     }
 
     fn confirm_execution(&self, command: &str) -> bool {
-        let msg = format!("\n⚠️  This command may be destructive:\n    {}", command.bold());
+        let msg = format!(
+            "\n⚠️  This command may be destructive:\n    {}",
+            command.bold()
+        );
         eprintln!("{}", msg);
         crate::log_event(&msg);
 
@@ -212,7 +219,9 @@ impl CallableFunction for BashTool {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .map_err(|e| FunctionError::ExecutionError(format!("Failed to spawn process: {}", e).into()))?;
+            .map_err(|e| {
+                FunctionError::ExecutionError(format!("Failed to spawn process: {}", e).into())
+            })?;
 
         let stdout = child.stdout.take().unwrap();
         let stderr = child.stderr.take().unwrap();
@@ -233,7 +242,7 @@ impl CallableFunction for BashTool {
         let mut exit_status_final = None;
 
         let timeout_duration = std::time::Duration::from_secs(timeout_secs);
-        
+
         let timed_out = match tokio::time::timeout(timeout_duration, async {
             loop {
                 if process_exited && stdout_done && stderr_done {
@@ -291,7 +300,9 @@ impl CallableFunction for BashTool {
                     }
                 }
             }
-        }).await {
+        })
+        .await
+        {
             Ok(_) => false,
             Err(_) => {
                 let _ = child.kill().await;
@@ -323,5 +334,64 @@ impl CallableFunction for BashTool {
             "stderr": stderr_truncated,
             "success": success
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn test_bash_tool_success() {
+        let dir = tempdir().unwrap();
+        let tool = BashTool::new(dir.path().to_path_buf(), 5, false);
+        let args = json!({ "command": "echo 'hello world'" });
+
+        let result = tool.call(args).await.unwrap();
+        assert!(result["success"].as_bool().unwrap());
+        assert_eq!(result["stdout"].as_str().unwrap().trim(), "hello world");
+    }
+
+    #[tokio::test]
+    async fn test_bash_tool_failure() {
+        let dir = tempdir().unwrap();
+        let tool = BashTool::new(dir.path().to_path_buf(), 5, false);
+        let args = json!({ "command": "exit 1" });
+
+        let result = tool.call(args).await.unwrap();
+        assert!(!result["success"].as_bool().unwrap());
+        assert_eq!(result["exit_code"], 1);
+    }
+
+    #[tokio::test]
+    async fn test_bash_tool_timeout() {
+        let dir = tempdir().unwrap();
+        let tool = BashTool::new(dir.path().to_path_buf(), 1, false);
+        let args = json!({ "command": "sleep 2" });
+
+        let result = tool.call(args).await.unwrap();
+        assert!(result["error"].as_str().unwrap().contains("timed out"));
+    }
+
+    #[test]
+    fn test_bash_tool_blocked_pattern() {
+        assert!(BashTool::is_blocked("rm -rf /").is_some());
+        assert!(BashTool::is_blocked("ls -l").is_none());
+    }
+
+    #[test]
+    fn test_truncate_output_utf8() {
+        // Multi-byte character: "🦀" is 4 bytes [240, 159, 166, 128]
+        let input = "abc🦀def".to_string();
+
+        // Truncate in middle of "🦀" (at index 5 or 6)
+        let truncated = BashTool::truncate_output(input.clone(), 5);
+        // Should truncate at index 3 (before 🦀)
+        assert!(truncated.starts_with("abc..."));
+
+        let truncated = BashTool::truncate_output(input, 7);
+        // Should truncate at index 7 (after 🦀)
+        assert!(truncated.starts_with("abc🦀..."));
     }
 }

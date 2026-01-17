@@ -3,22 +3,22 @@ use clap::Parser;
 use colored::Colorize;
 use futures_util::StreamExt;
 use genai_rs::{CallableFunction, Client, Content, StreamChunk, ToolService};
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::env;
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::PathBuf;
-use std::time::Instant;
 use std::sync::Arc;
 use std::sync::LazyLock;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 use termimad::MadSkin;
-use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
-mod tools;
 mod mcp;
+mod tools;
 
 use tools::CleminiToolService;
 
@@ -37,9 +37,7 @@ pub fn init_logging() {
     // JSON layer: clemini.json.YYYY-MM-DD
     let json_file = tracing_appender::rolling::daily(&log_dir, "clemini.json");
     let (json_writer, json_guard) = tracing_appender::non_blocking(json_file);
-    let json_layer = fmt::layer()
-        .json()
-        .with_writer(json_writer);
+    let json_layer = fmt::layer().json().with_writer(json_writer);
 
     Box::leak(Box::new(json_guard));
 
@@ -255,7 +253,11 @@ async fn main() -> Result<()> {
     let client = Client::new(api_key);
 
     let cwd = std::fs::canonicalize(&args.cwd)?;
-    let tool_service = Arc::new(CleminiToolService::new(cwd.clone(), bash_timeout, args.mcp_server));
+    let tool_service = Arc::new(CleminiToolService::new(
+        cwd.clone(),
+        bash_timeout,
+        args.mcp_server,
+    ));
 
     let mut system_prompt = SYSTEM_PROMPT.to_string();
     if let Ok(claude_md) = std::fs::read_to_string(cwd.join("CLAUDE.md")) {
@@ -268,7 +270,12 @@ async fn main() -> Result<()> {
 
     // MCP server mode - handle early before consuming stdin or printing banner
     if args.mcp_server {
-        let mcp_server = Arc::new(mcp::McpServer::new(client, tool_service, model, system_prompt));
+        let mcp_server = Arc::new(mcp::McpServer::new(
+            client,
+            tool_service,
+            model,
+            system_prompt,
+        ));
         if args.http {
             mcp_server.run_http(args.port).await?;
         } else {
@@ -284,7 +291,10 @@ async fn main() -> Result<()> {
         model.green(),
         cwd.display().to_string().yellow()
     );
-    eprintln!("{} Remember to take breaks during development!", "💡".yellow());
+    eprintln!(
+        "{} Remember to take breaks during development!",
+        "💡".yellow()
+    );
     eprintln!();
 
     let mut piped_input = String::new();
@@ -314,10 +324,28 @@ async fn main() -> Result<()> {
 
     if let Some(prompt) = combined_prompt {
         // Non-interactive mode: run single prompt
-        let _ = run_interaction(&client, &tool_service, &prompt, None, &model, args.stream, None, &system_prompt).await?;
+        let _ = run_interaction(
+            &client,
+            &tool_service,
+            &prompt,
+            None,
+            &model,
+            args.stream,
+            None,
+            &system_prompt,
+        )
+        .await?;
     } else {
         // Interactive REPL mode
-        run_repl(&client, &tool_service, cwd, &model, args.stream, system_prompt).await?;
+        run_repl(
+            &client,
+            &tool_service,
+            cwd,
+            &model,
+            args.stream,
+            system_prompt,
+        )
+        .await?;
     }
 
     Ok(())
@@ -433,7 +461,10 @@ async fn run_repl(
                     println!("  Model:         {}", model.green());
                     println!("  Interactions:  {}", total_interactions);
                     println!("  Tool Calls:    {}", total_tool_calls);
-                    println!("  Total Tokens:  {}", total_session_tokens.to_string().cyan());
+                    println!(
+                        "  Total Tokens:  {}",
+                        total_session_tokens.to_string().cyan()
+                    );
                     println!(
                         "  Context usage: {}/{} tokens ({:.1}%)",
                         last_estimated_context_size.to_string().yellow(),
@@ -642,7 +673,12 @@ async fn stop_spinner(spinner: &mut Option<Spinner>) {
     }
 }
 
-fn flush_response(response_text: &mut String, skin: &MadSkin, stream_output: bool, force_newline: bool) {
+fn flush_response(
+    response_text: &mut String,
+    skin: &MadSkin,
+    stream_output: bool,
+    force_newline: bool,
+) {
     if !response_text.is_empty() {
         log_event(&format!("> {}", response_text.trim()));
         if stream_output {
@@ -692,7 +728,9 @@ pub struct InteractionProgress {
 }
 
 fn format_tool_args(args: &Value) -> String {
-    let Some(obj) = args.as_object() else { return String::new() };
+    let Some(obj) = args.as_object() else {
+        return String::new();
+    };
 
     let mut parts = Vec::new();
     for (k, v) in obj {
@@ -906,7 +944,8 @@ pub async fn run_interaction(
     ctrlc::set_handler(move || {
         eprintln!("\n{}", "[ctrl-c received]".yellow());
         CANCELLED.store(true, Ordering::SeqCst);
-    }).ok();
+    })
+    .ok();
 
     let mut stream = Box::pin(interaction.create_stream());
 
@@ -953,7 +992,11 @@ pub async fn run_interaction(
                         }
                         // Accumulate function calls from Delta chunks (streaming doesn't put them in Complete)
                         if let Content::FunctionCall { id, name, args } = content {
-                            accumulated_function_calls.push((id.clone(), name.clone(), args.clone()));
+                            accumulated_function_calls.push((
+                                id.clone(),
+                                name.clone(),
+                                args.clone(),
+                            ));
                         }
                     }
                     StreamChunk::Complete(resp) => {

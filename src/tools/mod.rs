@@ -37,7 +37,11 @@ pub struct CleminiToolService {
 
 impl CleminiToolService {
     pub fn new(cwd: PathBuf, bash_timeout: u64, is_mcp_mode: bool) -> Self {
-        Self { cwd, bash_timeout, is_mcp_mode }
+        Self {
+            cwd,
+            bash_timeout,
+            is_mcp_mode,
+        }
     }
 
     pub async fn execute(&self, name: &str, args: Value) -> Result<Value> {
@@ -69,7 +73,11 @@ impl ToolService for CleminiToolService {
             Arc::new(ReadTool::new(self.cwd.clone())),
             Arc::new(WriteTool::new(self.cwd.clone())),
             Arc::new(EditTool::new(self.cwd.clone())),
-            Arc::new(BashTool::new(self.cwd.clone(), self.bash_timeout, self.is_mcp_mode)),
+            Arc::new(BashTool::new(
+                self.cwd.clone(),
+                self.bash_timeout,
+                self.is_mcp_mode,
+            )),
             Arc::new(GlobTool::new(self.cwd.clone())),
             Arc::new(GrepTool::new(self.cwd.clone())),
             Arc::new(WebFetchTool::new()),
@@ -166,4 +174,72 @@ pub fn create_http_client() -> Result<reqwest::Client, String> {
         .user_agent(concat!("clemini/", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(|e| format!("Failed to create HTTP client: {}", e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_validate_path() {
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().canonicalize().unwrap();
+
+        // Path within cwd (allowed)
+        let file_path = cwd.join("test.txt");
+        fs::write(&file_path, "test").unwrap();
+        assert!(validate_path(&file_path, &cwd).is_ok());
+
+        // New file within cwd (allowed)
+        let new_file = cwd.join("new.txt");
+        assert!(validate_path(&new_file, &cwd).is_ok());
+
+        // Paths outside cwd via .. (rejected)
+        let outside_path = cwd.join("../outside.txt");
+        assert!(validate_path(&outside_path, &cwd).is_err());
+
+        // Absolute paths outside cwd (rejected)
+        let absolute_outside = std::env::temp_dir().join("some_other_file.txt");
+        if !absolute_outside.starts_with(&cwd) {
+            assert!(validate_path(&absolute_outside, &cwd).is_err());
+        }
+
+        // Edge cases: .
+        assert!(validate_path(&cwd.join("."), &cwd).is_ok());
+    }
+
+    #[test]
+    fn test_resolve_and_validate_path() {
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().canonicalize().unwrap();
+
+        // Relative path
+        assert!(resolve_and_validate_path("test.txt", &cwd).is_ok());
+
+        // Relative path with .. (allowed if stays within)
+        fs::create_dir(cwd.join("subdir")).unwrap();
+        assert!(resolve_and_validate_path("subdir/../test.txt", &cwd).is_ok());
+
+        // Relative path escaping cwd
+        assert!(resolve_and_validate_path("../outside.txt", &cwd).is_err());
+    }
+
+    #[test]
+    fn test_make_relative() {
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().canonicalize().unwrap();
+
+        let file_path = cwd.join("subdir/test.txt");
+        assert_eq!(make_relative(&file_path, &cwd), "subdir/test.txt");
+
+        let outside_path = std::path::Path::new("/tmp/some_file.txt");
+        if !outside_path.starts_with(&cwd) {
+            assert_eq!(
+                make_relative(outside_path, &cwd),
+                outside_path.to_string_lossy()
+            );
+        }
+    }
 }

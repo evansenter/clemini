@@ -65,7 +65,9 @@ impl CallableFunction for WebFetchTool {
                             "length": original_len
                         }))
                     }
-                    Err(e) => Ok(json!({ "error": format!("Failed to read response body: {}", e) })),
+                    Err(e) => {
+                        Ok(json!({ "error": format!("Failed to read response body: {}", e) }))
+                    }
                 }
             }
             Err(e) => Ok(json!({ "error": format!("Network error: {}", e) })),

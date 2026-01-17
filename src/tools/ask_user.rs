@@ -43,9 +43,7 @@ impl CallableFunction for AskUserTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| FunctionError::ArgumentMismatch("Missing question".to_string()))?;
 
-        let options = args
-            .get("options")
-            .and_then(|v| v.as_array());
+        let options = args.get("options").and_then(|v| v.as_array());
 
         let q_line = format!("\n{}", question);
         eprintln!("{}", q_line);

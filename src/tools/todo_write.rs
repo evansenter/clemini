@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use colored::Colorize;
 use genai_rs::{CallableFunction, FunctionDeclaration, FunctionError, FunctionParameters};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tracing::instrument;
 
 pub struct TodoWriteTool;
@@ -51,7 +51,10 @@ impl CallableFunction for TodoWriteTool {
         eprintln!();
         for todo in todos {
             let content = todo.get("content").and_then(|v| v.as_str()).unwrap_or("");
-            let status = todo.get("status").and_then(|v| v.as_str()).unwrap_or("pending");
+            let status = todo
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("pending");
 
             let (icon, colored_content) = match status {
                 "completed" => ("✓".green(), content.normal()),

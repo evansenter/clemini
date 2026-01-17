@@ -1,13 +1,13 @@
 use async_trait::async_trait;
 use genai_rs::{CallableFunction, FunctionDeclaration, FunctionError, FunctionParameters};
+use globset::{Glob, GlobSetBuilder};
 use grep::regex::RegexMatcherBuilder;
-use grep::searcher::{SearcherBuilder, Sink, SinkMatch, SinkContext, SinkFinish, BinaryDetection};
+use grep::searcher::{BinaryDetection, SearcherBuilder, Sink, SinkContext, SinkFinish, SinkMatch};
 use ignore::WalkBuilder;
 use ignore::overrides::OverrideBuilder;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use globset::{Glob, GlobSetBuilder};
 use tracing::instrument;
 
 pub struct GrepTool {
@@ -55,11 +55,16 @@ impl<'a> GrepSink<'a> {
                 return;
             }
 
-            let formatted_content = block.lines.iter().map(|(num, text, is_match)| {
-                let prefix = if *is_match { ">" } else { " " };
-                format!("{}{:>4}:{}", prefix, num, truncate_line(text))
-            }).collect::<Vec<_>>().join("\n");
-            
+            let formatted_content = block
+                .lines
+                .iter()
+                .map(|(num, text, is_match)| {
+                    let prefix = if *is_match { ">" } else { " " };
+                    format!("{}{:>4}:{}", prefix, num, truncate_line(text))
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+
             matches.push(json!({
                 "file": block.file,
                 "line": block.line,
@@ -72,9 +77,16 @@ impl<'a> GrepSink<'a> {
 impl<'a> Sink for GrepSink<'a> {
     type Error = std::io::Error;
 
-    fn matched(&mut self, _searcher: &grep::searcher::Searcher, mat: &SinkMatch<'_>) -> Result<bool, Self::Error> {
+    fn matched(
+        &mut self,
+        _searcher: &grep::searcher::Searcher,
+        mat: &SinkMatch<'_>,
+    ) -> Result<bool, Self::Error> {
         let line_number = mat.line_number().unwrap_or(0);
-        let content = std::str::from_utf8(mat.bytes()).unwrap_or("").trim_end().to_string();
+        let content = std::str::from_utf8(mat.bytes())
+            .unwrap_or("")
+            .trim_end()
+            .to_string();
         let path_str = self.path.to_string_lossy().to_string();
 
         if self.context == 0 {
@@ -110,13 +122,20 @@ impl<'a> Sink for GrepSink<'a> {
         Ok(matches_len < self.max_results)
     }
 
-    fn context(&mut self, _searcher: &grep::searcher::Searcher, mat: &SinkContext<'_>) -> Result<bool, Self::Error> {
+    fn context(
+        &mut self,
+        _searcher: &grep::searcher::Searcher,
+        mat: &SinkContext<'_>,
+    ) -> Result<bool, Self::Error> {
         if self.context == 0 {
             return Ok(true);
         }
 
         let line_number = mat.line_number().unwrap_or(0);
-        let content = std::str::from_utf8(mat.bytes()).unwrap_or("").trim_end().to_string();
+        let content = std::str::from_utf8(mat.bytes())
+            .unwrap_or("")
+            .trim_end()
+            .to_string();
         let path_str = self.path.to_string_lossy().to_string();
 
         if let Some(block) = self.current_block.as_mut() {
@@ -142,7 +161,11 @@ impl<'a> Sink for GrepSink<'a> {
         Ok(matches_len < self.max_results)
     }
 
-    fn finish(&mut self, _searcher: &grep::searcher::Searcher, _finish: &SinkFinish) -> Result<(), Self::Error> {
+    fn finish(
+        &mut self,
+        _searcher: &grep::searcher::Searcher,
+        _finish: &SinkFinish,
+    ) -> Result<(), Self::Error> {
         self.flush_block();
         Ok(())
     }
@@ -200,10 +223,7 @@ impl CallableFunction for GrepTool {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
-        let context = args
-            .get("context")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
+        let context = args.get("context").and_then(|v| v.as_u64()).unwrap_or(0);
 
         let max_results = args
             .get("max_results")
@@ -227,14 +247,24 @@ impl CallableFunction for GrepTool {
         let mut files_with_matches = 0;
 
         let mut glob_builder = GlobSetBuilder::new();
-        glob_builder.add(Glob::new(file_pattern).map_err(|e| FunctionError::ExecutionError(format!("Invalid file pattern: {}", e).into()))?);
-        let glob_set = glob_builder.build().map_err(|e| FunctionError::ExecutionError(format!("Failed to build glob set: {}", e).into()))?;
+        glob_builder.add(Glob::new(file_pattern).map_err(|e| {
+            FunctionError::ExecutionError(format!("Invalid file pattern: {}", e).into())
+        })?);
+        let glob_set = glob_builder.build().map_err(|e| {
+            FunctionError::ExecutionError(format!("Failed to build glob set: {}", e).into())
+        })?;
 
         let mut override_builder = OverrideBuilder::new(&self.cwd);
         for exclude in DEFAULT_EXCLUDES {
-            override_builder.add(&format!("!{}", exclude)).map_err(|e| FunctionError::ExecutionError(format!("Invalid exclude: {}", e).into()))?;
+            override_builder
+                .add(&format!("!{}", exclude))
+                .map_err(|e| {
+                    FunctionError::ExecutionError(format!("Invalid exclude: {}", e).into())
+                })?;
         }
-        let overrides = override_builder.build().map_err(|e| FunctionError::ExecutionError(format!("Failed to build overrides: {}", e).into()))?;
+        let overrides = override_builder.build().map_err(|e| {
+            FunctionError::ExecutionError(format!("Failed to build overrides: {}", e).into())
+        })?;
 
         let mut walker = WalkBuilder::new(&self.cwd);
         walker.overrides(overrides);
@@ -251,7 +281,7 @@ impl CallableFunction for GrepTool {
 
             let path = entry.path();
             let relative_path = path.strip_prefix(&self.cwd).unwrap_or(path);
-            
+
             if !glob_set.is_match(relative_path) {
                 continue;
             }
@@ -297,5 +327,72 @@ impl CallableFunction for GrepTool {
             "files_with_matches": files_with_matches,
             "truncated": final_matches.len() >= max_results
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn test_grep_tool_success() {
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().to_path_buf();
+        fs::write(cwd.join("test.txt"), "hello world\ngoodbye world").unwrap();
+
+        let tool = GrepTool::new(cwd.clone());
+        let args = json!({
+            "pattern": "hello"
+        });
+
+        let result = tool.call(args).await.unwrap();
+        let matches = result["matches"].as_array().unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0]["file"], "test.txt");
+        assert_eq!(matches[0]["line"], 1);
+        assert!(
+            matches[0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("hello world")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_grep_tool_with_context() {
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().to_path_buf();
+        fs::write(cwd.join("test.txt"), "line 1\nline 2 (match)\nline 3").unwrap();
+
+        let tool = GrepTool::new(cwd.clone());
+        let args = json!({
+            "pattern": "match",
+            "context": 1
+        });
+
+        let result = tool.call(args).await.unwrap();
+        let matches = result["matches"].as_array().unwrap();
+        assert_eq!(matches.len(), 1);
+        let content = matches[0]["content"].as_str().unwrap();
+        assert!(content.contains("line 1"));
+        assert!(content.contains("line 2 (match)"));
+        assert!(content.contains("line 3"));
+    }
+
+    #[tokio::test]
+    async fn test_grep_tool_no_matches() {
+        let dir = tempdir().unwrap();
+        let tool = GrepTool::new(dir.path().to_path_buf());
+        let args = json!({ "pattern": "nonexistent" });
+
+        let result = tool.call(args).await.unwrap();
+        assert!(
+            result["error"]
+                .as_str()
+                .unwrap()
+                .contains("No matches found")
+        );
     }
 }

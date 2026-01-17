@@ -43,9 +43,12 @@ impl CallableFunction for WebSearchTool {
         };
 
         let url = "https://api.duckduckgo.com/";
-        match client.get(url)
+        match client
+            .get(url)
             .query(&[("q", query), ("format", "json")])
-            .send().await {
+            .send()
+            .await
+        {
             Ok(resp) => {
                 let status = resp.status();
                 if !status.is_success() {
@@ -57,9 +60,12 @@ impl CallableFunction for WebSearchTool {
 
                 match resp.json::<Value>().await {
                     Ok(data) => {
-                        let abstract_text = data.get("AbstractText").and_then(|v| v.as_str()).unwrap_or("");
+                        let abstract_text = data
+                            .get("AbstractText")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
                         let related_topics = data.get("RelatedTopics").and_then(|v| v.as_array());
-                        
+
                         let mut results = Vec::new();
                         if let Some(topics) = related_topics {
                             for topic in topics {
@@ -75,7 +81,9 @@ impl CallableFunction for WebSearchTool {
                             "related_topics": results
                         }))
                     }
-                    Err(e) => Ok(json!({ "error": format!("Failed to parse JSON response: {}", e) })),
+                    Err(e) => {
+                        Ok(json!({ "error": format!("Failed to parse JSON response: {}", e) }))
+                    }
                 }
             }
             Err(e) => Ok(json!({ "error": format!("Network error: {}", e) })),

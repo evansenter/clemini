@@ -50,15 +50,9 @@ impl CallableFunction for ReadTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| FunctionError::ArgumentMismatch("Missing file_path".to_string()))?;
 
-        let offset = args
-            .get("offset")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(1) as usize;
+        let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(1) as usize;
 
-        let limit = args
-            .get("limit")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(500) as usize;
+        let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(500) as usize;
 
         // Resolve and validate path
         let path = match resolve_and_validate_path(file_path, &self.cwd) {
@@ -74,10 +68,10 @@ impl CallableFunction for ReadTool {
             Ok(contents) => {
                 let lines: Vec<&str> = contents.lines().collect();
                 let total_lines = lines.len();
-                
+
                 let start = offset.saturating_sub(1);
                 let end = (start + limit).min(total_lines);
-                
+
                 if start >= total_lines && total_lines > 0 {
                     return Ok(json!({
                         "path": path.display().to_string(),
@@ -113,5 +107,54 @@ impl CallableFunction for ReadTool {
                 "error": format!("Failed to read {}: {}. Ensure the file exists and is not a directory.", path.display(), e)
             })),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn test_read_tool_success() {
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().to_path_buf();
+        let file_path = cwd.join("test.txt");
+        fs::write(&file_path, "line 1\nline 2\nline 3").unwrap();
+
+        let tool = ReadTool::new(cwd.clone());
+        let args = json!({
+            "file_path": "test.txt",
+            "offset": 1,
+            "limit": 2
+        });
+
+        let result = tool.call(args).await.unwrap();
+        assert_eq!(result["total_lines"], 3);
+        assert!(result["contents"].as_str().unwrap().contains("line 1"));
+        assert!(result["contents"].as_str().unwrap().contains("line 2"));
+        assert!(!result["contents"].as_str().unwrap().contains("line 3"));
+        assert!(result["truncated"].is_string());
+    }
+
+    #[tokio::test]
+    async fn test_read_tool_missing_file() {
+        let dir = tempdir().unwrap();
+        let tool = ReadTool::new(dir.path().to_path_buf());
+        let args = json!({ "file_path": "missing.txt" });
+
+        let result = tool.call(args).await.unwrap();
+        assert!(result["error"].as_str().unwrap().contains("Failed to read"));
+    }
+
+    #[tokio::test]
+    async fn test_read_tool_outside_cwd() {
+        let dir = tempdir().unwrap();
+        let tool = ReadTool::new(dir.path().to_path_buf());
+        let args = json!({ "file_path": "../outside.txt" });
+
+        let result = tool.call(args).await.unwrap();
+        assert!(result["error"].as_str().unwrap().contains("Access denied"));
     }
 }

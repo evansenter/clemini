@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use std::path::PathBuf;
 use tracing::instrument;
 
-use super::{make_relative, validate_path, DEFAULT_EXCLUDES};
+use super::{DEFAULT_EXCLUDES, make_relative, validate_path};
 
 pub struct GlobTool {
     cwd: PathBuf,
@@ -114,5 +114,63 @@ impl CallableFunction for GlobTool {
                 "error": format!("Invalid glob pattern: {}. Ensure you are using valid glob syntax (e.g., '**/*.rs', 'src/*.ts'). Suggestions: check for invalid characters or incorrectly nested patterns.", e)
             })),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn test_glob_tool_success() {
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().to_path_buf();
+        fs::create_dir(cwd.join("src")).unwrap();
+        fs::write(cwd.join("src/main.rs"), "").unwrap();
+        fs::write(cwd.join("src/lib.rs"), "").unwrap();
+        fs::write(cwd.join("README.md"), "").unwrap();
+
+        let tool = GlobTool::new(cwd.clone());
+        let args = json!({ "pattern": "src/*.rs" });
+
+        let result = tool.call(args).await.unwrap();
+        let matches = result["matches"].as_array().unwrap();
+        assert_eq!(matches.len(), 2);
+        assert!(matches.iter().any(|m| m.as_str().unwrap() == "src/main.rs"));
+        assert!(matches.iter().any(|m| m.as_str().unwrap() == "src/lib.rs"));
+    }
+
+    #[tokio::test]
+    async fn test_glob_tool_excludes() {
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().to_path_buf();
+        fs::create_dir(cwd.join(".git")).unwrap();
+        fs::write(cwd.join(".git/config"), "").unwrap();
+        fs::write(cwd.join("file.txt"), "").unwrap();
+
+        let tool = GlobTool::new(cwd.clone());
+        let args = json!({ "pattern": "**/*" });
+
+        let result = tool.call(args).await.unwrap();
+        let matches = result["matches"].as_array().unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].as_str().unwrap(), "file.txt");
+    }
+
+    #[tokio::test]
+    async fn test_glob_tool_no_matches() {
+        let dir = tempdir().unwrap();
+        let tool = GlobTool::new(dir.path().to_path_buf());
+        let args = json!({ "pattern": "*.nonexistent" });
+
+        let result = tool.call(args).await.unwrap();
+        assert!(
+            result["error"]
+                .as_str()
+                .unwrap()
+                .contains("No files matched")
+        );
     }
 }

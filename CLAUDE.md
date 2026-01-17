@@ -69,3 +69,10 @@ Debugging: `LOUD_WIRE=1` logs all HTTP requests/responses.
 **Minimal scope** - Only implement what was asked. Don't add "nice to have" features beyond the request. For example, if asked for a stdio server, don't also add HTTP support.
 
 **Complete dependency management** - When using a new crate, ensure it's added to Cargo.toml with the proper features before writing code that depends on it. Never reference crates that aren't in dependencies.
+
+**Quality gates before pushing** - All of these must pass:
+- `cargo clippy -- -D warnings` (no warnings)
+- `cargo fmt --check` (formatted)
+- `cargo test` (tests pass)
+
+Don't skip tests. If a test is flaky or legitimately broken by your change, fix the test as part of the PR.
