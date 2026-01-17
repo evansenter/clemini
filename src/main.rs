@@ -208,7 +208,8 @@ fn write_to_log_file(path: impl Into<PathBuf>, rendered: &str) -> std::io::Resul
     } else {
         for line in rendered.lines() {
             let timestamp = format!("[{}]", chrono::Local::now().format("%H:%M:%S%.3f")).cyan();
-            writeln!(file, "{} {}", timestamp, line)?;
+            // Reset before and after timestamp to prevent ANSI code bleed between lines
+            writeln!(file, "\x1b[0m{}\x1b[0m {}", timestamp, line)?;
         }
     }
     Ok(())
