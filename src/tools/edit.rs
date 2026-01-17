@@ -232,4 +232,80 @@ mod tests {
         let saved_content = fs::read_to_string(&file_path).unwrap();
         assert_eq!(saved_content, "replaced replaced");
     }
+
+    #[tokio::test]
+    async fn test_edit_tool_empty_file() {
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().to_path_buf();
+        let file_path = cwd.join("empty.txt");
+        fs::write(&file_path, "").unwrap();
+
+        let tool = EditTool::new(cwd.clone(), vec![cwd.clone()]);
+        let args = json!({
+            "file_path": "empty.txt",
+            "old_string": "something",
+            "new_string": "nothing"
+        });
+
+        let result = tool.call(args).await.unwrap();
+        assert!(result["error"].as_str().unwrap().contains("was not found"));
+    }
+
+    #[tokio::test]
+    async fn test_edit_tool_multiline() {
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().to_path_buf();
+        let file_path = cwd.join("test.txt");
+        fs::write(&file_path, "line 1\nline 2\nline 3").unwrap();
+
+        let tool = EditTool::new(cwd.clone(), vec![cwd.clone()]);
+        let args = json!({
+            "file_path": "test.txt",
+            "old_string": "line 1\nline 2",
+            "new_string": "new line 1\nnew line 2"
+        });
+
+        let result = tool.call(args).await.unwrap();
+        assert!(result["success"].as_bool().unwrap());
+
+        let saved_content = fs::read_to_string(&file_path).unwrap();
+        assert_eq!(saved_content, "new line 1\nnew line 2\nline 3");
+    }
+
+    #[tokio::test]
+    async fn test_edit_tool_unicode() {
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().to_path_buf();
+        let file_path = cwd.join("test.txt");
+        fs::write(&file_path, "hello world").unwrap();
+
+        let tool = EditTool::new(cwd.clone(), vec![cwd.clone()]);
+        let args = json!({
+            "file_path": "test.txt",
+            "old_string": "world",
+            "new_string": "🦀"
+        });
+
+        let result = tool.call(args).await.unwrap();
+        assert!(result["success"].as_bool().unwrap());
+
+        let saved_content = fs::read_to_string(&file_path).unwrap();
+        assert_eq!(saved_content, "hello 🦀");
+    }
+
+    #[tokio::test]
+    async fn test_edit_tool_file_not_exists() {
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().to_path_buf();
+
+        let tool = EditTool::new(cwd.clone(), vec![cwd.clone()]);
+        let args = json!({
+            "file_path": "nonexistent.txt",
+            "old_string": "old",
+            "new_string": "new"
+        });
+
+        let result = tool.call(args).await.unwrap();
+        assert!(result["error"].as_str().unwrap().contains("Failed to read"));
+    }
 }

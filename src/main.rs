@@ -541,6 +541,44 @@ fn format_tool_duration(duration_ms: u64) -> String {
     }
 }
 
+/// Format context warning message based on severity.
+fn format_context_warning(percentage: f64) -> String {
+    if percentage > 95.0 {
+        format!(
+            "WARNING: Context window at {:.1}%. Use /clear to reset.",
+            percentage
+        )
+    } else {
+        format!("WARNING: Context window at {:.1}%.", percentage)
+    }
+}
+
+/// Convert AgentEvent to AppEvents for the TUI.
+/// Returns a Vec because ToolExecuting can produce multiple AppEvents.
+fn convert_agent_event_to_app_events(event: &AgentEvent) -> Vec<AppEvent> {
+    match event {
+        AgentEvent::TextDelta(text) => vec![AppEvent::StreamChunk(text.clone())],
+        AgentEvent::ToolExecuting(calls) => calls
+            .iter()
+            .map(|call| AppEvent::ToolExecuting {
+                name: call.name.clone(),
+                args: call.args.clone(),
+            })
+            .collect(),
+        AgentEvent::ToolResult(result) => vec![AppEvent::ToolCompleted {
+            name: result.name.clone(),
+            duration_ms: result.duration.as_millis() as u64,
+        }],
+        AgentEvent::ContextWarning { percentage, .. } => {
+            vec![AppEvent::ContextWarning(format_context_warning(
+                *percentage,
+            ))]
+        }
+        // Complete and Cancelled are handled differently (via join handle result)
+        AgentEvent::Complete { .. } | AgentEvent::Cancelled => vec![],
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_repl(
     client: &Client,
@@ -860,37 +898,8 @@ async fn run_tui_event_loop(
                                 let app_tx = tx.clone();
                                 tokio::spawn(async move {
                                     while let Some(event) = events_rx.recv().await {
-                                        match event {
-                                            AgentEvent::TextDelta(text) => {
-                                                let _ = app_tx.try_send(AppEvent::StreamChunk(text));
-                                            }
-                                            AgentEvent::ToolExecuting(calls) => {
-                                                for call in calls {
-                                                    let _ = app_tx.try_send(AppEvent::ToolExecuting {
-                                                        name: call.name.clone(),
-                                                        args: call.args.clone(),
-                                                    });
-                                                }
-                                            }
-                                            AgentEvent::ToolResult(result) => {
-                                                let _ = app_tx.try_send(AppEvent::ToolCompleted {
-                                                    name: result.name.clone(),
-                                                    duration_ms: result.duration.as_millis() as u64,
-                                                });
-                                            }
-                                            AgentEvent::ContextWarning { percentage, .. } => {
-                                                let msg = if percentage > 95.0 {
-                                                    format!(
-                                                        "WARNING: Context window at {:.1}%. Use /clear to reset.",
-                                                        percentage
-                                                    )
-                                                } else {
-                                                    format!("WARNING: Context window at {:.1}%.", percentage)
-                                                };
-                                                let _ = app_tx.try_send(AppEvent::ContextWarning(msg));
-                                            }
-                                            // Complete and Cancelled handled via InteractionComplete
-                                            _ => {}
+                                        for app_event in convert_agent_event_to_app_events(&event) {
+                                            let _ = app_tx.try_send(app_event);
                                         }
                                     }
                                 });
@@ -1334,5 +1343,186 @@ mod event_handling_tests {
         assert_eq!(format_tool_duration(999), "999ms");
         // Exactly 1 second
         assert_eq!(format_tool_duration(1000), "1.0s");
+    }
+
+    // =========================================
+    // Context warning formatting tests
+    // =========================================
+
+    #[test]
+    fn test_format_context_warning_normal() {
+        let msg = format_context_warning(85.0);
+        assert!(msg.contains("85.0%"));
+        assert!(!msg.contains("/clear"));
+    }
+
+    #[test]
+    fn test_format_context_warning_critical() {
+        let msg = format_context_warning(96.0);
+        assert!(msg.contains("96.0%"));
+        assert!(msg.contains("/clear"));
+    }
+
+    #[test]
+    fn test_format_context_warning_boundary() {
+        // Exactly 95% - not critical
+        let msg = format_context_warning(95.0);
+        assert!(!msg.contains("/clear"));
+
+        // Just over 95% - critical
+        let msg = format_context_warning(95.1);
+        assert!(msg.contains("/clear"));
+    }
+
+    // =========================================
+    // AgentEvent to AppEvent conversion tests
+    // =========================================
+
+    #[test]
+    fn test_convert_text_delta() {
+        let event = AgentEvent::TextDelta("Hello world".to_string());
+        let app_events = convert_agent_event_to_app_events(&event);
+
+        assert_eq!(app_events.len(), 1);
+        match &app_events[0] {
+            AppEvent::StreamChunk(text) => assert_eq!(text, "Hello world"),
+            _ => panic!("Expected StreamChunk"),
+        }
+    }
+
+    #[test]
+    fn test_convert_tool_executing_single() {
+        use genai_rs::OwnedFunctionCallInfo;
+
+        let call = OwnedFunctionCallInfo {
+            id: Some("call-1".to_string()),
+            name: "read_file".to_string(),
+            args: json!({"file_path": "test.txt"}),
+        };
+        let event = AgentEvent::ToolExecuting(vec![call]);
+        let app_events = convert_agent_event_to_app_events(&event);
+
+        assert_eq!(app_events.len(), 1);
+        match &app_events[0] {
+            AppEvent::ToolExecuting { name, args } => {
+                assert_eq!(name, "read_file");
+                assert_eq!(args["file_path"], "test.txt");
+            }
+            _ => panic!("Expected ToolExecuting"),
+        }
+    }
+
+    #[test]
+    fn test_convert_tool_executing_multiple() {
+        use genai_rs::OwnedFunctionCallInfo;
+
+        let calls = vec![
+            OwnedFunctionCallInfo {
+                id: Some("call-1".to_string()),
+                name: "glob".to_string(),
+                args: json!({"pattern": "*.rs"}),
+            },
+            OwnedFunctionCallInfo {
+                id: Some("call-2".to_string()),
+                name: "grep".to_string(),
+                args: json!({"pattern": "fn main"}),
+            },
+        ];
+        let event = AgentEvent::ToolExecuting(calls);
+        let app_events = convert_agent_event_to_app_events(&event);
+
+        assert_eq!(app_events.len(), 2);
+        match &app_events[0] {
+            AppEvent::ToolExecuting { name, .. } => assert_eq!(name, "glob"),
+            _ => panic!("Expected ToolExecuting"),
+        }
+        match &app_events[1] {
+            AppEvent::ToolExecuting { name, .. } => assert_eq!(name, "grep"),
+            _ => panic!("Expected ToolExecuting"),
+        }
+    }
+
+    #[test]
+    fn test_convert_tool_result() {
+        use genai_rs::FunctionExecutionResult;
+
+        let result = FunctionExecutionResult::new(
+            "bash".to_string(),
+            "call-1".to_string(),
+            json!({"command": "ls"}),
+            json!({"output": "file.txt"}),
+            Duration::from_millis(150),
+        );
+        let event = AgentEvent::ToolResult(result);
+        let app_events = convert_agent_event_to_app_events(&event);
+
+        assert_eq!(app_events.len(), 1);
+        match &app_events[0] {
+            AppEvent::ToolCompleted { name, duration_ms } => {
+                assert_eq!(name, "bash");
+                assert_eq!(*duration_ms, 150);
+            }
+            _ => panic!("Expected ToolCompleted"),
+        }
+    }
+
+    #[test]
+    fn test_convert_context_warning() {
+        let event = AgentEvent::ContextWarning {
+            used: 900_000,
+            limit: 1_000_000,
+            percentage: 90.0,
+        };
+        let app_events = convert_agent_event_to_app_events(&event);
+
+        assert_eq!(app_events.len(), 1);
+        match &app_events[0] {
+            AppEvent::ContextWarning(msg) => {
+                assert!(msg.contains("90.0%"));
+            }
+            _ => panic!("Expected ContextWarning"),
+        }
+    }
+
+    #[test]
+    fn test_convert_complete_returns_empty() {
+        use genai_rs::{InteractionResponse, InteractionStatus};
+
+        let response = InteractionResponse {
+            id: Some("test-id".to_string()),
+            model: None,
+            agent: None,
+            input: vec![],
+            outputs: vec![],
+            status: InteractionStatus::Completed,
+            usage: None,
+            tools: None,
+            grounding_metadata: None,
+            url_context_metadata: None,
+            previous_interaction_id: None,
+            created: None,
+            updated: None,
+        };
+        let event = AgentEvent::Complete {
+            interaction_id: Some("test-id".to_string()),
+            response: Box::new(response),
+        };
+        let app_events = convert_agent_event_to_app_events(&event);
+
+        assert!(
+            app_events.is_empty(),
+            "Complete should not produce AppEvents"
+        );
+    }
+
+    #[test]
+    fn test_convert_cancelled_returns_empty() {
+        let event = AgentEvent::Cancelled;
+        let app_events = convert_agent_event_to_app_events(&event);
+
+        assert!(
+            app_events.is_empty(),
+            "Cancelled should not produce AppEvents"
+        );
     }
 }

@@ -158,4 +158,60 @@ mod tests {
         let result = tool.call(args).await.unwrap();
         assert!(result["error"].as_str().unwrap().contains("Access denied"));
     }
+
+    #[tokio::test]
+    async fn test_read_tool_offset_out_of_bounds() {
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().to_path_buf();
+        let file_path = cwd.join("test.txt");
+        fs::write(&file_path, "line 1\nline 2").unwrap();
+
+        let tool = ReadTool::new(cwd.clone(), vec![cwd.clone()]);
+        let args = json!({
+            "file_path": "test.txt",
+            "offset": 5
+        });
+
+        let result = tool.call(args).await.unwrap();
+        assert!(result["error"].as_str().unwrap().contains("out of bounds"));
+    }
+
+    #[tokio::test]
+    async fn test_read_tool_empty_file() {
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().to_path_buf();
+        let file_path = cwd.join("empty.txt");
+        fs::write(&file_path, "").unwrap();
+
+        let tool = ReadTool::new(cwd.clone(), vec![cwd.clone()]);
+        let args = json!({ "file_path": "empty.txt" });
+
+        let result = tool.call(args).await.unwrap();
+        assert_eq!(result["total_lines"], 0);
+        assert_eq!(result["contents"], "");
+    }
+
+    #[tokio::test]
+    async fn test_read_tool_default_limit() {
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().to_path_buf();
+        let file_path = cwd.join("large.txt");
+        let content = (1..=600)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(&file_path, content).unwrap();
+
+        let tool = ReadTool::new(cwd.clone(), vec![cwd.clone()]);
+        let args = json!({ "file_path": "large.txt" });
+
+        let result = tool.call(args).await.unwrap();
+        assert_eq!(result["total_lines"], 600);
+        assert!(
+            result["truncated"]
+                .as_str()
+                .unwrap()
+                .contains("Showing lines 1-500")
+        );
+    }
 }

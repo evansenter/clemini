@@ -399,4 +399,65 @@ mod tests {
                 .contains("No matches found")
         );
     }
+
+    #[tokio::test]
+    async fn test_grep_special_characters() {
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().to_path_buf();
+        fs::write(cwd.join("test.txt"), "some [special] (chars) here.").unwrap();
+
+        let tool = GrepTool::new(cwd.clone(), vec![cwd.clone()]);
+        let args = json!({
+            "pattern": r"\[special\] \(chars\)"
+        });
+
+        let result = tool.call(args).await.unwrap();
+        let matches = result["matches"].as_array().unwrap();
+        assert_eq!(matches.len(), 1);
+        assert!(matches[0]["content"].as_str().unwrap().contains("[special] (chars)"));
+    }
+
+    #[tokio::test]
+    async fn test_grep_case_insensitive() {
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().to_path_buf();
+        fs::write(cwd.join("test.txt"), "HELLO world").unwrap();
+
+        let tool = GrepTool::new(cwd.clone(), vec![cwd.clone()]);
+        let args = json!({
+            "pattern": "hello",
+            "case_insensitive": true
+        });
+
+        let result = tool.call(args).await.unwrap();
+        let matches = result["matches"].as_array().unwrap();
+        assert_eq!(matches.len(), 1);
+        assert!(
+            matches[0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("HELLO world")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_grep_subdirectory() {
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().to_path_buf();
+        let sub = cwd.join("subdir");
+        fs::create_dir(&sub).unwrap();
+        fs::write(sub.join("test.txt"), "match in subdir").unwrap();
+        fs::write(cwd.join("test.txt"), "match in root").unwrap();
+
+        let tool = GrepTool::new(cwd.clone(), vec![cwd.clone()]);
+        let args = json!({
+            "pattern": "match",
+            "file_pattern": "subdir/*"
+        });
+
+        let result = tool.call(args).await.unwrap();
+        let matches = result["matches"].as_array().unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0]["file"], "subdir/test.txt");
+    }
 }

@@ -374,9 +374,53 @@ mod tests {
     }
 
     #[test]
-    fn test_bash_tool_blocked_pattern() {
+    fn test_bash_tool_blocked_patterns() {
         assert!(BashTool::is_blocked("rm -rf /").is_some());
+        assert!(BashTool::is_blocked("rm -rf /*").is_some());
+        assert!(BashTool::is_blocked("rm -rf ~").is_some());
+        assert!(BashTool::is_blocked("dd if=/dev/zero of=/dev/sda").is_some());
+        assert!(BashTool::is_blocked("mkfs.ext4 /dev/sda1").is_some());
+        assert!(BashTool::is_blocked("chmod 777 /").is_some());
+        assert!(BashTool::is_blocked("chmod -R 777 /").is_some());
+        assert!(BashTool::is_blocked("chown user /").is_some());
+        assert!(BashTool::is_blocked(":(){ :|:& };:").is_some());
+        assert!(BashTool::is_blocked("echo 'malicious' > /etc/passwd").is_some());
         assert!(BashTool::is_blocked("ls -l").is_none());
+    }
+
+    #[test]
+    fn test_bash_tool_needs_caution() {
+        assert!(BashTool::needs_caution("sudo apt update"));
+        assert!(BashTool::needs_caution("rm file.txt"));
+        assert!(BashTool::needs_caution("git push --force"));
+        assert!(BashTool::needs_caution("git reset --hard HEAD"));
+        assert!(!BashTool::needs_caution("ls -l"));
+    }
+
+    #[tokio::test]
+    async fn test_bash_tool_stderr() {
+        let dir = tempdir().unwrap();
+        let tool = BashTool::new(dir.path().to_path_buf(), 5, false);
+        let args = json!({ "command": "echo 'error message' >&2" });
+
+        let result = tool.call(args).await.unwrap();
+        assert!(result["success"].as_bool().unwrap());
+        assert_eq!(result["stderr"].as_str().unwrap().trim(), "error message");
+    }
+
+    #[tokio::test]
+    async fn test_bash_tool_cwd() {
+        let dir = tempdir().unwrap();
+        let tool = BashTool::new(dir.path().to_path_buf(), 5, false);
+        let args = json!({ "command": "pwd" });
+
+        let result = tool.call(args).await.unwrap();
+        assert!(result["success"].as_bool().unwrap());
+        let pwd = result["stdout"].as_str().unwrap().trim();
+        // Handle potential symlinks in temp dir
+        let expected = dir.path().canonicalize().unwrap();
+        let actual = std::path::Path::new(pwd).canonicalize().unwrap();
+        assert_eq!(actual, expected);
     }
 
     #[test]
