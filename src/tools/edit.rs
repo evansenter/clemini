@@ -20,7 +20,7 @@ impl CallableFunction for EditTool {
     fn declaration(&self) -> FunctionDeclaration {
         FunctionDeclaration::new(
             "edit".to_string(),
-            "Replace a specific string in a file with new content. The old_string must match exactly and uniquely in the file. Use this for surgical edits instead of rewriting entire files.".to_string(),
+            "Replace a specific string in a file with new content. If 'replace_all' is true, all occurrences are replaced. Otherwise, 'old_string' must match exactly and uniquely in the file.".to_string(),
             FunctionParameters::new(
                 "object".to_string(),
                 json!({
@@ -30,11 +30,15 @@ impl CallableFunction for EditTool {
                     },
                     "old_string": {
                         "type": "string",
-                        "description": "The exact string to find and replace (must be unique in the file)"
+                        "description": "The exact string to find and replace"
                     },
                     "new_string": {
                         "type": "string",
                         "description": "The string to replace it with"
+                    },
+                    "replace_all": {
+                        "type": "boolean",
+                        "description": "If true, replace all occurrences of 'old_string'. If false (default), 'old_string' must be unique."
                     }
                 }),
                 vec!["file_path".to_string(), "old_string".to_string(), "new_string".to_string()],
@@ -57,6 +61,11 @@ impl CallableFunction for EditTool {
             .get("new_string")
             .and_then(|v| v.as_str())
             .ok_or_else(|| FunctionError::ArgumentMismatch("Missing new_string".to_string()))?;
+
+        let replace_all = args
+            .get("replace_all")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
 
         if old_string == new_string {
             return Ok(json!({
@@ -94,16 +103,20 @@ impl CallableFunction for EditTool {
             }));
         }
 
-        if matches.len() > 1 {
+        if !replace_all && matches.len() > 1 {
             return Ok(json!({
-                "error": format!("The 'old_string' was found {} times in {}. It must be unique to ensure the correct replacement. Provide more surrounding context to make it unique.", matches.len(), file_path),
+                "error": format!("The 'old_string' was found {} times in {}. It must be unique to ensure the correct replacement. Provide more surrounding context to make it unique, or set 'replace_all' to true.", matches.len(), file_path),
                 "file_path": file_path,
                 "occurrences": matches.len()
             }));
         }
 
         // Perform the replacement
-        let new_content = content.replacen(old_string, new_string, 1);
+        let (new_content, count) = if replace_all {
+            (content.replace(old_string, new_string), matches.len())
+        } else {
+            (content.replacen(old_string, new_string, 1), 1)
+        };
 
         // Write the file
         match tokio::fs::write(&path, &new_content).await {
@@ -112,7 +125,8 @@ impl CallableFunction for EditTool {
                 "success": true,
                 "old_length": old_string.len(),
                 "new_length": new_string.len(),
-                "file_size": new_content.len()
+                "file_size": new_content.len(),
+                "replacements": count
             })),
             Err(e) => Ok(json!({
                 "error": format!("Failed to write {}: {}. Check file permissions.", path.display(), e)
