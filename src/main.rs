@@ -649,6 +649,28 @@ async fn run_tui_repl(
     result
 }
 
+/// Create a configured TextArea for TUI input
+fn create_textarea_with_content(content: Option<&str>) -> TextArea<'static> {
+    use ratatui::style::Style;
+    let mut textarea = match content {
+        Some(text) => TextArea::new(vec![text.to_string()]),
+        None => TextArea::default(),
+    };
+    textarea.set_block(
+        ratatui::widgets::Block::default()
+            .borders(ratatui::widgets::Borders::ALL)
+            .title(" Input (Enter to send, Ctrl-D to quit) "),
+    );
+    // Remove underline from cursor line (default has underline)
+    textarea.set_cursor_line_style(Style::default());
+    textarea
+}
+
+/// Create a configured TextArea for TUI input (empty)
+fn create_textarea() -> TextArea<'static> {
+    create_textarea_with_content(None)
+}
+
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn run_tui_event_loop(
     terminal: &mut DefaultTerminal,
@@ -665,12 +687,7 @@ async fn run_tui_event_loop(
     set_output_sink(Arc::new(TuiSink));
 
     let mut app = tui::App::new(model);
-    let mut textarea = TextArea::default();
-    textarea.set_block(
-        ratatui::widgets::Block::default()
-            .borders(ratatui::widgets::Borders::ALL)
-            .title(" Input (Enter to send, Ctrl-D to quit) "),
-    );
+    let mut textarea = create_textarea();
 
     let mut event_stream = EventStream::new();
     let (tx, mut rx) = mpsc::channel::<AppEvent>(100);
@@ -737,36 +754,21 @@ async fn run_tui_event_loop(
                                 last_interaction_id = None;
                                 app.clear_chat();
                                 app.estimated_tokens = 0;
-                                textarea = TextArea::default();
-                                textarea.set_block(
-                                    ratatui::widgets::Block::default()
-                                        .borders(ratatui::widgets::Borders::ALL)
-                                        .title(" Input (Enter to send, Ctrl-D to quit) "),
-                                );
+                                textarea = create_textarea();
                                 continue;
                             }
 
                             // Check for help command
                             if input == "/help" || input == "/h" {
                                 app.append_to_chat(&get_help_text());
-                                textarea = TextArea::default();
-                                textarea.set_block(
-                                    ratatui::widgets::Block::default()
-                                        .borders(ratatui::widgets::Borders::ALL)
-                                        .title(" Input (Enter to send, Ctrl-D to quit) "),
-                                );
+                                textarea = create_textarea();
                                 continue;
                             }
 
                             // Handle other builtin commands
                             if let Some(response) = handle_builtin_command(input, model, &cwd) {
                                 app.append_to_chat(&response);
-                                textarea = TextArea::default();
-                                textarea.set_block(
-                                    ratatui::widgets::Block::default()
-                                        .borders(ratatui::widgets::Borders::ALL)
-                                        .title(" Input (Enter to send, Ctrl-D to quit) "),
-                                );
+                                textarea = create_textarea();
                                 continue;
                             }
 
@@ -827,12 +829,7 @@ async fn run_tui_event_loop(
                             });
 
                             // Clear input
-                            textarea = TextArea::default();
-                            textarea.set_block(
-                                ratatui::widgets::Block::default()
-                                    .borders(ratatui::widgets::Borders::ALL)
-                                    .title(" Input (Enter to send, Ctrl-D to quit) "),
-                            );
+                            textarea = create_textarea();
                         }
                         continue;
                     }
@@ -845,12 +842,7 @@ async fn run_tui_event_loop(
                                 Some(i) => i.saturating_sub(1),
                             };
                             history_index = Some(new_index);
-                            textarea = TextArea::new(vec![history[new_index].clone()]);
-                            textarea.set_block(
-                                ratatui::widgets::Block::default()
-                                    .borders(ratatui::widgets::Borders::ALL)
-                                    .title(" Input (Enter to send, Ctrl-D to quit) "),
-                            );
+                            textarea = create_textarea_with_content(Some(&history[new_index]));
                         }
                         continue;
                     }
@@ -859,16 +851,11 @@ async fn run_tui_event_loop(
                         if let Some(i) = history_index {
                             if i + 1 < history.len() {
                                 history_index = Some(i + 1);
-                                textarea = TextArea::new(vec![history[i + 1].clone()]);
+                                textarea = create_textarea_with_content(Some(&history[i + 1]));
                             } else {
                                 history_index = None;
-                                textarea = TextArea::default();
+                                textarea = create_textarea();
                             }
-                            textarea.set_block(
-                                ratatui::widgets::Block::default()
-                                    .borders(ratatui::widgets::Borders::ALL)
-                                    .title(" Input (Enter to send, Ctrl-D to quit) "),
-                            );
                         }
                         continue;
                     }
@@ -919,7 +906,11 @@ async fn run_tui_event_loop(
             // TUI output messages from OutputSink (via TuiSink)
             Some(message) = tui_rx.recv() => {
                 match message {
-                    TuiMessage::Line(text) => app.append_to_chat(&text),
+                    TuiMessage::Line(text) => {
+                        app.append_to_chat(&text);
+                        // Add blank line after so streaming starts on new line
+                        app.append_to_chat("");
+                    }
                     TuiMessage::Streaming(text) => app.append_streaming(&text),
                 }
             }

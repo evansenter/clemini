@@ -69,15 +69,25 @@ impl App {
     }
 
     /// Append text to the chat buffer (for complete lines/messages)
+    /// Each call creates at least one new line (even for empty text)
     pub fn append_to_chat(&mut self, text: &str) {
+        // Handle empty string as explicit blank line
+        if text.is_empty() {
+            if self.chat_lines.len() >= MAX_CHAT_LINES {
+                self.chat_lines.pop_front();
+            }
+            self.chat_lines.push_back(String::new());
+            return;
+        }
+
         for line in text.lines() {
             if self.chat_lines.len() >= MAX_CHAT_LINES {
                 self.chat_lines.pop_front();
             }
             self.chat_lines.push_back(line.to_string());
         }
-        // If text ends with newline, add empty line
-        if text.ends_with('\n') && !text.is_empty() {
+        // If text ends with newline, add empty line for next content
+        if text.ends_with('\n') {
             if self.chat_lines.len() >= MAX_CHAT_LINES {
                 self.chat_lines.pop_front();
             }
