@@ -40,6 +40,8 @@ The CLI has three modes: single-prompt (`-p "prompt"`), interactive REPL, and MC
 
 **When to reuse interaction_id**: Pass the previous interaction_id when iterating on the same task (e.g., sending feedback after reviewing clemini's changes, fixing errors it made). Start fresh (no interaction_id) for unrelated tasks. The ID encodes the full conversation history, so clemini remembers what files it modified and why.
 
+**IMPORTANT**: Failing to reuse interaction_id is expensive - clemini loses all context and starts from scratch, re-reading files and rebuilding understanding. When delegating multi-step work via `clemini_chat`, ALWAYS capture the returned interaction_id and pass it to subsequent calls for the same task. Check MCP response or logs at `~/.clemini/logs/` if the ID isn't visible.
+
 ## genai-rs Integration Notes
 
 When encountering API issues, file at: https://github.com/evansenter/genai-rs/issues

@@ -33,14 +33,21 @@ pub struct CleminiToolService {
     cwd: PathBuf,
     bash_timeout: u64,
     is_mcp_mode: bool,
+    allowed_paths: Vec<PathBuf>,
 }
 
 impl CleminiToolService {
-    pub fn new(cwd: PathBuf, bash_timeout: u64, is_mcp_mode: bool) -> Self {
+    pub fn new(
+        cwd: PathBuf,
+        bash_timeout: u64,
+        is_mcp_mode: bool,
+        allowed_paths: Vec<PathBuf>,
+    ) -> Self {
         Self {
             cwd,
             bash_timeout,
             is_mcp_mode,
+            allowed_paths,
         }
     }
 
@@ -70,16 +77,16 @@ impl ToolService for CleminiToolService {
     /// - `todo_write`: Display a todo list
     fn tools(&self) -> Vec<Arc<dyn CallableFunction>> {
         vec![
-            Arc::new(ReadTool::new(self.cwd.clone())),
-            Arc::new(WriteTool::new(self.cwd.clone())),
-            Arc::new(EditTool::new(self.cwd.clone())),
+            Arc::new(ReadTool::new(self.cwd.clone(), self.allowed_paths.clone())),
+            Arc::new(WriteTool::new(self.cwd.clone(), self.allowed_paths.clone())),
+            Arc::new(EditTool::new(self.cwd.clone(), self.allowed_paths.clone())),
             Arc::new(BashTool::new(
                 self.cwd.clone(),
                 self.bash_timeout,
                 self.is_mcp_mode,
             )),
-            Arc::new(GlobTool::new(self.cwd.clone())),
-            Arc::new(GrepTool::new(self.cwd.clone())),
+            Arc::new(GlobTool::new(self.cwd.clone(), self.allowed_paths.clone())),
+            Arc::new(GrepTool::new(self.cwd.clone(), self.allowed_paths.clone())),
             Arc::new(WebFetchTool::new()),
             Arc::new(WebSearchTool::new()),
             Arc::new(AskUserTool::new()),
@@ -88,10 +95,11 @@ impl ToolService for CleminiToolService {
     }
 }
 
-/// Resolves a path relative to CWD and validates it's within CWD.
+/// Resolves a path relative to CWD and validates it's within any allowed path.
 pub fn resolve_and_validate_path(
     file_path: &str,
     cwd: &std::path::Path,
+    allowed_paths: &[PathBuf],
 ) -> Result<PathBuf, String> {
     let path = std::path::Path::new(file_path);
     let full_path = if path.is_absolute() {
@@ -100,12 +108,12 @@ pub fn resolve_and_validate_path(
         cwd.join(path)
     };
 
-    validate_path(&full_path, cwd)
+    validate_path(&full_path, allowed_paths)
 }
 
-/// Check if a path is within the allowed working directory.
+/// Check if a path is within any of the allowed paths.
 /// Returns `Ok(canonical_path)` if allowed, Err(reason) if denied.
-pub fn validate_path(path: &std::path::Path, cwd: &std::path::Path) -> Result<PathBuf, String> {
+pub fn validate_path(path: &std::path::Path, allowed_paths: &[PathBuf]) -> Result<PathBuf, String> {
     // For new files, check parent directory
     let check_path = if path.exists() {
         path.canonicalize()
@@ -117,46 +125,59 @@ pub fn validate_path(path: &std::path::Path, cwd: &std::path::Path) -> Result<Pa
 
         let canonical_parent =
             if parent.as_os_str().is_empty() || parent == std::path::Path::new(".") {
+                // If parent is empty or ".", we use the first allowed path (which is always CWD)
+                // but we need to resolve it against all allowed paths.
+                // Actually, if it's relative, it's relative to CWD.
+                let cwd = &allowed_paths[0];
                 cwd.to_path_buf()
             } else if parent.exists() {
                 parent
                     .canonicalize()
                     .map_err(|e| format!("Cannot resolve parent: {e}"))?
             } else {
-                // Parent doesn't exist - check if it would be under cwd
+                // Parent doesn't exist - check if it would be under any allowed path
+                let mut resolved_parent = None;
+
+                // Relative paths are relative to CWD (first allowed path)
                 let full_parent = if parent.is_absolute() {
                     parent.to_path_buf()
                 } else {
-                    cwd.join(parent)
+                    allowed_paths[0].join(parent)
                 };
-                // Do a simple prefix check since we can't canonicalize
-                if !full_parent.starts_with(cwd) {
-                    return Err(format!(
-                        "Path {} is outside working directory {}",
-                        path.display(),
-                        cwd.display()
-                    ));
+
+                for allowed in allowed_paths {
+                    if full_parent.starts_with(allowed) {
+                        resolved_parent = Some(full_parent);
+                        break;
+                    }
                 }
-                full_parent
+
+                match resolved_parent {
+                    Some(p) => p,
+                    None => {
+                        return Err(format!("Path {} is outside allowed paths", path.display(),));
+                    }
+                }
             };
 
         canonical_parent.join(filename)
     };
 
-    // Verify the path is under cwd
-    let canonical_cwd = cwd
-        .canonicalize()
-        .map_err(|e| format!("Cannot resolve cwd: {e}"))?;
-
-    if !check_path.starts_with(&canonical_cwd) {
-        return Err(format!(
-            "Path {} is outside working directory {}",
-            check_path.display(),
-            canonical_cwd.display()
-        ));
+    // Verify the path is under any allowed path
+    for allowed in allowed_paths {
+        if let Ok(canonical_allowed) = allowed.canonicalize() {
+            if check_path.starts_with(&canonical_allowed) {
+                return Ok(check_path);
+            }
+        } else if check_path.starts_with(allowed) {
+            return Ok(check_path);
+        }
     }
 
-    Ok(check_path)
+    Err(format!(
+        "Path {} is outside allowed paths",
+        check_path.display(),
+    ))
 }
 
 /// Makes a path relative to the CWD if possible, otherwise returns the path as a string.
@@ -186,44 +207,46 @@ mod tests {
     fn test_validate_path() {
         let dir = tempdir().unwrap();
         let cwd = dir.path().canonicalize().unwrap();
+        let allowed = vec![cwd.clone()];
 
         // Path within cwd (allowed)
         let file_path = cwd.join("test.txt");
         fs::write(&file_path, "test").unwrap();
-        assert!(validate_path(&file_path, &cwd).is_ok());
+        assert!(validate_path(&file_path, &allowed).is_ok());
 
         // New file within cwd (allowed)
         let new_file = cwd.join("new.txt");
-        assert!(validate_path(&new_file, &cwd).is_ok());
+        assert!(validate_path(&new_file, &allowed).is_ok());
 
         // Paths outside cwd via .. (rejected)
         let outside_path = cwd.join("../outside.txt");
-        assert!(validate_path(&outside_path, &cwd).is_err());
+        assert!(validate_path(&outside_path, &allowed).is_err());
 
         // Absolute paths outside cwd (rejected)
         let absolute_outside = std::env::temp_dir().join("some_other_file.txt");
         if !absolute_outside.starts_with(&cwd) {
-            assert!(validate_path(&absolute_outside, &cwd).is_err());
+            assert!(validate_path(&absolute_outside, &allowed).is_err());
         }
 
         // Edge cases: .
-        assert!(validate_path(&cwd.join("."), &cwd).is_ok());
+        assert!(validate_path(&cwd.join("."), &allowed).is_ok());
     }
 
     #[test]
     fn test_resolve_and_validate_path() {
         let dir = tempdir().unwrap();
         let cwd = dir.path().canonicalize().unwrap();
+        let allowed = vec![cwd.clone()];
 
         // Relative path
-        assert!(resolve_and_validate_path("test.txt", &cwd).is_ok());
+        assert!(resolve_and_validate_path("test.txt", &cwd, &allowed).is_ok());
 
         // Relative path with .. (allowed if stays within)
         fs::create_dir(cwd.join("subdir")).unwrap();
-        assert!(resolve_and_validate_path("subdir/../test.txt", &cwd).is_ok());
+        assert!(resolve_and_validate_path("subdir/../test.txt", &cwd, &allowed).is_ok());
 
         // Relative path escaping cwd
-        assert!(resolve_and_validate_path("../outside.txt", &cwd).is_err());
+        assert!(resolve_and_validate_path("../outside.txt", &cwd, &allowed).is_err());
     }
 
     #[test]

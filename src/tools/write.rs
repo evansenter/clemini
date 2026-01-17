@@ -8,11 +8,12 @@ use super::resolve_and_validate_path;
 
 pub struct WriteTool {
     cwd: PathBuf,
+    allowed_paths: Vec<PathBuf>,
 }
 
 impl WriteTool {
-    pub fn new(cwd: PathBuf) -> Self {
-        Self { cwd }
+    pub fn new(cwd: PathBuf, allowed_paths: Vec<PathBuf>) -> Self {
+        Self { cwd, allowed_paths }
     }
 }
 
@@ -52,11 +53,11 @@ impl CallableFunction for WriteTool {
             .ok_or_else(|| FunctionError::ArgumentMismatch("Missing content".to_string()))?;
 
         // Resolve and validate path
-        let path = match resolve_and_validate_path(file_path, &self.cwd) {
+        let path = match resolve_and_validate_path(file_path, &self.cwd, &self.allowed_paths) {
             Ok(p) => p,
             Err(e) => {
                 return Ok(json!({
-                    "error": format!("Access denied: {}. Only files within the current working directory can be accessed.", e)
+                    "error": format!("Access denied: {}. Path must be within allowed paths.", e)
                 }));
             }
         };
@@ -96,7 +97,8 @@ mod tests {
     async fn test_write_tool_success() {
         let dir = tempdir().unwrap();
         let cwd = dir.path().to_path_buf();
-        let tool = WriteTool::new(cwd.clone());
+        let allowed = vec![cwd.clone()];
+        let tool = WriteTool::new(cwd.clone(), allowed);
         let file_path = "test.txt";
         let content = "hello world";
 
@@ -120,7 +122,7 @@ mod tests {
         let file_path = cwd.join("test.txt");
         fs::write(&file_path, "old content").unwrap();
 
-        let tool = WriteTool::new(cwd.clone());
+        let tool = WriteTool::new(cwd.clone(), vec![cwd.clone()]);
         let args = json!({
             "file_path": "test.txt",
             "content": "new content"
@@ -136,7 +138,7 @@ mod tests {
     #[tokio::test]
     async fn test_write_tool_outside_cwd() {
         let dir = tempdir().unwrap();
-        let tool = WriteTool::new(dir.path().to_path_buf());
+        let tool = WriteTool::new(dir.path().to_path_buf(), vec![dir.path().to_path_buf()]);
         let args = json!({
             "file_path": "../outside.txt",
             "content": "data"

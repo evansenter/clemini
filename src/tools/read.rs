@@ -8,11 +8,12 @@ use super::resolve_and_validate_path;
 
 pub struct ReadTool {
     cwd: PathBuf,
+    allowed_paths: Vec<PathBuf>,
 }
 
 impl ReadTool {
-    pub fn new(cwd: PathBuf) -> Self {
-        Self { cwd }
+    pub fn new(cwd: PathBuf, allowed_paths: Vec<PathBuf>) -> Self {
+        Self { cwd, allowed_paths }
     }
 }
 
@@ -55,11 +56,11 @@ impl CallableFunction for ReadTool {
         let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(500) as usize;
 
         // Resolve and validate path
-        let path = match resolve_and_validate_path(file_path, &self.cwd) {
+        let path = match resolve_and_validate_path(file_path, &self.cwd, &self.allowed_paths) {
             Ok(p) => p,
             Err(e) => {
                 return Ok(json!({
-                    "error": format!("Access denied: {}. Only files within the current working directory can be accessed.", e)
+                    "error": format!("Access denied: {}. Path must be within allowed paths.", e)
                 }));
             }
         };
@@ -123,7 +124,7 @@ mod tests {
         let file_path = cwd.join("test.txt");
         fs::write(&file_path, "line 1\nline 2\nline 3").unwrap();
 
-        let tool = ReadTool::new(cwd.clone());
+        let tool = ReadTool::new(cwd.clone(), vec![cwd.clone()]);
         let args = json!({
             "file_path": "test.txt",
             "offset": 1,
@@ -141,7 +142,7 @@ mod tests {
     #[tokio::test]
     async fn test_read_tool_missing_file() {
         let dir = tempdir().unwrap();
-        let tool = ReadTool::new(dir.path().to_path_buf());
+        let tool = ReadTool::new(dir.path().to_path_buf(), vec![dir.path().to_path_buf()]);
         let args = json!({ "file_path": "missing.txt" });
 
         let result = tool.call(args).await.unwrap();
@@ -151,7 +152,7 @@ mod tests {
     #[tokio::test]
     async fn test_read_tool_outside_cwd() {
         let dir = tempdir().unwrap();
-        let tool = ReadTool::new(dir.path().to_path_buf());
+        let tool = ReadTool::new(dir.path().to_path_buf(), vec![dir.path().to_path_buf()]);
         let args = json!({ "file_path": "../outside.txt" });
 
         let result = tool.call(args).await.unwrap();

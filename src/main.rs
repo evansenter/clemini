@@ -149,8 +149,8 @@ fn write_to_log_file(path: impl Into<PathBuf>, rendered: &str) -> std::io::Resul
         writeln!(file)?;
     } else {
         for line in rendered.lines() {
-            let timestamp = chrono::Local::now().format("%H:%M:%S%.3f");
-            writeln!(file, "[{}] {}", timestamp, line)?;
+            let timestamp = format!("[{}]", chrono::Local::now().format("%H:%M:%S%.3f")).cyan();
+            writeln!(file, "{} {}", timestamp, line)?;
         }
     }
     Ok(())
@@ -221,6 +221,7 @@ When you discover patterns that would help future tasks:
 struct Config {
     model: Option<String>,
     bash_timeout: Option<u64>,
+    allowed_paths: Option<Vec<String>>,
 }
 
 fn load_config() -> Config {
@@ -296,10 +297,36 @@ async fn main() -> Result<()> {
     let client = Client::new(api_key);
 
     let cwd = std::fs::canonicalize(&args.cwd)?;
+
+    // Resolve allowed paths
+    let mut allowed_paths = Vec::new();
+    if let Some(config_paths) = config.allowed_paths {
+        for path_str in config_paths {
+            let path = if path_str.starts_with('~') {
+                home::home_dir()
+                    .map(|h| h.join(path_str.trim_start_matches("~/").trim_start_matches('~')))
+                    .unwrap_or_else(|| PathBuf::from(&path_str))
+            } else {
+                PathBuf::from(&path_str)
+            };
+            allowed_paths.push(path);
+        }
+    } else {
+        // Default allowed paths: cwd + home dirs + tmp
+        let home = home::home_dir().expect("Failed to get home directory");
+        allowed_paths.push(cwd.clone());
+        allowed_paths.push(home.join(".clemini"));
+        allowed_paths.push(home.join("Documents/projects"));
+        allowed_paths.push(PathBuf::from("/tmp"));
+        #[cfg(target_os = "macos")]
+        allowed_paths.push(PathBuf::from("/private/tmp"));
+    }
+
     let tool_service = Arc::new(CleminiToolService::new(
         cwd.clone(),
         bash_timeout,
         args.mcp_server,
+        allowed_paths,
     ));
 
     let mut system_prompt = SYSTEM_PROMPT.to_string();

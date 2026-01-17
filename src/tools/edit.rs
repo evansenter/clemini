@@ -8,11 +8,12 @@ use super::resolve_and_validate_path;
 
 pub struct EditTool {
     cwd: PathBuf,
+    allowed_paths: Vec<PathBuf>,
 }
 
 impl EditTool {
-    pub fn new(cwd: PathBuf) -> Self {
-        Self { cwd }
+    pub fn new(cwd: PathBuf, allowed_paths: Vec<PathBuf>) -> Self {
+        Self { cwd, allowed_paths }
     }
 }
 
@@ -76,11 +77,11 @@ impl CallableFunction for EditTool {
         }
 
         // Resolve and validate path
-        let path = match resolve_and_validate_path(file_path, &self.cwd) {
+        let path = match resolve_and_validate_path(file_path, &self.cwd, &self.allowed_paths) {
             Ok(p) => p,
             Err(e) => {
                 return Ok(json!({
-                    "error": format!("Access denied: {}. Only files within the current working directory can be accessed.", e)
+                    "error": format!("Access denied: {}. Path must be within allowed paths.", e)
                 }));
             }
         };
@@ -158,7 +159,7 @@ mod tests {
         let file_path = cwd.join("test.txt");
         fs::write(&file_path, "original content").unwrap();
 
-        let tool = EditTool::new(cwd.clone());
+        let tool = EditTool::new(cwd.clone(), vec![cwd.clone()]);
         let args = json!({
             "file_path": "test.txt",
             "old_string": "original",
@@ -180,7 +181,7 @@ mod tests {
         let file_path = cwd.join("test.txt");
         fs::write(&file_path, "content").unwrap();
 
-        let tool = EditTool::new(cwd.clone());
+        let tool = EditTool::new(cwd.clone(), vec![cwd.clone()]);
         let args = json!({
             "file_path": "test.txt",
             "old_string": "missing",
@@ -198,7 +199,7 @@ mod tests {
         let file_path = cwd.join("test.txt");
         fs::write(&file_path, "repeat repeat").unwrap();
 
-        let tool = EditTool::new(cwd.clone());
+        let tool = EditTool::new(cwd.clone(), vec![cwd.clone()]);
         let args = json!({
             "file_path": "test.txt",
             "old_string": "repeat",
@@ -216,7 +217,7 @@ mod tests {
         let file_path = cwd.join("test.txt");
         fs::write(&file_path, "repeat repeat").unwrap();
 
-        let tool = EditTool::new(cwd.clone());
+        let tool = EditTool::new(cwd.clone(), vec![cwd.clone()]);
         let args = json!({
             "file_path": "test.txt",
             "old_string": "repeat",

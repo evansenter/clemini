@@ -33,16 +33,22 @@ Uses the `colored` crate for ANSI terminal colors:
 
 | Element | Color | Method |
 |---------|-------|--------|
+| **Timestamps** | **Cyan** | `.cyan()` |
 | Tool names | Cyan | `.cyan()` |
 | Duration | Yellow | `.yellow()` |
 | Error labels | Bright red + bold | `.bright_red().bold()` |
 | CALL label | Magenta + bold | `.magenta().bold()` |
 | CALL tool name | Purple | `.purple()` |
 | CALL arguments | Dimmed grey | `.dimmed()` |
-| Bash command/output | Dimmed grey | `.dimmed()` |
+| Bash command/output | Dimmed grey + italic | `.dimmed().italic()` |
+| Diff deletions | Red | `.red()` |
+| Diff additions | Green | `.green()` |
+| Diff context | Dimmed grey | `.dimmed()` |
 | Pending todos | Dimmed icon + text | `.dimmed()` |
 | In-progress todos | Yellow icon | `.yellow()` |
 | Completed todos | Green icon | `.green()` |
+
+**Important:** Timestamps should NEVER be grey/dimmed. They must always be cyan for consistency.
 
 ## Tool Call Format
 
@@ -123,14 +129,14 @@ command="echo hello world"
 
 ### Command Line
 
-Before execution, show the command dimmed:
+Before execution, show the command dimmed and italic:
 ```
 [bash] running: "echo hello"
 ```
 
 ### Streaming Output
 
-- Lines are shown dimmed as they arrive
+- Lines are shown dimmed and italic as they arrive
 - Maximum 10 lines of stdout displayed
 - Maximum 10 lines of stderr displayed
 - After limit: `[...more stdout...]` or `[...more stderr...]`
@@ -150,6 +156,29 @@ Output returned to the model is truncated at 50,000 characters with message:
 ...
 [truncated, N bytes total]
 ```
+
+## Edit Tool Diff Output
+
+When the edit tool successfully modifies a file, it displays a colored diff:
+
+### Single-line changes (simple format)
+```
+  - old content here
+  + new content here
+```
+
+### Multi-line changes (unified diff with context)
+```
+    context line before
+  - removed line
+  + added line
+    context line after
+```
+
+- `-` and deleted text: Red
+- `+` and added text: Green
+- Context lines: Dimmed grey
+- Two-space indent before markers
 
 ## Todo List Display
 

@@ -12,6 +12,7 @@ use tracing::instrument;
 
 pub struct GrepTool {
     cwd: PathBuf,
+    _allowed_paths: Vec<PathBuf>,
 }
 
 use crate::tools::DEFAULT_EXCLUDES;
@@ -19,8 +20,11 @@ use crate::tools::DEFAULT_EXCLUDES;
 const MAX_LINE_LENGTH: usize = 1000;
 
 impl GrepTool {
-    pub fn new(cwd: PathBuf) -> Self {
-        Self { cwd }
+    pub fn new(cwd: PathBuf, allowed_paths: Vec<PathBuf>) -> Self {
+        Self {
+            cwd,
+            _allowed_paths: allowed_paths,
+        }
     }
 }
 
@@ -342,7 +346,7 @@ mod tests {
         let cwd = dir.path().to_path_buf();
         fs::write(cwd.join("test.txt"), "hello world\ngoodbye world").unwrap();
 
-        let tool = GrepTool::new(cwd.clone());
+        let tool = GrepTool::new(cwd.clone(), vec![cwd.clone()]);
         let args = json!({
             "pattern": "hello"
         });
@@ -366,7 +370,7 @@ mod tests {
         let cwd = dir.path().to_path_buf();
         fs::write(cwd.join("test.txt"), "line 1\nline 2 (match)\nline 3").unwrap();
 
-        let tool = GrepTool::new(cwd.clone());
+        let tool = GrepTool::new(cwd.clone(), vec![cwd.clone()]);
         let args = json!({
             "pattern": "match",
             "context": 1
@@ -384,7 +388,7 @@ mod tests {
     #[tokio::test]
     async fn test_grep_tool_no_matches() {
         let dir = tempdir().unwrap();
-        let tool = GrepTool::new(dir.path().to_path_buf());
+        let tool = GrepTool::new(dir.path().to_path_buf(), vec![dir.path().to_path_buf()]);
         let args = json!({ "pattern": "nonexistent" });
 
         let result = tool.call(args).await.unwrap();

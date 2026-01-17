@@ -207,6 +207,7 @@ impl CallableFunction for BashTool {
             crate::log_event_raw(
                 &format!("[bash] running: \"{}\"", command)
                     .dimmed()
+                    .italic()
                     .to_string(),
             );
         }
@@ -254,10 +255,10 @@ impl CallableFunction for BashTool {
                         match line {
                             Ok(Some(line)) => {
                                 if logged_stdout_lines < MAX_LOG_LINES {
-                                    crate::log_event_raw(&line.dimmed().to_string());
+                                    crate::log_event_raw(&line.dimmed().italic().to_string());
                                     logged_stdout_lines += 1;
                                 } else if logged_stdout_lines == MAX_LOG_LINES {
-                                    crate::log_event_raw(&"[...more stdout...]".dimmed().to_string());
+                                    crate::log_event_raw(&"[...more stdout...]".dimmed().italic().to_string());
                                     logged_stdout_lines += 1;
                                 }
                                 captured_stdout.push_str(&line);
@@ -272,10 +273,10 @@ impl CallableFunction for BashTool {
                         match line {
                             Ok(Some(line)) => {
                                 if logged_stderr_lines < MAX_LOG_LINES {
-                                    crate::log_event_raw(&line.dimmed().to_string());
+                                    crate::log_event_raw(&line.dimmed().italic().to_string());
                                     logged_stderr_lines += 1;
                                 } else if logged_stderr_lines == MAX_LOG_LINES {
-                                    crate::log_event_raw(&"[...more stderr...]".dimmed().to_string());
+                                    crate::log_event_raw(&"[...more stderr...]".dimmed().italic().to_string());
                                     logged_stderr_lines += 1;
                                 }
                                 captured_stderr.push_str(&line);

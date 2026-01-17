@@ -9,11 +9,12 @@ use super::{DEFAULT_EXCLUDES, make_relative, validate_path};
 
 pub struct GlobTool {
     cwd: PathBuf,
+    allowed_paths: Vec<PathBuf>,
 }
 
 impl GlobTool {
-    pub fn new(cwd: PathBuf) -> Self {
-        Self { cwd }
+    pub fn new(cwd: PathBuf, allowed_paths: Vec<PathBuf>) -> Self {
+        Self { cwd, allowed_paths }
     }
 }
 
@@ -57,10 +58,10 @@ impl CallableFunction for GlobTool {
                 for entry in paths {
                     match entry {
                         Ok(path) => {
-                            // Security check - only include files within cwd
-                            let path = match validate_path(&path, &self.cwd) {
+                            // Security check - only include files within allowed paths
+                            let path = match validate_path(&path, &self.allowed_paths) {
                                 Ok(p) => p,
-                                Err(_) => continue, // Skip files outside cwd
+                                Err(_) => continue, // Skip files outside allowed paths
                             };
 
                             // Only include files, skip directories
@@ -92,7 +93,7 @@ impl CallableFunction for GlobTool {
                 if matches.is_empty() {
                     // Check if the pattern matches a directory
                     let full_path = self.cwd.join(pattern);
-                    if validate_path(&full_path, &self.cwd).is_ok_and(|p| p.is_dir()) {
+                    if validate_path(&full_path, &self.allowed_paths).is_ok_and(|p| p.is_dir()) {
                         return Ok(json!({
                             "error": format!("The pattern '{}' matches a directory, but this tool is for finding files. Suggestion: use '{}/*' to find files within this directory or '{}/**/*' for recursive search.", pattern, pattern, pattern)
                         }));
@@ -132,7 +133,7 @@ mod tests {
         fs::write(cwd.join("src/lib.rs"), "").unwrap();
         fs::write(cwd.join("README.md"), "").unwrap();
 
-        let tool = GlobTool::new(cwd.clone());
+        let tool = GlobTool::new(cwd.clone(), vec![cwd.clone()]);
         let args = json!({ "pattern": "src/*.rs" });
 
         let result = tool.call(args).await.unwrap();
@@ -150,7 +151,7 @@ mod tests {
         fs::write(cwd.join(".git/config"), "").unwrap();
         fs::write(cwd.join("file.txt"), "").unwrap();
 
-        let tool = GlobTool::new(cwd.clone());
+        let tool = GlobTool::new(cwd.clone(), vec![cwd.clone()]);
         let args = json!({ "pattern": "**/*" });
 
         let result = tool.call(args).await.unwrap();
@@ -162,7 +163,7 @@ mod tests {
     #[tokio::test]
     async fn test_glob_tool_no_matches() {
         let dir = tempdir().unwrap();
-        let tool = GlobTool::new(dir.path().to_path_buf());
+        let tool = GlobTool::new(dir.path().to_path_buf(), vec![dir.path().to_path_buf()]);
         let args = json!({ "pattern": "*.nonexistent" });
 
         let result = tool.call(args).await.unwrap();
