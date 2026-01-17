@@ -72,12 +72,12 @@ pub struct TerminalSink;
 
 impl OutputSink for TerminalSink {
     fn emit(&self, message: &str, render_markdown: bool) {
-        let rendered = if render_markdown {
-            SKIN.term_text(message).to_string()
+        if render_markdown {
+            // term_text includes trailing newline, use eprint to avoid doubling
+            eprint!("{}", SKIN.term_text(message));
         } else {
-            message.to_string()
-        };
-        eprintln!("{}", rendered);
+            eprintln!("{}", message);
+        }
         log_event_to_file(message, render_markdown);
     }
 }
