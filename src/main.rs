@@ -269,11 +269,15 @@ async fn run_repl(
 
                 if input == "/tokens" || input == "/t" {
                     println!(
-                        "Estimated context size: {}/{} tokens ({:.1}%)",
-                        last_estimated_context_size,
-                        CONTEXT_WINDOW_LIMIT,
+                        "Context usage: {}/{} tokens ({:.1}%)",
+                        last_estimated_context_size.to_string().yellow(),
+                        CONTEXT_WINDOW_LIMIT.to_string().dimmed(),
                         (f64::from(last_estimated_context_size) / f64::from(CONTEXT_WINDOW_LIMIT))
                             * 100.0
+                    );
+                    println!(
+                        "Session total: {} tokens",
+                        total_session_tokens.to_string().cyan()
                     );
                     continue;
                 }
@@ -287,11 +291,11 @@ async fn run_repl(
                     println!("  Model:         {}", model.green());
                     println!("  Interactions:  {}", total_interactions);
                     println!("  Tool Calls:    {}", total_tool_calls);
-                    println!("  Total Tokens:  {}", total_session_tokens);
+                    println!("  Total Tokens:  {}", total_session_tokens.to_string().cyan());
                     println!(
                         "  Context usage: {}/{} tokens ({:.1}%)",
-                        last_estimated_context_size,
-                        CONTEXT_WINDOW_LIMIT,
+                        last_estimated_context_size.to_string().yellow(),
+                        CONTEXT_WINDOW_LIMIT.to_string().dimmed(),
                         (f64::from(last_estimated_context_size) / f64::from(CONTEXT_WINDOW_LIMIT))
                             * 100.0
                     );
@@ -304,7 +308,7 @@ async fn run_repl(
                     eprintln!("  /c, /clear        Clear conversation history");
                     eprintln!("  /v, /version      Show version and model");
                     eprintln!("  /m, /model        Show model name");
-                    eprintln!("  /t, /tokens       Show estimated context size");
+                    eprintln!("  /t, /tokens       Show token usage statistics");
                     eprintln!("  /stats            Show session statistics");
                     eprintln!("  /pwd, /cwd        Show current working directory");
                     eprintln!("  /d, /diff         Show git diff");
@@ -604,9 +608,12 @@ async fn run_interaction(
                         total_tokens += turn_tokens;
                     }
 
-                    // Start spinner
+                    // Start spinner if not an interactive tool
                     stop_spinner(&mut spinner).await;
-                    spinner = Some(Spinner::start());
+                    let has_interactive = resp.function_calls().iter().any(|c| c.name == "ask_user");
+                    if !has_interactive {
+                        spinner = Some(Spinner::start());
+                    }
                 }
                 AutoFunctionStreamChunk::FunctionResults(results) => {
                     // Stop spinner
