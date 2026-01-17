@@ -182,10 +182,14 @@ impl CallableFunction for BashTool {
         if let Some(pattern) = Self::is_blocked(command) {
             let msg = format!("[bash BLOCKED: {command}] (matches pattern: {pattern})");
             crate::log_event(&msg);
-            return Ok(json!({
+            let mut resp = json!({
                 "error": format!("Command blocked: matches pattern '{pattern}'"),
                 "command": command
-            }));
+            });
+            if let Some(desc) = description {
+                resp["description"] = json!(desc);
+            }
+            return Ok(resp);
         }
 
         if Self::needs_caution(command) {
@@ -193,21 +197,33 @@ impl CallableFunction for BashTool {
                 if !confirmed {
                     let msg = format!("[bash CAUTION: {command}] (requesting MCP confirmation)");
                     crate::log_event(&msg);
-                    return Ok(json!({
+                    let mut resp = json!({
                         "needs_confirmation": true,
                         "command": command,
                         "message": format!("This command may be destructive: {}. Please confirm execution.", command)
-                    }));
+                    });
+                    if let Some(desc) = description {
+                        resp["description"] = json!(desc);
+                    }
+                    return Ok(resp);
                 }
             } else if !confirmed && !self.confirm_execution(command) {
                 let msg = format!("[bash CANCELLED: {command}]");
                 crate::log_event(&msg);
-                return Ok(json!({
+                let mut resp = json!({
                     "error": "Command cancelled by user",
                     "command": command
-                }));
+                });
+                if let Some(desc) = description {
+                    resp["description"] = json!(desc);
+                }
+                return Ok(resp);
             }
-            let msg = format!("[bash CAUTION: {}] (user confirmed)", command);
+            let msg = if let Some(desc) = description {
+                format!("[bash CAUTION: {}] (user confirmed): \"{}\"", desc, command)
+            } else {
+                format!("[bash CAUTION: {}] (user confirmed)", command)
+            };
             crate::log_event(&msg);
         } else {
             let log_msg = if let Some(desc) = description {
@@ -310,12 +326,16 @@ impl CallableFunction for BashTool {
         };
 
         if timed_out {
-            return Ok(json!({
+            let mut resp = json!({
                 "error": format!("Command timed out after {} seconds", timeout_secs),
                 "command": command,
                 "stdout": captured_stdout,
                 "stderr": captured_stderr,
-            }));
+            });
+            if let Some(desc) = description {
+                resp["description"] = json!(desc);
+            }
+            return Ok(resp);
         }
 
         let exit_code = exit_status_final.and_then(|s| s.code()).unwrap_or(-1);
@@ -326,13 +346,19 @@ impl CallableFunction for BashTool {
         let stdout_truncated = Self::truncate_output(captured_stdout, max_len);
         let stderr_truncated = Self::truncate_output(captured_stderr, max_len);
 
-        Ok(json!({
+        let mut response = json!({
             "command": command,
             "exit_code": exit_code,
             "stdout": stdout_truncated,
             "stderr": stderr_truncated,
             "success": success
-        }))
+        });
+
+        if let Some(desc) = description {
+            response["description"] = json!(desc);
+        }
+
+        Ok(response)
     }
 }
 
@@ -350,6 +376,23 @@ mod tests {
         let result = tool.call(args).await.unwrap();
         assert!(result["success"].as_bool().unwrap());
         assert_eq!(result["stdout"].as_str().unwrap().trim(), "hello world");
+    }
+
+    #[tokio::test]
+    async fn test_bash_tool_description() {
+        let dir = tempdir().unwrap();
+        let tool = BashTool::new(dir.path().to_path_buf(), 5, false);
+        let args = json!({
+            "command": "echo 'test'",
+            "description": "testing description"
+        });
+
+        let result = tool.call(args).await.unwrap();
+        assert!(result["success"].as_bool().unwrap());
+        assert_eq!(
+            result["description"].as_str().unwrap(),
+            "testing description"
+        );
     }
 
     #[tokio::test]
