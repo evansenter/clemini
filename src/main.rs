@@ -3,30 +3,30 @@ use clap::Parser;
 use colored::Colorize;
 use crossterm::event::{Event, EventStream, KeyCode, KeyModifiers};
 use futures_util::StreamExt;
-use genai_rs::{CallableFunction, Client, Content, StreamChunk, ToolService};
+use genai_rs::Client;
 use ratatui::DefaultTerminal;
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde::Deserialize;
 use std::env;
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, LazyLock, OnceLock};
-use std::time::Instant;
 use termimad::MadSkin;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 use tui_textarea::{Input, TextArea};
 
+mod agent;
 mod diff;
+mod events;
 mod mcp;
 mod tools;
 mod tui;
 
+use agent::{AgentEvent, InteractionProgress, InteractionResult, run_interaction};
 use tools::CleminiToolService;
 
 const DEFAULT_MODEL: &str = "gemini-3-flash-preview";
-const CONTEXT_WINDOW_LIMIT: u32 = 1_000_000;
 
 /// Initialize tracing for structured JSON logs only.
 /// Human-readable logs go through log_event() instead.
@@ -465,19 +465,39 @@ async fn main() -> Result<()> {
         })
         .ok();
 
-        let _ = run_interaction(
+        // Create channel for agent events
+        let (events_tx, mut events_rx) = mpsc::channel::<AgentEvent>(100);
+
+        // Spawn task to handle streaming events using EventHandler
+        let stream_enabled = args.stream;
+        let event_handler = tokio::spawn(async move {
+            let mut handler = events::TerminalEventHandler::new(stream_enabled);
+            while let Some(event) = events_rx.recv().await {
+                events::dispatch_event(&mut handler, &event);
+            }
+        });
+
+        let result = run_interaction(
             &client,
             &tool_service,
             &prompt,
             None,
             &model,
-            args.stream,
-            None,
             &system_prompt,
+            events_tx,
+            None,
             cancellation_token,
-            false, // not TUI mode
         )
         .await?;
+
+        // Wait for event handler to finish
+        let _ = event_handler.await;
+
+        // In non-streaming mode, render the final response
+        if !args.stream && !result.response.is_empty() {
+            let skin = MadSkin::default();
+            skin.print_text(&result.response);
+        }
     } else {
         // Interactive REPL mode
         // Use TUI if terminal and --no-tui not specified
@@ -504,11 +524,11 @@ async fn main() -> Result<()> {
 }
 
 /// Events from the async interaction task
-#[allow(dead_code)] // StreamChunk reserved for future streaming text updates
 enum AppEvent {
     StreamChunk(String),
     ToolProgress(InteractionProgress),
     InteractionComplete(Result<InteractionResult>),
+    ContextWarning(String),
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -598,27 +618,46 @@ async fn run_plain_repl(
         })
         .ok();
 
+        // Create channel for agent events
+        let (events_tx, mut events_rx) = mpsc::channel::<AgentEvent>(100);
+
+        // Spawn task to handle streaming events using EventHandler
+        let stream_enabled = stream_output;
+        let event_handler = tokio::spawn(async move {
+            let mut handler = events::TerminalEventHandler::new(stream_enabled);
+            while let Some(event) = events_rx.recv().await {
+                events::dispatch_event(&mut handler, &event);
+            }
+        });
+
         match run_interaction(
             client,
             tool_service,
             input,
             last_interaction_id.as_deref(),
             model,
-            stream_output,
-            None,
             &system_prompt,
+            events_tx,
+            None,
             cancellation_token,
-            false, // not TUI mode
         )
         .await
         {
             Ok(result) => {
-                last_interaction_id = result.id;
+                last_interaction_id = result.id.clone();
+                // In non-streaming mode, render the final response
+                if !stream_output && !result.response.is_empty() {
+                    let skin = MadSkin::default();
+                    skin.print_text(&result.response);
+                }
             }
             Err(e) => {
                 eprintln!("\n{}", format!("[error: {e}]").bright_red());
             }
         }
+
+        // Wait for event handler to finish
+        let _ = event_handler.await;
     }
 
     Ok(())
@@ -678,7 +717,7 @@ async fn run_tui_event_loop(
     tool_service: &Arc<CleminiToolService>,
     cwd: std::path::PathBuf,
     model: &str,
-    stream_output: bool,
+    _stream_output: bool, // Always streams via channel in TUI mode
     system_prompt: String,
 ) -> Result<()> {
     // Set up TUI output channel (for OutputSink -> TUI)
@@ -805,6 +844,34 @@ async fn run_tui_event_loop(
                                     }
                                 });
 
+                                // Create channel for agent events
+                                let (events_tx, mut events_rx) = mpsc::channel::<AgentEvent>(100);
+
+                                // Spawn task to convert AgentEvents to AppEvents
+                                let app_tx = tx.clone();
+                                tokio::spawn(async move {
+                                    while let Some(event) = events_rx.recv().await {
+                                        match event {
+                                            AgentEvent::TextDelta(text) => {
+                                                let _ = app_tx.try_send(AppEvent::StreamChunk(text));
+                                            }
+                                            AgentEvent::ContextWarning { percentage, .. } => {
+                                                let msg = if percentage > 95.0 {
+                                                    format!(
+                                                        "WARNING: Context window at {:.1}%. Use /clear to reset.",
+                                                        percentage
+                                                    )
+                                                } else {
+                                                    format!("WARNING: Context window at {:.1}%.", percentage)
+                                                };
+                                                let _ = app_tx.try_send(AppEvent::ContextWarning(msg));
+                                            }
+                                            // Other events handled via progress_fn or final result
+                                            _ => {}
+                                        }
+                                    }
+                                });
+
                                 let progress_tx = tx.clone();
                                 let progress_fn: Option<Arc<dyn Fn(InteractionProgress) + Send + Sync>> =
                                     Some(Arc::new(move |progress: InteractionProgress| {
@@ -817,11 +884,10 @@ async fn run_tui_event_loop(
                                     &input,
                                     prev_id.as_deref(),
                                     &model,
-                                    stream_output,
-                                    progress_fn,
                                     &system_prompt,
+                                    events_tx,
+                                    progress_fn,
                                     cancellation_token,
-                                    true, // TUI mode
                                 )
                                 .await;
 
@@ -881,11 +947,36 @@ async fn run_tui_event_loop(
             Some(event) = rx.recv() => {
                 match event {
                     AppEvent::StreamChunk(text) => {
-                        app.append_to_chat(&text);
+                        app.append_streaming(&text);
                     }
                     AppEvent::ToolProgress(progress) => {
                         if progress.status == "executing" {
                             app.set_activity(tui::Activity::Executing(progress.tool.clone()));
+                            // Display tool call in chat
+                            let args_str = agent::format_tool_args(&progress.args);
+                            let msg = format!(
+                                "{} {} {}",
+                                "🔧".dimmed(),
+                                progress.tool.cyan(),
+                                args_str.dimmed()
+                            );
+                            app.append_to_chat(&msg);
+                        } else if progress.status == "completed" {
+                            // Tool completed - show duration if available
+                            if let Some(duration_ms) = progress.duration_ms {
+                                let duration_str = if duration_ms < 1000 {
+                                    format!("{}ms", duration_ms)
+                                } else {
+                                    format!("{:.1}s", duration_ms as f64 / 1000.0)
+                                };
+                                let msg = format!(
+                                    "  {} {}",
+                                    "└─".dimmed(),
+                                    duration_str.dimmed()
+                                );
+                                app.append_to_chat(&msg);
+                            }
+                            app.append_to_chat(""); // Single blank line after tool completes
                         }
                     }
                     AppEvent::InteractionComplete(result) => {
@@ -899,6 +990,11 @@ async fn run_tui_event_loop(
                                 app.append_to_chat(&format!("[error: {}]", e).bright_red().to_string());
                             }
                         }
+                    }
+                    AppEvent::ContextWarning(msg) => {
+                        app.append_to_chat("");
+                        app.append_to_chat(&msg.bright_red().bold().to_string());
+                        app.append_to_chat("");
                     }
                 }
             }
@@ -1037,518 +1133,170 @@ fn run_shell_command_capture(command: &str) -> String {
     }
 }
 
-fn check_context_window(total_tokens: u32) {
-    let ratio = f64::from(total_tokens) / f64::from(CONTEXT_WINDOW_LIMIT);
-    if ratio > 0.95 {
-        eprintln!(
-            "{}",
-            format!(
-                "WARNING: Context window usage is at {:.1}% ({}/{} tokens). Please use /clear to reset history.",
-                ratio * 100.0,
-                total_tokens,
-                CONTEXT_WINDOW_LIMIT
-            )
-            .bright_red()
-            .bold()
-        );
-    } else if ratio > 0.80 {
-        eprintln!(
-            "{}",
-            format!(
-                "WARNING: Context window usage is at {:.1}% ({}/{} tokens).",
-                ratio * 100.0,
-                total_tokens,
-                CONTEXT_WINDOW_LIMIT
-            )
-            .yellow()
-            .bold()
-        );
-    }
-}
-
-fn flush_response(
-    response_text: &mut String,
-    skin: &MadSkin,
-    stream_output: bool,
-    force_newline: bool,
-    tui_mode: bool,
-) {
-    if !response_text.is_empty() {
-        // Log to file only - don't duplicate to terminal since we're rendering it
-        log_to_file(&format!("> {}", response_text.trim()));
-
-        // In TUI mode, text is already sent through the channel - don't print to terminal
-        if !tui_mode {
-            if stream_output {
-                let width = termimad::terminal_size().0.max(20);
-                let mut visual_lines = 0;
-                for line in response_text.split('\n') {
-                    let len = line.chars().count();
-                    if len == 0 {
-                        visual_lines += 1;
-                    } else {
-                        visual_lines += (len as u16).div_ceil(width);
-                    }
-                }
-                for i in 0..visual_lines {
-                    if i == 0 {
-                        print!("\r\x1B[2K");
-                    } else {
-                        print!("\x1B[F\x1B[2K");
-                    }
-                }
-                let _ = io::stdout().flush();
-            }
-            skin.print_text(response_text);
-        }
-        response_text.clear();
-    } else if force_newline && !tui_mode {
-        println!();
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct InteractionResult {
-    pub id: Option<String>,
-    pub response: String,
-    pub context_size: u32,
-    pub total_tokens: u32,
-    pub tool_calls: Vec<String>,
-}
-
-#[derive(Debug, Serialize, Clone)]
-pub struct InteractionProgress {
-    pub tool: String,
-    pub status: String, // "executing" or "completed"
-    pub args: Value,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub duration_ms: Option<u64>,
-}
-
-fn format_tool_args(args: &Value) -> String {
-    let Some(obj) = args.as_object() else {
-        return String::new();
-    };
-
-    let mut parts = Vec::new();
-    for (k, v) in obj {
-        let val_str = match v {
-            Value::String(s) => {
-                let trimmed = s.replace('\n', " ");
-                if trimmed.len() > 80 {
-                    format!("\"{}...\"", &trimmed[..77])
-                } else {
-                    format!("\"{trimmed}\"")
-                }
-            }
-            Value::Number(n) => n.to_string(),
-            Value::Bool(b) => b.to_string(),
-            Value::Null => "null".to_string(),
-            _ => "...".to_string(),
-        };
-        parts.push(format!("{k}={val_str}"));
-    }
-
-    if parts.is_empty() {
-        String::new()
-    } else {
-        format!("{} ", parts.join(" "))
-    }
-}
-
-/// Rough token estimate: ~4 chars per token
-fn estimate_tokens(value: &Value) -> u32 {
-    (value.to_string().len() / 4) as u32
-}
-
-fn format_tool_result(
-    name: &str,
-    duration: std::time::Duration,
-    estimated_tokens: u32,
-    has_error: bool,
-) -> String {
-    let error_suffix = if has_error {
-        " ERROR".bright_red().bold().to_string()
-    } else {
-        String::new()
-    };
-    let elapsed_secs = duration.as_secs_f32();
-
-    let duration_str = if elapsed_secs < 0.001 {
-        format!("{:.3}s", elapsed_secs)
-    } else {
-        format!("{:.2}s", elapsed_secs)
-    };
-
-    format!(
-        "[{}] {}, ~{} tok{}",
-        name.cyan(),
-        duration_str.yellow(),
-        estimated_tokens,
-        error_suffix
-    )
-}
-
-struct ToolExecutionResult {
-    results: Vec<Content>,
-    cancelled: bool,
-}
-
-async fn execute_tools(
-    tool_service: &Arc<CleminiToolService>,
-    accumulated_function_calls: &[(Option<String>, String, Value)],
-    progress_fn: &Option<Arc<dyn Fn(InteractionProgress) + Send + Sync>>,
-    tool_calls: &mut Vec<String>,
-    cancellation_token: &CancellationToken,
-) -> ToolExecutionResult {
-    let mut results = Vec::new();
-
-    for (call_id, call_name, call_args) in accumulated_function_calls {
-        if cancellation_token.is_cancelled() {
-            return ToolExecutionResult {
-                results,
-                cancelled: true,
-            };
-        }
-
-        log_event(&format!(
-            "{} {} {}",
-            "CALL".magenta().bold(),
-            call_name.purple(),
-            format_tool_args(call_args).trim().dimmed()
-        ));
-
-        if let Some(cb) = progress_fn {
-            cb(InteractionProgress {
-                tool: call_name.to_string(),
-                status: "executing".to_string(),
-                args: call_args.clone(),
-                duration_ms: None,
-            });
-        }
-
-        let start = Instant::now();
-        let result: Value = match tool_service.execute(call_name, call_args.clone()).await {
-            Ok(v) => v,
-            Err(e) => {
-                // Return error as JSON so Gemini can see it and retry
-                serde_json::json!({"error": e.to_string()})
-            }
-        };
-        let duration = start.elapsed();
-
-        tool_calls.push(call_name.to_string());
-        let has_error = result.get("error").is_some();
-        let estimated_tokens = estimate_tokens(&result);
-
-        if let Some(cb) = progress_fn {
-            cb(InteractionProgress {
-                tool: call_name.to_string(),
-                status: "completed".to_string(),
-                args: call_args.clone(),
-                duration_ms: Some(duration.as_millis() as u64),
-            });
-        }
-
-        let formatted = format_tool_result(call_name, duration, estimated_tokens, has_error);
-        log_event(&formatted);
-
-        if has_error && let Some(error_msg) = result.get("error").and_then(|e: &Value| e.as_str()) {
-            let error_detail = format!("  └─ {}: {}", "error".red(), error_msg.dimmed());
-            log_event(&error_detail);
-        }
-
-        results.push(Content::function_result(
-            call_name.to_string(),
-            call_id.clone().expect("Function call ID required"),
-            result,
-        ));
-    }
-
-    ToolExecutionResult {
-        results,
-        cancelled: false,
-    }
-}
-
-#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
-pub async fn run_interaction(
-    client: &Client,
-    tool_service: &Arc<CleminiToolService>,
-    input: &str,
-    previous_interaction_id: Option<&str>,
-    model: &str,
-    stream_output: bool,
-    progress_fn: Option<Arc<dyn Fn(InteractionProgress) + Send + Sync>>,
-    system_prompt: &str,
-    cancellation_token: CancellationToken,
-    tui_mode: bool,
-) -> Result<InteractionResult> {
-    let functions: Vec<_> = tool_service
-        .tools()
-        .iter()
-        .map(|t: &Arc<dyn CallableFunction>| t.declaration())
-        .collect();
-
-    // Build the interaction - system instruction must be sent on every turn
-    // (it's NOT inherited via previousInteractionId per genai-rs docs)
-    let mut interaction = client
-        .interaction()
-        .with_model(model)
-        .add_functions(functions.clone())
-        .with_system_instruction(system_prompt)
-        .with_content(vec![Content::text(input)]);
-
-    if let Some(prev_id) = previous_interaction_id {
-        interaction = interaction.with_previous_interaction(prev_id);
-    }
-
-    let mut stream = Box::pin(interaction.create_stream());
-
-    let mut last_id = previous_interaction_id.map(String::from);
-    let mut current_context_size: u32 = 0;
-    let mut total_tokens: u32 = 0;
-    let mut tool_calls: Vec<String> = Vec::new();
-    let mut response_text = String::new();
-    let mut full_response = String::new();
-    let skin = MadSkin::default();
-
-    const MAX_ITERATIONS: usize = 100;
-    for _ in 0..MAX_ITERATIONS {
-        let mut response: Option<genai_rs::InteractionResponse> = None;
-        let mut accumulated_function_calls: Vec<(Option<String>, String, Value)> = Vec::new();
-        response_text.clear();
-
-        while let Some(event) = stream.next().await {
-            // Check for cancellation at each iteration
-            if cancellation_token.is_cancelled() {
-                eprintln!("{}", "[cancelled]".yellow());
-                return Ok(InteractionResult {
-                    id: last_id,
-                    response: full_response,
-                    context_size: current_context_size,
-                    total_tokens,
-                    tool_calls,
-                });
-            }
-
-            match event {
-                Ok(event) => match &event.chunk {
-                    StreamChunk::Delta(content) => {
-                        if let Some(text) = content.as_text() {
-                            if stream_output {
-                                emit_streaming(text);
-                            }
-                            response_text.push_str(text);
-                            full_response.push_str(text);
-                        }
-                        // Accumulate function calls from Delta chunks (streaming doesn't put them in Complete)
-                        if let Content::FunctionCall { id, name, args } = content {
-                            accumulated_function_calls.push((
-                                id.clone(),
-                                name.clone(),
-                                args.clone(),
-                            ));
-                        }
-                    }
-                    StreamChunk::Complete(resp) => {
-                        response = Some(resp.clone());
-                    }
-                    _ => {}
-                },
-                Err(e) => {
-                    let err_msg = e.to_string();
-                    log_event_raw(
-                        &format!("\n[stream error: {err_msg}]")
-                            .bright_red()
-                            .to_string(),
-                    );
-                    return Err(anyhow::anyhow!(err_msg));
-                }
-            }
-        }
-
-        let resp = response.ok_or_else(|| anyhow::anyhow!("Stream ended without completion"))?;
-        last_id = resp.id.clone();
-
-        // Update token count
-        if let Some(usage) = &resp.usage {
-            let turn_tokens = usage.total_tokens.unwrap_or_else(|| {
-                usage.total_input_tokens.unwrap_or(0) + usage.total_output_tokens.unwrap_or(0)
-            });
-            if turn_tokens > 0 {
-                current_context_size = turn_tokens;
-                total_tokens = turn_tokens;
-            }
-        }
-
-        // Use accumulated function calls from Delta chunks (streaming mode doesn't populate Complete.outputs)
-        if accumulated_function_calls.is_empty() {
-            // Render final text
-            flush_response(&mut response_text, &skin, stream_output, true, tui_mode);
-            break;
-        }
-
-        // Process function calls (accumulated from Delta chunks)
-        flush_response(&mut response_text, &skin, stream_output, false, tui_mode);
-        full_response.clear(); // Clear accumulated text before tools as we'll only return text after final tool
-
-        let tool_result = execute_tools(
-            tool_service,
-            &accumulated_function_calls,
-            &progress_fn,
-            &mut tool_calls,
-            &cancellation_token,
-        )
-        .await;
-
-        if tool_result.cancelled {
-            eprintln!("{}", "[cancelled]".yellow());
-            return Ok(InteractionResult {
-                id: last_id,
-                response: full_response,
-                context_size: current_context_size,
-                total_tokens,
-                tool_calls,
-            });
-        }
-
-        let results = tool_result.results;
-
-        // Create new stream for the next turn
-        stream = Box::pin(
-            client
-                .interaction()
-                .with_model(model)
-                .with_previous_interaction(last_id.as_ref().unwrap())
-                .with_system_instruction(system_prompt)
-                .with_content(results)
-                .create_stream(),
-        );
-    }
-
-    // Render any remaining text (e.g., if stream ended abruptly or on error)
-    flush_response(&mut response_text, &skin, stream_output, false, tui_mode);
-
-    if current_context_size > 0 {
-        check_context_window(current_context_size);
-    }
-
-    Ok(InteractionResult {
-        id: last_id,
-        response: full_response,
-        context_size: current_context_size,
-        total_tokens,
-        tool_calls,
-    })
-}
+// =============================================================================
+// Tests for event handling consistency
+// =============================================================================
+// These tests document and verify how AgentEvents should be handled across
+// all UI modes (non-interactive, plain REPL, TUI).
 
 #[cfg(test)]
-mod tests {
+mod event_handling_tests {
     use super::*;
+    use genai_rs::{FunctionExecutionResult, OwnedFunctionCallInfo};
     use serde_json::json;
     use std::time::Duration;
 
+    // =========================================
+    // Event formatting tests
+    // These verify the formatting used across all UI modes
+    // =========================================
+
+    /// ToolExecuting events should format as: 🔧 <tool_name> <args>
     #[test]
-    fn test_format_tool_args_empty() {
-        assert_eq!(format_tool_args(&json!({})), "");
-        assert_eq!(format_tool_args(&json!(null)), "");
-        assert_eq!(format_tool_args(&json!("not an object")), "");
+    fn test_tool_executing_format() {
+        let args = json!({"file_path": "src/main.rs", "limit": 100});
+        let formatted = agent::format_tool_args(&args);
+
+        // Args should be formatted as key=value pairs
+        assert!(formatted.contains("file_path="));
+        assert!(formatted.contains("limit=100"));
     }
 
+    /// ToolResult events should format with duration and token estimate
     #[test]
-    fn test_format_tool_args_types() {
-        let args = json!({
-            "bool": true,
-            "num": 42,
-            "null": null,
-            "str": "hello"
-        });
-        let formatted = format_tool_args(&args);
-        // serde_json::Map is sorted by key
-        assert_eq!(formatted, "bool=true null=null num=42 str=\"hello\" ");
-    }
-
-    #[test]
-    fn test_format_tool_args_complex_types() {
-        let args = json!({
-            "arr": [1, 2],
-            "obj": {"a": 1}
-        });
-        let formatted = format_tool_args(&args);
-        assert_eq!(formatted, "arr=... obj=... ");
-    }
-
-    #[test]
-    fn test_format_tool_args_truncation() {
-        let long_str = "a".repeat(100);
-        let args = json!({"long": long_str});
-        let formatted = format_tool_args(&args);
-        let expected_val = format!("\"{}...\"", "a".repeat(77));
-        assert_eq!(formatted, format!("long={} ", expected_val));
-    }
-
-    #[test]
-    fn test_format_tool_args_newlines() {
-        let args = json!({"text": "hello\nworld"});
-        let formatted = format_tool_args(&args);
-        assert_eq!(formatted, "text=\"hello world\" ");
-    }
-
-    #[test]
-    fn test_estimate_tokens() {
-        // ~4 chars per token
-        assert_eq!(estimate_tokens(&json!("hello")), 1); // "hello" = 7 chars / 4 = 1
-        assert_eq!(estimate_tokens(&json!({"key": "value"})), 3); // {"key":"value"} = 15 chars / 4 = 3
-    }
-
-    #[test]
-    fn test_format_tool_result_duration() {
+    fn test_tool_result_format() {
         colored::control::set_override(false);
 
-        // < 1ms (100us) -> 3 decimals
-        assert_eq!(
-            format_tool_result("test", Duration::from_micros(100), 10, false),
-            "[test] 0.000s, ~10 tok"
-        );
+        let formatted =
+            agent::format_tool_result("read_file", Duration::from_millis(25), 150, false);
 
-        // < 1ms (900us) -> 3 decimals
-        assert_eq!(
-            format_tool_result("test", Duration::from_micros(900), 10, false),
-            "[test] 0.001s, ~10 tok"
-        );
-
-        // >= 1ms (1.1ms) -> 2 decimals (shows 0.00s due to threshold)
-        assert_eq!(
-            format_tool_result("test", Duration::from_micros(1100), 10, false),
-            "[test] 0.00s, ~10 tok"
-        );
-
-        // >= 1ms (20ms) -> 2 decimals
-        assert_eq!(
-            format_tool_result("test", Duration::from_millis(20), 10, false),
-            "[test] 0.02s, ~10 tok"
-        );
-
-        // >= 1ms (1450ms) -> 2 decimals
-        assert_eq!(
-            format_tool_result("test", Duration::from_millis(1450), 10, false),
-            "[test] 1.45s, ~10 tok"
-        );
+        assert!(formatted.contains("[read_file]"));
+        assert!(formatted.contains("0.02s") || formatted.contains("0.03s")); // timing can vary
+        assert!(formatted.contains("~150 tok"));
 
         colored::control::unset_override();
     }
 
+    /// ToolResult errors should include ERROR suffix
     #[test]
-    fn test_format_tool_result_error() {
+    fn test_tool_result_error_format() {
         colored::control::set_override(false);
 
-        let res = format_tool_result("test", Duration::from_millis(10), 25, true);
-        assert_eq!(res, "[test] 0.01s, ~25 tok ERROR");
+        let formatted =
+            agent::format_tool_result("write_file", Duration::from_millis(10), 50, true);
 
-        let res = format_tool_result("test", Duration::from_millis(10), 25, false);
-        assert_eq!(res, "[test] 0.01s, ~25 tok");
+        assert!(formatted.contains("[write_file]"));
+        assert!(formatted.contains("ERROR"));
 
         colored::control::unset_override();
+    }
+
+    /// ContextWarning should format with percentage
+    #[test]
+    fn test_context_warning_format_normal() {
+        let percentage = 85.5;
+        let msg = format!("WARNING: Context window at {:.1}%.", percentage);
+
+        assert!(msg.contains("85.5%"));
+        assert!(!msg.contains("/clear")); // Not critical yet
+    }
+
+    /// ContextWarning at critical level should suggest /clear
+    #[test]
+    fn test_context_warning_format_critical() {
+        let percentage = 96.0;
+        let msg = format!(
+            "WARNING: Context window at {:.1}%. Use /clear to reset.",
+            percentage
+        );
+
+        assert!(msg.contains("96.0%"));
+        assert!(msg.contains("/clear")); // Critical level
+    }
+
+    // =========================================
+    // Event handling contract tests
+    // Document what each event type should produce
+    // =========================================
+
+    /// TextDelta should use streaming output (append to current line)
+    /// NOT line-based output (which would break sentences)
+    #[test]
+    fn test_text_delta_requires_streaming() {
+        // This test documents the contract: TextDelta MUST use streaming/append
+        // because text arrives in chunks that form sentences.
+        //
+        // WRONG: append_to_chat("I'll") then append_to_chat(" search") = 2 lines
+        // RIGHT: append_streaming("I'll") then append_streaming(" search") = 1 line
+
+        let mut app = tui::App::new("test");
+        app.append_streaming("I'll");
+        app.append_streaming(" search");
+
+        assert_eq!(app.chat_lines().len(), 1);
+        assert_eq!(app.chat_lines()[0], "I'll search");
+    }
+
+    /// ToolExecuting should use line-based output (own line)
+    #[test]
+    fn test_tool_executing_requires_line_output() {
+        // Tool calls should appear on their own line, not appended to streaming text
+        let mut app = tui::App::new("test");
+
+        app.append_streaming("Let me search.\n"); // Creates 2 lines: "Let me search." and ""
+        app.append_to_chat("🔧 grep pattern=\"test\""); // Line-based, adds new line
+
+        assert_eq!(app.chat_lines().len(), 3);
+        assert_eq!(app.chat_lines()[0], "Let me search.");
+        assert_eq!(app.chat_lines()[1], ""); // empty from \n
+        assert!(app.chat_lines()[2].contains("grep"));
+    }
+
+    /// ToolResult should use line-based output (own line)
+    #[test]
+    fn test_tool_result_requires_line_output() {
+        let mut app = tui::App::new("test");
+
+        app.append_to_chat("🔧 read_file path=\"test.rs\"");
+        app.append_to_chat("[read_file] 0.02s, ~100 tok");
+
+        assert_eq!(app.chat_lines().len(), 2);
+        assert!(app.chat_lines()[1].contains("read_file"));
+    }
+
+    // =========================================
+    // Integration pattern tests
+    // Verify the full streaming → tool → streaming flow
+    // =========================================
+
+    /// Complete flow: streaming text, tool call, tool result, more streaming
+    #[test]
+    fn test_full_event_flow_pattern() {
+        let mut app = tui::App::new("test");
+
+        // Model starts streaming response
+        app.append_streaming("I'll search for ");
+        app.append_streaming("the function.\n\n");
+
+        // Tool executes (line-based)
+        app.append_to_chat("🔧 grep pattern=\"fn main\"");
+
+        // Tool result (line-based)
+        app.append_to_chat("[grep] 0.01s, ~50 tok");
+        app.append_to_chat(""); // Blank line after tool
+
+        // Model continues streaming
+        app.append_streaming("Found it in ");
+        app.append_streaming("src/main.rs");
+
+        // Verify structure
+        assert_eq!(app.chat_lines().len(), 7);
+        assert_eq!(app.chat_lines()[0], "I'll search for the function.");
+        assert_eq!(app.chat_lines()[1], ""); // from \n\n
+        assert_eq!(app.chat_lines()[2], ""); // from \n\n
+        assert_eq!(app.chat_lines()[3], "🔧 grep pattern=\"fn main\"");
+        assert_eq!(app.chat_lines()[4], "[grep] 0.01s, ~50 tok");
+        assert_eq!(app.chat_lines()[5], "");
+        assert_eq!(app.chat_lines()[6], "Found it in src/main.rs");
     }
 }

@@ -141,6 +141,10 @@ impl CallableFunction for BashTool {
                         "type": "string",
                         "description": "The bash command to execute"
                     },
+                    "description": {
+                        "type": "string",
+                        "description": "Human-readable description of what the command does (shown in logs)"
+                    },
                     "timeout_seconds": {
                         "type": "integer",
                         "description": format!("Maximum time to wait for the command (default: {})", self.timeout_secs)
@@ -161,6 +165,10 @@ impl CallableFunction for BashTool {
             .get("command")
             .and_then(|v| v.as_str())
             .ok_or_else(|| FunctionError::ArgumentMismatch("Missing command".to_string()))?;
+
+        let description = args
+            .get("description")
+            .and_then(|v| v.as_str());
 
         let timeout_secs = args
             .get("timeout_seconds")
@@ -201,15 +209,15 @@ impl CallableFunction for BashTool {
                     "command": command
                 }));
             }
-            let msg = format!("[bash CAUTION: {command}] (user confirmed)");
+            let msg = format!("[bash CAUTION: {}] (user confirmed)", command);
             crate::log_event(&msg);
         } else {
-            crate::log_event_raw(
-                &format!("[bash] running: \"{}\"", command)
-                    .dimmed()
-                    .italic()
-                    .to_string(),
-            );
+            let log_msg = if let Some(desc) = description {
+                format!("[bash] {}: \"{}\"", desc, command)
+            } else {
+                format!("[bash] running: \"{}\"", command)
+            };
+            crate::log_event_raw(&log_msg.dimmed().italic().to_string());
         }
 
         let mut child = Command::new("bash")

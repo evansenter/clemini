@@ -20,7 +20,7 @@ use tower_http::cors::CorsLayer;
 use tracing::instrument;
 // Note: info! macro goes to JSON logs only. For human-readable logs, use crate::log_event()
 
-use crate::InteractionProgress;
+use crate::agent::{AgentEvent, InteractionProgress, run_interaction};
 use crate::tools::CleminiToolService;
 
 #[derive(Debug, Deserialize, Clone)]
@@ -537,17 +537,19 @@ impl McpServer {
             }
         });
 
-        let result = crate::run_interaction(
+        // Create channel for agent events (MCP doesn't need streaming events)
+        let (events_tx, _events_rx) = mpsc::channel::<AgentEvent>(1);
+
+        let result = run_interaction(
             &self.client,
             &self.tool_service,
             message,
             interaction_id,
             &self.model,
-            false,
-            Some(progress_fn),
             &self.system_prompt,
+            events_tx,
+            Some(progress_fn),
             cancellation_token,
-            false, // not TUI mode
         )
         .await?;
 

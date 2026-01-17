@@ -107,8 +107,8 @@ impl App {
 
         // First part appends to current line, or creates new if empty/blank
         if let Some(first) = lines.next() {
-            let should_create_new = self.chat_lines.is_empty()
-                || self.chat_lines.back().is_none_or(|l| l.is_empty());
+            let should_create_new =
+                self.chat_lines.is_empty() || self.chat_lines.back().is_none_or(|l| l.is_empty());
 
             if should_create_new {
                 // Don't fill empty lines - preserve them for spacing
@@ -217,7 +217,10 @@ mod tests {
     fn test_activity_display() {
         assert_eq!(Activity::Idle.display(), "ready");
         assert_eq!(Activity::Streaming.display(), "streaming...");
-        assert_eq!(Activity::Executing("read_file".to_string()).display(), "read_file");
+        assert_eq!(
+            Activity::Executing("read_file".to_string()).display(),
+            "read_file"
+        );
     }
 
     #[test]
@@ -741,5 +744,125 @@ mod tests {
         assert_eq!(app.chat_lines[6], "[read_file] 0.02s, ~100 tok");
         assert_eq!(app.chat_lines[7], "");
         assert_eq!(app.chat_lines[8], "The file contains...");
+    }
+
+    // =========================================
+    // Tool call interspersed with streaming tests
+    // Regression tests for the bug where stream chunks used append_to_chat
+    // instead of append_streaming, causing broken lines mid-sentence.
+    // =========================================
+
+    /// Bug: Using append_to_chat for stream chunks breaks sentences.
+    /// Each chunk becomes its own line, breaking mid-word:
+    ///   "I'll start by search"
+    ///   "ing for the function"
+    /// Instead of: "I'll start by searching for the function"
+    #[test]
+    fn test_stream_chunks_must_concatenate_not_create_lines() {
+        let mut app = App::new("test");
+
+        // Simulate what happens when AppEvent::StreamChunk uses append_to_chat (WRONG)
+        app.append_to_chat("I'll start by search");
+        app.append_to_chat("ing for the function");
+
+        // Bug: creates 2 lines
+        assert_eq!(app.chat_lines.len(), 2);
+        // This is the broken behavior we DON'T want
+    }
+
+    /// Fix: Using append_streaming for stream chunks keeps sentences intact.
+    #[test]
+    fn test_stream_chunks_use_append_streaming() {
+        let mut app = App::new("test");
+
+        // Correct: AppEvent::StreamChunk should use append_streaming
+        app.append_streaming("I'll start by search");
+        app.append_streaming("ing for the function");
+
+        // Correct: 1 line with complete sentence
+        assert_eq!(app.chat_lines.len(), 1);
+        assert_eq!(app.chat_lines[0], "I'll start by searching for the function");
+    }
+
+    /// Tool calls must use append_to_chat to appear on their own line.
+    /// This ensures tools don't get appended to streaming text.
+    #[test]
+    fn test_tool_calls_use_append_to_chat() {
+        let mut app = App::new("test");
+
+        // Streaming text
+        app.append_streaming("Let me search");
+
+        // Tool call (append_to_chat creates NEW line)
+        app.append_to_chat("🔧 grep pattern=\"fn run_interaction\"");
+
+        // More streaming (appends to last line since it's non-empty)
+        app.append_streaming("Found it!");
+
+        assert_eq!(app.chat_lines.len(), 2);
+        assert_eq!(app.chat_lines[0], "Let me search");
+        // Note: append_streaming appends to the tool line since it's non-empty
+        assert_eq!(app.chat_lines[1], "🔧 grep pattern=\"fn run_interaction\"Found it!");
+    }
+
+    /// Correct pattern: blank line after streaming before tool call.
+    /// This is how TUI should display streaming → tool → streaming.
+    #[test]
+    fn test_streaming_tool_streaming_flow() {
+        let mut app = App::new("test");
+
+        // Model starts responding (streaming concatenates)
+        app.append_streaming("I'll search for the ");
+        app.append_streaming("function.\n\n"); // Model ends with newlines
+
+        // Tool call (append_to_chat creates new lines)
+        app.append_to_chat("🔧 grep pattern=\"fn run_interaction\"");
+        app.append_to_chat("  └─ 20ms");
+        app.append_to_chat(""); // blank line after tool completes
+
+        // Model continues after tool (streaming after blank line creates new line)
+        app.append_streaming("Found it in ");
+        app.append_streaming("src/agent.rs");
+
+        assert_eq!(app.chat_lines.len(), 7);
+        assert_eq!(app.chat_lines[0], "I'll search for the function.");
+        assert_eq!(app.chat_lines[1], ""); // from first \n in streaming
+        assert_eq!(app.chat_lines[2], ""); // from second \n in streaming
+        assert_eq!(app.chat_lines[3], "🔧 grep pattern=\"fn run_interaction\"");
+        assert_eq!(app.chat_lines[4], "  └─ 20ms");
+        assert_eq!(app.chat_lines[5], ""); // blank after tool
+        assert_eq!(app.chat_lines[6], "Found it in src/agent.rs");
+    }
+
+    /// Multiple tool calls in sequence should each be on their own line.
+    #[test]
+    fn test_multiple_tool_calls_each_on_own_line() {
+        let mut app = App::new("test");
+
+        app.append_streaming("I'll read both files.\n\n");
+
+        // First tool
+        app.append_to_chat("🔧 read_file file_path=\"src/main.rs\"");
+        app.append_to_chat("  └─ 5ms");
+        app.append_to_chat("");
+
+        // Second tool
+        app.append_to_chat("🔧 read_file file_path=\"src/agent.rs\"");
+        app.append_to_chat("  └─ 3ms");
+        app.append_to_chat("");
+
+        app.append_streaming("Both files loaded.");
+
+        assert_eq!(app.chat_lines.len(), 10);
+        assert_eq!(app.chat_lines[0], "I'll read both files.");
+        assert_eq!(app.chat_lines[1], ""); // first \n
+        assert_eq!(app.chat_lines[2], ""); // second \n
+        assert_eq!(app.chat_lines[3], "🔧 read_file file_path=\"src/main.rs\"");
+        assert_eq!(app.chat_lines[4], "  └─ 5ms");
+        assert_eq!(app.chat_lines[5], "");
+        assert_eq!(app.chat_lines[6], "🔧 read_file file_path=\"src/agent.rs\"");
+        assert_eq!(app.chat_lines[7], "  └─ 3ms");
+        assert_eq!(app.chat_lines[8], "");
+        assert_eq!(app.chat_lines[9], "Both files loaded.");
     }
 }
