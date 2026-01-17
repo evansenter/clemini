@@ -60,7 +60,7 @@ Keep it to one line per step. This helps users follow along.
 - `write_file` - Create new files or completely overwrite existing ones.
 - `glob` - Find files by pattern: `**/*.py`, `src/**/*.ts`, `**/test_*.js`
 - `grep` - Search contents with regex. Use `context: 3` to show surrounding lines.
-- `bash` - Shell commands: git, builds, tests, package managers, pipelines.
+- `bash` - Shell commands: git, builds, tests, package managers. For GitHub, use `gh`: `gh issue view 34`, `gh pr view`.
 - `ask_user` - When uncertain, ask. Better to clarify than guess wrong.
 - `todo_write` - For 3+ step tasks, track progress visibly so nothing is forgotten.
 - `web_search` / `web_fetch` - Get current information from the web.
