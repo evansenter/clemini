@@ -64,17 +64,18 @@ CALL read_file path="/src/main.rs"
 ### Result Line (After Execution)
 
 ```
-[<tool_name>] <duration><error_suffix>
+[<tool_name>] <duration>, ~<tokens> tok<error_suffix>
 ```
 
 - Brackets and tool name: Cyan
 - Duration: Yellow, format varies by elapsed time
+- Token estimate: Rough estimate (~4 chars per token of result JSON)
 - Error suffix: ` ERROR` in bright red bold (only if error occurred)
 
 Examples:
 ```
-[read_file] 0.02s
-[bash] 1.45s ERROR
+[read_file] 0.02s, ~18 tok
+[bash] 1.45s, ~256 tok ERROR
 ```
 
 ### Error Detail Line

@@ -779,7 +779,17 @@ fn format_tool_args(args: &Value) -> String {
     }
 }
 
-fn format_tool_result(name: &str, duration: std::time::Duration, has_error: bool) -> String {
+/// Rough token estimate: ~4 chars per token
+fn estimate_tokens(value: &Value) -> u32 {
+    (value.to_string().len() / 4) as u32
+}
+
+fn format_tool_result(
+    name: &str,
+    duration: std::time::Duration,
+    estimated_tokens: u32,
+    has_error: bool,
+) -> String {
     let error_suffix = if has_error {
         " ERROR".bright_red().bold().to_string()
     } else {
@@ -794,9 +804,10 @@ fn format_tool_result(name: &str, duration: std::time::Duration, has_error: bool
     };
 
     format!(
-        "[{}] {}{}",
+        "[{}] {}, ~{} tok{}",
         name.cyan(),
         duration_str.yellow(),
+        estimated_tokens,
         error_suffix
     )
 }
@@ -851,6 +862,7 @@ async fn execute_tools(
 
         tool_calls.push(call_name.to_string());
         let has_error = result.get("error").is_some();
+        let estimated_tokens = estimate_tokens(&result);
 
         if let Some(cb) = progress_fn {
             cb(InteractionProgress {
@@ -861,7 +873,7 @@ async fn execute_tools(
             });
         }
 
-        let formatted = format_tool_result(call_name, duration, has_error);
+        let formatted = format_tool_result(call_name, duration, estimated_tokens, has_error);
         log_event(&formatted);
 
         if has_error && let Some(error_msg) = result.get("error").and_then(|e: &Value| e.as_str()) {
@@ -1103,37 +1115,44 @@ mod tests {
     }
 
     #[test]
+    fn test_estimate_tokens() {
+        // ~4 chars per token
+        assert_eq!(estimate_tokens(&json!("hello")), 1); // "hello" = 7 chars / 4 = 1
+        assert_eq!(estimate_tokens(&json!({"key": "value"})), 3); // {"key":"value"} = 15 chars / 4 = 3
+    }
+
+    #[test]
     fn test_format_tool_result_duration() {
         colored::control::set_override(false);
 
         // < 1ms (100us) -> 3 decimals
         assert_eq!(
-            format_tool_result("test", Duration::from_micros(100), false),
-            "[test] 0.000s"
+            format_tool_result("test", Duration::from_micros(100), 10, false),
+            "[test] 0.000s, ~10 tok"
         );
 
         // < 1ms (900us) -> 3 decimals
         assert_eq!(
-            format_tool_result("test", Duration::from_micros(900), false),
-            "[test] 0.001s"
+            format_tool_result("test", Duration::from_micros(900), 10, false),
+            "[test] 0.001s, ~10 tok"
         );
 
         // >= 1ms (1.1ms) -> 2 decimals (shows 0.00s due to threshold)
         assert_eq!(
-            format_tool_result("test", Duration::from_micros(1100), false),
-            "[test] 0.00s"
+            format_tool_result("test", Duration::from_micros(1100), 10, false),
+            "[test] 0.00s, ~10 tok"
         );
 
         // >= 1ms (20ms) -> 2 decimals
         assert_eq!(
-            format_tool_result("test", Duration::from_millis(20), false),
-            "[test] 0.02s"
+            format_tool_result("test", Duration::from_millis(20), 10, false),
+            "[test] 0.02s, ~10 tok"
         );
 
         // >= 1ms (1450ms) -> 2 decimals
         assert_eq!(
-            format_tool_result("test", Duration::from_millis(1450), false),
-            "[test] 1.45s"
+            format_tool_result("test", Duration::from_millis(1450), 10, false),
+            "[test] 1.45s, ~10 tok"
         );
 
         colored::control::unset_override();
@@ -1143,11 +1162,11 @@ mod tests {
     fn test_format_tool_result_error() {
         colored::control::set_override(false);
 
-        let res = format_tool_result("test", Duration::from_millis(10), true);
-        assert_eq!(res, "[test] 0.01s ERROR");
+        let res = format_tool_result("test", Duration::from_millis(10), 25, true);
+        assert_eq!(res, "[test] 0.01s, ~25 tok ERROR");
 
-        let res = format_tool_result("test", Duration::from_millis(10), false);
-        assert_eq!(res, "[test] 0.01s");
+        let res = format_tool_result("test", Duration::from_millis(10), 25, false);
+        assert_eq!(res, "[test] 0.01s, ~25 tok");
 
         colored::control::unset_override();
     }
