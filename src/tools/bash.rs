@@ -118,9 +118,11 @@ impl CallableFunction for BashTool {
             let msg = format!("[bash CAUTION: {command}]");
             eprintln!("{}", msg);
             crate::log_event(&msg);
+        } else {
+            let msg = format!("[bash] running: \"{}\"", command).dimmed();
+            eprintln!("{}", msg);
+            crate::log_event(&msg.to_string());
         }
-
-        // Logging is handled by main.rs event loop with timing info
 
         let mut child = Command::new("bash")
             .arg("-c")
@@ -140,6 +142,10 @@ impl CallableFunction for BashTool {
         let mut captured_stdout = String::new();
         let mut captured_stderr = String::new();
 
+        let mut logged_stdout_lines = 0;
+        let mut logged_stderr_lines = 0;
+        const MAX_LOG_LINES: usize = 10;
+
         let mut stdout_done = false;
         let mut stderr_done = false;
         let mut process_exited = false;
@@ -157,9 +163,17 @@ impl CallableFunction for BashTool {
                     line = stdout_reader.next_line(), if !stdout_done => {
                         match line {
                             Ok(Some(line)) => {
-                                let dimmed = line.dimmed();
-                                eprintln!("{}", dimmed);
-                                crate::log_event(&format!("{}", dimmed));
+                                if logged_stdout_lines < MAX_LOG_LINES {
+                                    let dimmed = line.dimmed();
+                                    eprintln!("{}", dimmed);
+                                    crate::log_event(&format!("{}", dimmed));
+                                    logged_stdout_lines += 1;
+                                } else if logged_stdout_lines == MAX_LOG_LINES {
+                                    let msg = "[...more stdout...]";
+                                    eprintln!("{}", msg.dimmed());
+                                    crate::log_event(msg);
+                                    logged_stdout_lines += 1;
+                                }
                                 captured_stdout.push_str(&line);
                                 captured_stdout.push('\n');
                             }
@@ -171,9 +185,17 @@ impl CallableFunction for BashTool {
                     line = stderr_reader.next_line(), if !stderr_done => {
                         match line {
                             Ok(Some(line)) => {
-                                let dimmed = line.dimmed();
-                                eprintln!("{}", dimmed);
-                                crate::log_event(&format!("{}", dimmed));
+                                if logged_stderr_lines < MAX_LOG_LINES {
+                                    let dimmed = line.dimmed();
+                                    eprintln!("{}", dimmed);
+                                    crate::log_event(&format!("{}", dimmed));
+                                    logged_stderr_lines += 1;
+                                } else if logged_stderr_lines == MAX_LOG_LINES {
+                                    let msg = "[...more stderr...]";
+                                    eprintln!("{}", msg.dimmed());
+                                    crate::log_event(msg);
+                                    logged_stderr_lines += 1;
+                                }
                                 captured_stderr.push_str(&line);
                                 captured_stderr.push('\n');
                             }
