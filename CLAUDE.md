@@ -32,11 +32,61 @@ Logs are stored in `~/.clemini/logs/` with daily rotation.
 
 The CLI has three modes: single-prompt (`-p "prompt"`), interactive REPL, and MCP server (`--mcp-server`). The interactive REPL uses a full-screen TUI by default; use `--no-tui` for plain terminal output.
 
-**Manual function calling**: Uses `create_stream()` for streaming responses, then manually executes tool calls accumulated from Delta chunks. This enables ctrl-c cancellation between tool calls. The tool execution loop in `run_interaction()` processes function calls, sends results back via `with_previous_interaction()`, and repeats until no more function calls.
+### Module Structure
 
-**Tool sandboxing**: All tools share a `cwd` via `CleminiToolService`. Path validation (`validate_path`) ensures operations stay within the working directory. Bash has regex blocklists for dangerous patterns.
+```
+src/
+├── main.rs          # CLI entry, UI loops (TUI/REPL), MCP server startup
+├── agent.rs         # Core interaction logic, AgentEvent enum
+├── events.rs        # EventHandler trait, TerminalEventHandler
+├── mcp.rs           # MCP server implementation
+├── tui/             # TUI mode (ratatui)
+└── tools/           # Tool implementations (bash, read_file, etc.)
+```
 
-**Multi-turn conversations**: Stateless via `with_previous_interaction(interaction_id)`. The MCP server passes `interaction_id` through (no server-side session storage). Note: `system_instruction` is NOT inherited - must send on every turn.
+### Event-Driven Architecture
+
+The agent (`src/agent.rs`) is decoupled from UI via channel-based events:
+
+```
+run_interaction()                    UI Layer
+      │                                 │
+      ├─► AgentEvent::TextDelta ───────►│ print/append to chat
+      ├─► AgentEvent::ToolExecuting ───►│ log tool start
+      ├─► AgentEvent::ToolResult ──────►│ log tool completion
+      ├─► AgentEvent::ContextWarning ──►│ show warning
+      └─► AgentEvent::Complete ────────►│ finalize
+```
+
+**`AgentEvent` enum** (`src/agent.rs`): Events emitted during interaction.
+- `TextDelta(String)` - Streaming text chunk
+- `ToolExecuting(Vec<OwnedFunctionCallInfo>)` - Tools about to run
+- `ToolResult(FunctionExecutionResult)` - Tool completed (uses genai-rs type)
+- `Complete { interaction_id, response }` - Interaction finished
+- `ContextWarning { used, limit, percentage }` - Context window >80%
+- `Cancelled` - User cancelled
+
+**`EventHandler` trait** (`src/events.rs`): UI modes implement this to handle events.
+- `TerminalEventHandler` - For plain REPL and non-interactive modes
+- TUI mode handles events directly via `AppEvent` enum
+
+### Core Functions
+
+**`run_interaction()`** (`src/agent.rs`): Main interaction loop.
+- Takes `events_tx: mpsc::Sender<AgentEvent>` channel
+- Streams response, accumulates function calls from Delta chunks
+- Executes tools via `execute_tools()`, sends results back to Gemini
+- Loops until no more function calls
+
+**Manual function calling**: Uses `create_stream()` instead of auto-function API. This enables ctrl-c cancellation between tool calls - the auto-function API executes tools internally, losing fine-grained cancellation control.
+
+### Tool Sandboxing
+
+All tools share a `cwd` via `CleminiToolService`. Path validation (`validate_path`) ensures operations stay within the working directory. Bash has regex blocklists for dangerous patterns.
+
+### Multi-turn Conversations
+
+Stateless via `with_previous_interaction(interaction_id)`. The MCP server passes `interaction_id` through (no server-side session storage). Note: `system_instruction` is NOT inherited - must send on every turn.
 
 **When to reuse interaction_id**: Pass the previous interaction_id when iterating on the same task (e.g., sending feedback after reviewing clemini's changes, fixing errors it made). Start fresh (no interaction_id) for unrelated tasks. The ID encodes the full conversation history, so clemini remembers what files it modified and why.
 
