@@ -639,11 +639,17 @@ fn format_tool_args(args: &Value) -> String {
     }
 }
 
+fn estimate_tokens(value: &serde_json::Value) -> u32 {
+    // Rough estimate: ~4 chars per token
+    (value.to_string().len() / 4) as u32
+}
+
 fn format_tool_result(
     name: &str,
     args: &Value,
     duration: std::time::Duration,
-    token_count: u32,
+    estimated_tokens: u32,
+    cumulative_percent: f64,
     has_error: bool,
 ) -> String {
     let error_suffix = if has_error {
@@ -660,20 +666,13 @@ fn format_tool_result(
         format!("{:.2}s", elapsed_secs)
     };
 
-    let tokens_str = if token_count == 0 {
-        "—".to_string()
-    } else if token_count < 1000 {
-        format!("{} tokens", token_count)
-    } else {
-        format!("{:.1}k tokens", f64::from(token_count) / 1000.0)
-    };
-
     format!(
-        "[{}] {}{}, {}{}",
+        "[{}] {}{}, ~{} tok ({:.1}%){}",
         name.cyan(),
         args_str.dimmed(),
         duration_str.yellow(),
-        tokens_str,
+        estimated_tokens,
+        cumulative_percent,
         error_suffix
     )
 }
@@ -715,6 +714,7 @@ pub async fn run_interaction(
 
     let mut last_id = previous_interaction_id.map(String::from);
     let mut current_context_size: u32 = 0;
+    let mut cumulative_tool_tokens: u32 = 0;
     let mut total_tokens: u32 = 0;
     let mut tool_start_time: Option<Instant> = None;
     let mut tool_calls: Vec<String> = Vec::new();
@@ -811,11 +811,20 @@ pub async fn run_interaction(
                             });
                         }
 
+                        let call_tokens = estimate_tokens(&result.args);
+                        let response_tokens = estimate_tokens(&result.result);
+                        let total_tool_tokens = call_tokens + response_tokens;
+                        cumulative_tool_tokens += total_tool_tokens;
+                        let cumulative_percent = (f64::from(cumulative_tool_tokens)
+                            / f64::from(CONTEXT_WINDOW_LIMIT))
+                            * 100.0;
+
                         let formatted = format_tool_result(
                             &result.name,
                             &result.args,
                             duration,
-                            current_context_size,
+                            total_tool_tokens,
+                            cumulative_percent,
                             has_error,
                         );
                         log_event(&formatted);
