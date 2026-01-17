@@ -9,6 +9,7 @@ pub struct TodoWriteTool;
 #[derive(Debug, PartialEq, Clone)]
 struct TodoItem {
     content: String,
+    active_form: String,
     status: TodoStatus,
 }
 
@@ -51,8 +52,15 @@ impl TodoWriteTool {
                 .trim()
                 .to_string();
 
-            // Skip items with empty content
-            if content.is_empty() {
+            let active_form = todo
+                .get("activeForm")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+
+            // Skip items with empty content or active_form
+            if content.is_empty() || active_form.is_empty() {
                 skipped_empty += 1;
                 continue;
             }
@@ -63,7 +71,11 @@ impl TodoWriteTool {
                 .map(TodoStatus::from)
                 .unwrap_or(TodoStatus::Pending);
 
-            todos.push(TodoItem { content, status });
+            todos.push(TodoItem {
+                content,
+                active_form,
+                status,
+            });
         }
 
         // Warn if some items were skipped
@@ -107,13 +119,20 @@ impl CallableFunction for TodoWriteTool {
                         "items": {
                             "type": "object",
                             "properties": {
-                                "content": { "type": "string" },
+                                "content": {
+                                    "type": "string",
+                                    "description": "The description of the task in imperative form (e.g., 'Run tests')"
+                                },
+                                "activeForm": {
+                                    "type": "string",
+                                    "description": "The description of the task in present continuous form (e.g., 'Running tests')"
+                                },
                                 "status": {
                                     "type": "string",
                                     "enum": ["pending", "in_progress", "completed"]
                                 }
                             },
-                            "required": ["content", "status"]
+                            "required": ["content", "activeForm", "status"]
                         }
                     }
                 }),
@@ -167,10 +186,15 @@ mod tests {
 
         let todo_props = &properties["todos"]["items"]["properties"];
         assert_eq!(todo_props["content"]["type"], "string");
+        assert_eq!(todo_props["activeForm"]["type"], "string");
         assert_eq!(todo_props["status"]["type"], "string");
         assert_eq!(
             todo_props["status"]["enum"],
             json!(["pending", "in_progress", "completed"])
+        );
+        assert_eq!(
+            properties["todos"]["items"]["required"],
+            json!(["content", "activeForm", "status"])
         );
     }
 
@@ -179,9 +203,9 @@ mod tests {
         let tool = TodoWriteTool::new();
         let args = json!({
             "todos": [
-                { "content": "Task 1", "status": "completed" },
-                { "content": "Task 2", "status": "in_progress" },
-                { "content": "Task 3", "status": "pending" }
+                { "content": "Task 1", "activeForm": "Running Task 1", "status": "completed" },
+                { "content": "Task 2", "activeForm": "Running Task 2", "status": "in_progress" },
+                { "content": "Task 3", "activeForm": "Running Task 3", "status": "pending" }
             ]
         });
 
@@ -191,6 +215,7 @@ mod tests {
             todos[0],
             TodoItem {
                 content: "Task 1".to_string(),
+                active_form: "Running Task 1".to_string(),
                 status: TodoStatus::Completed
             }
         );
@@ -198,6 +223,7 @@ mod tests {
             todos[1],
             TodoItem {
                 content: "Task 2".to_string(),
+                active_form: "Running Task 2".to_string(),
                 status: TodoStatus::InProgress
             }
         );
@@ -205,6 +231,7 @@ mod tests {
             todos[2],
             TodoItem {
                 content: "Task 3".to_string(),
+                active_form: "Running Task 3".to_string(),
                 status: TodoStatus::Pending
             }
         );
@@ -237,7 +264,7 @@ mod tests {
         let tool = TodoWriteTool::new();
         let args = json!({
             "todos": [
-                { "content": "Unknown status", "status": "something_else" }
+                { "content": "Unknown status", "activeForm": "Doing something", "status": "something_else" }
             ]
         });
 
@@ -252,6 +279,7 @@ mod tests {
         // Status: Completed -> ✓
         let completed = TodoItem {
             content: "Done".to_string(),
+            active_form: "Doing".to_string(),
             status: TodoStatus::Completed,
         };
         let rendered_completed = TodoWriteTool::render_todo(&completed);
@@ -261,6 +289,7 @@ mod tests {
         // Status: InProgress -> →
         let in_progress = TodoItem {
             content: "Working".to_string(),
+            active_form: "Working now".to_string(),
             status: TodoStatus::InProgress,
         };
         let rendered_in_progress = TodoWriteTool::render_todo(&in_progress);
@@ -270,6 +299,7 @@ mod tests {
         // Status: Pending -> ○
         let pending = TodoItem {
             content: "Waiting".to_string(),
+            active_form: "Waiting now".to_string(),
             status: TodoStatus::Pending,
         };
         let rendered_pending = TodoWriteTool::render_todo(&pending);
@@ -282,9 +312,9 @@ mod tests {
         let tool = TodoWriteTool::new();
         let args = json!({
             "todos": [
-                { "content": "", "status": "pending" },
-                { "content": "   ", "status": "pending" },
-                { "content": "", "status": "in_progress" }
+                { "content": "", "activeForm": "", "status": "pending" },
+                { "content": "   ", "activeForm": " ", "status": "pending" },
+                { "content": "", "activeForm": "Doing", "status": "in_progress" }
             ]
         });
 
@@ -303,9 +333,9 @@ mod tests {
         let tool = TodoWriteTool::new();
         let args = json!({
             "todos": [
-                { "content": "Valid task", "status": "pending" },
-                { "content": "", "status": "pending" },
-                { "content": "Another valid", "status": "completed" }
+                { "content": "Valid task", "activeForm": "Doing valid task", "status": "pending" },
+                { "content": "", "activeForm": "Missing content", "status": "pending" },
+                { "content": "Another valid", "activeForm": "Doing another", "status": "completed" }
             ]
         });
 
@@ -321,11 +351,12 @@ mod tests {
         let tool = TodoWriteTool::new();
         let args = json!({
             "todos": [
-                { "content": "  Task with spaces  ", "status": "pending" }
+                { "content": "  Task with spaces  ", "activeForm": "  Doing task  ", "status": "pending" }
             ]
         });
 
         let todos = tool.parse_args(args).unwrap();
         assert_eq!(todos[0].content, "Task with spaces");
+        assert_eq!(todos[0].active_form, "Doing task");
     }
 }

@@ -247,7 +247,7 @@ This is NOT optional. Users need to follow your thought process. One line per st
 - `grep` - Search file contents. **Always prefer this over `bash grep`.** Use `context: N` for surrounding lines.
 - `bash` - Shell commands: git, builds, tests. For GitHub, use `gh`: `gh issue view 34`, `gh pr view`.
 - `ask_user` - **Use when uncertain.** Ask clarifying questions rather than guessing.
-- `todo_write` - **ALWAYS use for multi-step tasks.** If a task has 2+ steps, needs planning, or involves a list of requirements, create todos FIRST. Update status as you work—mark in_progress before starting, completed when done. Users rely on this for visibility into your progress.
+- `todo_write` - **ALWAYS use for multi-step tasks.** If a task has 2+ steps, needs planning, or involves a list of requirements, create todos FIRST. Update status as you work—mark in_progress before starting, completed when done. Include `activeForm` (present continuous, e.g., "Running tests") for each task. Users rely on this for visibility into your progress.
 - `web_search` / `web_fetch` - Get current information from the web.
 
 ## Verification
