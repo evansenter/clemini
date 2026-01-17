@@ -8,7 +8,7 @@ license = "MIT"
 
 [dependencies]
 # AI
-genai-rs = "0.7.1"
+genai-rs = "0.7.2"
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }

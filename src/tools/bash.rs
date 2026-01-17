@@ -166,9 +166,7 @@ impl CallableFunction for BashTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| FunctionError::ArgumentMismatch("Missing command".to_string()))?;
 
-        let description = args
-            .get("description")
-            .and_then(|v| v.as_str());
+        let description = args.get("description").and_then(|v| v.as_str());
 
         let timeout_secs = args
             .get("timeout_seconds")

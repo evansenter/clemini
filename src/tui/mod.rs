@@ -781,7 +781,10 @@ mod tests {
 
         // Correct: 1 line with complete sentence
         assert_eq!(app.chat_lines.len(), 1);
-        assert_eq!(app.chat_lines[0], "I'll start by searching for the function");
+        assert_eq!(
+            app.chat_lines[0],
+            "I'll start by searching for the function"
+        );
     }
 
     /// Tool calls must use append_to_chat to appear on their own line.
@@ -802,7 +805,10 @@ mod tests {
         assert_eq!(app.chat_lines.len(), 2);
         assert_eq!(app.chat_lines[0], "Let me search");
         // Note: append_streaming appends to the tool line since it's non-empty
-        assert_eq!(app.chat_lines[1], "🔧 grep pattern=\"fn run_interaction\"Found it!");
+        assert_eq!(
+            app.chat_lines[1],
+            "🔧 grep pattern=\"fn run_interaction\"Found it!"
+        );
     }
 
     /// Correct pattern: blank line after streaming before tool call.

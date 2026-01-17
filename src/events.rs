@@ -92,7 +92,9 @@ impl EventHandler for TerminalEventHandler {
         has_error: bool,
         error_message: Option<&str>,
     ) {
-        log_event(&agent::format_tool_result(name, duration, tokens, has_error));
+        log_event(&agent::format_tool_result(
+            name, duration, tokens, has_error,
+        ));
         if let Some(err_msg) = error_message {
             log_event(&format!("  └─ error: {}", err_msg.dimmed()));
         }

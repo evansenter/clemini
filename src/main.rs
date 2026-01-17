@@ -1142,7 +1142,6 @@ fn run_shell_command_capture(command: &str) -> String {
 #[cfg(test)]
 mod event_handling_tests {
     use super::*;
-    use genai_rs::{FunctionExecutionResult, OwnedFunctionCallInfo};
     use serde_json::json;
     use std::time::Duration;
 
