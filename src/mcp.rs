@@ -563,3 +563,170 @@ impl McpServer {
         }))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_jsonrpc_request_parsing() {
+        // Full request
+        let json = json!({
+            "jsonrpc": "2.0",
+            "method": "initialize",
+            "params": {"some": "param"},
+            "id": 1
+        });
+        let req: JsonRpcRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.method, "initialize");
+        assert_eq!(req.id, Some(json!(1)));
+        assert_eq!(req.params, Some(json!({"some": "param"})));
+
+        // Missing jsonrpc (should work because of #[serde(default)])
+        let json = json!({
+            "method": "tools/list",
+            "id": "abc"
+        });
+        let req: JsonRpcRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.method, "tools/list");
+        assert_eq!(req.id, Some(json!("abc")));
+
+        // Notification (no id)
+        let json = json!({
+            "method": "notifications/initialized"
+        });
+        let req: JsonRpcRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.method, "notifications/initialized");
+        assert!(req.id.is_none());
+    }
+
+    #[test]
+    fn test_jsonrpc_response_serialization() {
+        let resp = JsonRpcResponse {
+            jsonrpc: "2.0".to_string(),
+            result: Some(json!({"status": "ok"})),
+            error: None,
+            id: Some(json!(1)),
+        };
+        let val = serde_json::to_value(resp).unwrap();
+        assert_eq!(val["jsonrpc"], "2.0");
+        assert_eq!(val["result"]["status"], "ok");
+        assert!(val.get("error").is_none());
+        assert_eq!(val["id"], 1);
+
+        let resp_err = JsonRpcResponse {
+            jsonrpc: "2.0".to_string(),
+            result: None,
+            error: Some(json!({"code": -32603, "message": "error"})),
+            id: None,
+        };
+        let val_err = serde_json::to_value(resp_err).unwrap();
+        assert!(val_err.get("result").is_none());
+        assert_eq!(val_err["error"]["code"], -32603);
+    }
+
+    #[test]
+    fn test_format_request_log() {
+        let (detail, body) = format_request_log("tools/list", &None);
+        assert!(detail.is_empty());
+        assert!(body.is_empty());
+
+        let params = json!({
+            "name": "clemini_chat",
+            "arguments": {
+                "message": "hello\nworld",
+                "interaction_id": "test-id"
+            }
+        });
+        let (detail, body) = format_request_log("tools/call", &Some(params));
+        assert!(detail.contains("clemini_chat"));
+        assert!(detail.contains("interaction"));
+        assert!(detail.contains("test-id"));
+        assert!(body.contains("> hello"));
+        assert!(body.contains("> world"));
+    }
+
+    #[test]
+    fn test_format_status() {
+        let ok_resp = JsonRpcResponse {
+            jsonrpc: "2.0".to_string(),
+            result: Some(json!({})),
+            error: None,
+            id: None,
+        };
+        assert_eq!(format_status(&ok_resp).to_string(), "OK");
+
+        let err_resp = JsonRpcResponse {
+            jsonrpc: "2.0".to_string(),
+            result: None,
+            error: Some(json!({})),
+            id: None,
+        };
+        assert_eq!(format_status(&err_resp).to_string(), "ERROR");
+    }
+
+    fn create_test_server() -> McpServer {
+        let client = Client::new("dummy-key".to_string());
+        let tool_service = Arc::new(CleminiToolService::new(
+            std::env::current_dir().unwrap(),
+            30,
+            true,
+        ));
+        McpServer::new(
+            client,
+            tool_service,
+            "gemini-1.5-flash".to_string(),
+            "system prompt".to_string(),
+        )
+    }
+
+    #[tokio::test]
+    async fn test_handle_initialize() {
+        let server = create_test_server();
+        let result = server.handle_initialize(None).await.unwrap();
+        assert_eq!(result["protocolVersion"], "2025-11-25");
+        assert_eq!(result["serverInfo"]["name"], "clemini");
+    }
+
+    #[tokio::test]
+    async fn test_handle_tools_list() {
+        let server = create_test_server();
+        let result = server.handle_tools_list().await.unwrap();
+        let tools = result["tools"].as_array().unwrap();
+        assert!(tools.iter().any(|t| t["name"] == "clemini_chat"));
+        assert!(tools.iter().any(|t| t["name"] == "clemini_rebuild"));
+    }
+
+    #[tokio::test]
+    async fn test_handle_request_logic() {
+        let server = create_test_server();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let ct = tokio_util::sync::CancellationToken::new();
+
+        // Test unknown method
+        let req = JsonRpcRequest {
+            _jsonrpc: None,
+            method: "unknown".to_string(),
+            params: None,
+            id: Some(json!(1)),
+        };
+        let resp = server
+            .handle_request(req, tx.clone(), ct.clone())
+            .await
+            .unwrap();
+        assert!(resp.error.is_some());
+        assert_eq!(resp.id, Some(json!(1)));
+
+        // Test notifications/initialized
+        let req = JsonRpcRequest {
+            _jsonrpc: None,
+            method: "notifications/initialized".to_string(),
+            params: None,
+            id: Some(json!(2)),
+        };
+        let resp = server.handle_request(req, tx, ct).await.unwrap();
+        assert!(resp.result.is_some());
+        assert!(resp.error.is_none());
+    }
+}
