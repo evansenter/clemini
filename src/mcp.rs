@@ -5,9 +5,11 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::Mutex;
 
 use crate::tools::CleminiToolService;
+use crate::InteractionProgress;
 
 #[derive(Debug, Deserialize)]
 pub struct JsonRpcRequest {
@@ -50,9 +52,23 @@ impl McpServer {
     }
 
     pub async fn run_stdio(&self) -> Result<()> {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+
+        // Spawn a dedicated writer task for stdout to handle concurrent notifications
+        tokio::spawn(async move {
+            let mut stdout = io::stdout();
+            while let Some(msg) = rx.recv().await {
+                if stdout.write_all(msg.as_bytes()).await.is_err() {
+                    break;
+                }
+                if stdout.flush().await.is_err() {
+                    break;
+                }
+            }
+        });
+
         let stdin = io::stdin();
         let mut reader = BufReader::new(stdin).lines();
-        let mut stdout = io::stdout();
 
         while let Some(line) = reader.next_line().await? {
             if line.trim().is_empty() {
@@ -60,7 +76,10 @@ impl McpServer {
             }
 
             let request: JsonRpcRequest = match serde_json::from_str::<JsonRpcRequest>(&line) {
-                Ok(req) => req,
+                Ok(req) => {
+                    crate::log_event(&format!("--> {} {}", req.method, line.trim()));
+                    req
+                }
                 Err(e) => {
                     let error_resp = JsonRpcResponse {
                         jsonrpc: "2.0".to_string(),
@@ -71,10 +90,7 @@ impl McpServer {
                         })),
                         id: None,
                     };
-                    stdout
-                        .write_all(format!("{}\n", serde_json::to_string(&error_resp)?).as_bytes())
-                        .await?;
-                    stdout.flush().await?;
+                    let _ = tx.send(format!("{}\n", serde_json::to_string(&error_resp)?));
                     continue;
                 }
             };
@@ -84,22 +100,21 @@ impl McpServer {
                 continue;
             }
 
-            let response = self.handle_request(request).await?;
-            stdout
-                .write_all(format!("{}\n", serde_json::to_string(&response)?).as_bytes())
-                .await?;
-            stdout.flush().await?;
+            let response = self.handle_request(request, tx.clone()).await?;
+            let resp_str = serde_json::to_string(&response)?;
+            crate::log_event(&format!("<-- {}", resp_str));
+            let _ = tx.send(format!("{}\n", resp_str));
         }
 
         Ok(())
     }
 
-    async fn handle_request(&self, request: JsonRpcRequest) -> Result<JsonRpcResponse> {
+    async fn handle_request(&self, request: JsonRpcRequest, tx: UnboundedSender<String>) -> Result<JsonRpcResponse> {
         let id = request.id.clone();
         let result = match request.method.as_str() {
             "initialize" => self.handle_initialize(request.params).await,
             "tools/list" => self.handle_tools_list().await,
-            "tools/call" => self.handle_tools_call(request.params).await,
+            "tools/call" => self.handle_tools_call(request.params, tx).await,
             "notifications/initialized" => {
                 return Ok(JsonRpcResponse {
                     jsonrpc: "2.0".to_string(),
@@ -189,7 +204,7 @@ impl McpServer {
         }))
     }
 
-    async fn handle_tools_call(&self, params: Option<Value>) -> Result<Value> {
+    async fn handle_tools_call(&self, params: Option<Value>, tx: UnboundedSender<String>) -> Result<Value> {
         let params = params.ok_or_else(|| anyhow!("Missing parameters"))?;
         let name = params
             .get("name")
@@ -200,7 +215,7 @@ impl McpServer {
             .ok_or_else(|| anyhow!("Missing tool arguments"))?;
 
         match name {
-            "clemini_chat" => self.call_clemini_chat(arguments).await,
+            "clemini_chat" => self.call_clemini_chat(arguments, tx).await,
             "clemini_reset" => self.call_clemini_reset(arguments).await,
             "clemini_rebuild" => self.call_clemini_rebuild(arguments).await,
             _ => Err(anyhow!("Unknown tool: {}", name)),
@@ -250,7 +265,7 @@ impl McpServer {
         }
     }
 
-    async fn call_clemini_chat(&self, arguments: &Value) -> Result<Value> {
+    async fn call_clemini_chat(&self, arguments: &Value, tx: UnboundedSender<String>) -> Result<Value> {
         let message = arguments
             .get("message")
             .and_then(|v| v.as_str())
@@ -266,6 +281,18 @@ impl McpServer {
             last_interaction_id: None,
         });
 
+        let tx_clone = tx.clone();
+        let progress_fn = Arc::new(move |p: InteractionProgress| {
+            let notification = json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/progress",
+                "params": p
+            });
+            if let Ok(s) = serde_json::to_string(&notification) {
+                let _ = tx_clone.send(format!("{}\n", s));
+            }
+        });
+
         let result = crate::run_interaction(
             &self.client,
             &self.tool_service,
@@ -273,6 +300,7 @@ impl McpServer {
             session.last_interaction_id.as_deref(),
             &self.model,
             false,
+            Some(progress_fn),
         )
         .await?;
 

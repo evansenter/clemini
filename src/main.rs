@@ -3,6 +3,7 @@ use clap::Parser;
 use colored::Colorize;
 use futures_util::StreamExt;
 use genai_rs::{AutoFunctionStreamChunk, Client, Content};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
@@ -19,6 +20,23 @@ use tools::CleminiToolService;
 
 const DEFAULT_MODEL: &str = "gemini-3-flash-preview";
 const CONTEXT_WINDOW_LIMIT: u32 = 1_000_000;
+
+pub fn log_event(message: &str) {
+    if let Ok(path) = std::env::var("CLEMINI_LOG") {
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| format!("{}.{:03}", d.as_secs(), d.subsec_millis()))
+                .unwrap_or_else(|_| "0.000".to_string());
+            use std::io::Write;
+            let _ = writeln!(file, "[{}] {}", timestamp, message);
+        }
+    }
+}
 
 const SYSTEM_PROMPT: &str = r#"You are clemini, a coding assistant that helps users with software engineering tasks.
 
@@ -72,7 +90,7 @@ When you encounter recurring issues or discover better patterns:
 - Only add guidance that applies broadly, not task-specific notes
 "#;
 
-#[derive(serde::Deserialize, Default)]
+#[derive(Deserialize, Default)]
 struct Config {
     model: Option<String>,
     bash_timeout: Option<u64>,
@@ -199,7 +217,7 @@ async fn main() -> Result<()> {
 
     if let Some(prompt) = combined_prompt {
         // Non-interactive mode: run single prompt
-        let _ = run_interaction(&client, &tool_service, &prompt, None, &model, args.stream).await?;
+        let _ = run_interaction(&client, &tool_service, &prompt, None, &model, args.stream, None).await?;
     } else {
         // Interactive REPL mode
         run_repl(&client, &tool_service, cwd, &model, args.stream).await?;
@@ -377,6 +395,7 @@ async fn run_repl(
                     last_interaction_id.as_deref(),
                     model,
                     stream_output,
+                    None,
                 )
                 .await
                 {
@@ -563,6 +582,15 @@ pub struct InteractionResult {
     pub tool_calls: Vec<String>,
 }
 
+#[derive(Debug, Serialize, Clone)]
+pub struct InteractionProgress {
+    pub tool: String,
+    pub status: String, // "executing" or "completed"
+    pub args: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+}
+
 fn format_tool_args(args: &Value) -> String {
     let Some(obj) = args.as_object() else { return String::new() };
 
@@ -600,6 +628,7 @@ pub async fn run_interaction(
     previous_interaction_id: Option<&str>,
     model: &str,
     stream_output: bool,
+    progress_fn: Option<Arc<dyn Fn(InteractionProgress) + Send + Sync>>,
 ) -> Result<InteractionResult> {
     // Build the interaction - system instruction must be sent on every turn
     // (it's NOT inherited via previousInteractionId per genai-rs docs)
@@ -643,6 +672,18 @@ pub async fn run_interaction(
                     // Capture interaction ID early for conversation continuity
                     last_id.clone_from(&resp.id);
 
+                    for call in resp.function_calls() {
+                        log_event(&format!("CALL {}: {}", call.name, call.args));
+                        if let Some(ref cb) = progress_fn {
+                            cb(InteractionProgress {
+                                tool: call.name.to_string(),
+                                status: "executing".to_string(),
+                                args: call.args.clone(),
+                                duration_ms: None,
+                            });
+                        }
+                    }
+
                     // Render any text before tool execution
                     flush_response(&mut response_text, &skin, stream_output, false);
 
@@ -667,10 +708,17 @@ pub async fn run_interaction(
 
                     for result in results {
                         tool_calls.push(result.name.clone());
-                    }
 
-                    // Log each result with timing and tokens
-                    for result in results {
+                        log_event(&format!("RESULT {}: {}", result.name, result.result));
+                        if let Some(ref cb) = progress_fn {
+                            cb(InteractionProgress {
+                                tool: result.name.clone(),
+                                status: "completed".to_string(),
+                                args: result.args.clone(),
+                                duration_ms: Some(result.duration.as_millis() as u64),
+                            });
+                        }
+
                         let has_error = result.result.get("error").is_some();
                         let error_suffix = if has_error {
                             " ERROR".bright_red().bold().to_string()
