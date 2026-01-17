@@ -12,6 +12,7 @@ use std::io::{self, IsTerminal, Read, Write};
 use std::path::PathBuf;
 use std::time::Instant;
 use std::sync::Arc;
+use std::sync::LazyLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use termimad::MadSkin;
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
@@ -48,10 +49,21 @@ pub fn init_logging() {
         .init();
 }
 
+static SKIN: LazyLock<MadSkin> = LazyLock::new(|| {
+    let mut skin = MadSkin::default();
+    for h in &mut skin.headers {
+        h.align = termimad::Alignment::Left;
+    }
+    skin
+});
+
 /// Log to human-readable file with ANSI colors preserved
 /// Uses same naming as rolling::daily: clemini.log.YYYY-MM-DD
 pub fn log_event(message: &str) {
     colored::control::set_override(true);
+
+    // Render markdown to ANSI string
+    let rendered = SKIN.term_text(message).to_string();
 
     // Write to the stable log location: clemini.log.YYYY-MM-DD
     let log_dir = dirs::data_local_dir()
@@ -69,7 +81,7 @@ pub fn log_event(message: &str) {
     {
         let timestamp = chrono::Local::now().format("%H:%M:%S%.3f");
         use std::io::Write;
-        let _ = writeln!(file, "[{}] {}", timestamp, message);
+        let _ = writeln!(file, "[{}] {}", timestamp, rendered.trim_end());
     }
 
     // Also write to CLEMINI_LOG if set (backwards compat)
@@ -81,7 +93,7 @@ pub fn log_event(message: &str) {
     {
         let timestamp = chrono::Local::now().format("%H:%M:%S%.3f");
         use std::io::Write;
-        let _ = writeln!(file, "[{}] {}", timestamp, message);
+        let _ = writeln!(file, "[{}] {}", timestamp, rendered.trim_end());
     }
 }
 
@@ -667,8 +679,8 @@ fn format_tool_args(args: &Value) -> String {
         let val_str = match v {
             Value::String(s) => {
                 let trimmed = s.replace('\n', " ");
-                if trimmed.len() > 40 {
-                    format!("\"{}...\"", &trimmed[..37])
+                if trimmed.len() > 80 {
+                    format!("\"{}...\"", &trimmed[..77])
                 } else {
                     format!("\"{trimmed}\"")
                 }
@@ -695,7 +707,6 @@ fn estimate_tokens(value: &serde_json::Value) -> u32 {
 
 fn format_tool_result(
     name: &str,
-    args: &Value,
     duration: std::time::Duration,
     estimated_tokens: u32,
     cumulative_percent: f64,
@@ -707,7 +718,6 @@ fn format_tool_result(
         String::new()
     };
     let elapsed_secs = duration.as_secs_f32();
-    let args_str = format_tool_args(args);
 
     let duration_str = if elapsed_secs < 0.001 {
         format!("{:.3}s", elapsed_secs)
@@ -716,9 +726,8 @@ fn format_tool_result(
     };
 
     format!(
-        "[{}] {}{}, ~{} tok ({:.1}%){}",
+        "[{}] {}, ~{} tok ({:.1}%){}",
         name.cyan(),
-        args_str.dimmed(),
         duration_str.yellow(),
         estimated_tokens,
         cumulative_percent,
@@ -891,7 +900,13 @@ pub async fn run_interaction(
             }
 
             let start = Instant::now();
-            let result: Value = tool_service.execute(call_name, call_args.clone()).await?;
+            let result: Value = match tool_service.execute(call_name, call_args.clone()).await {
+                Ok(v) => v,
+                Err(e) => {
+                    // Return error as JSON so Gemini can see it and retry
+                    serde_json::json!({"error": e.to_string()})
+                }
+            };
             let duration = start.elapsed();
 
             tool_calls.push(call_name.to_string());
@@ -915,7 +930,6 @@ pub async fn run_interaction(
 
             let formatted = format_tool_result(
                 call_name,
-                call_args,
                 duration,
                 total_tool_tokens,
                 cumulative_percent,
