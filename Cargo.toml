@@ -12,6 +12,7 @@ genai-rs = { git = "https://github.com/evansenter/genai-rs", branch = "main" }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
 futures-util = "0.3"
 async-trait = "0.1"
 
@@ -36,3 +37,9 @@ termimad = "0.30"
 home = "0.5"
 colored = "2"
 axum = "0.8"
+async-stream = "0.3"
+tower-http = { version = "0.6", features = ["cors"] }
+chrono = "0.4"
+grep = "0.3"
+ignore = "0.4"
+globset = "0.4"

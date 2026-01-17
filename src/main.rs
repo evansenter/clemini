@@ -7,8 +7,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
+use tokio_util::sync::CancellationToken;
 use std::env;
 use std::io::{self, IsTerminal, Read, Write};
+use std::time::Instant;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use termimad::MadSkin;
@@ -22,16 +24,16 @@ const DEFAULT_MODEL: &str = "gemini-3-flash-preview";
 const CONTEXT_WINDOW_LIMIT: u32 = 1_000_000;
 
 pub fn log_event(message: &str) {
+    colored::control::set_override(true);
     if let Ok(path) = std::env::var("CLEMINI_LOG") {
         if let Ok(mut file) = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(path)
         {
-            let timestamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| format!("{}.{:03}", d.as_secs(), d.subsec_millis()))
-                .unwrap_or_else(|_| "0.000".to_string());
+            let now = std::time::SystemTime::now();
+            let datetime: chrono::DateTime<chrono::Local> = now.into();
+            let timestamp = datetime.format("%H:%M:%S%.3f").to_string();
             use std::io::Write;
             let _ = writeln!(file, "[{}] {}", timestamp, message);
         }
@@ -45,9 +47,15 @@ const SYSTEM_PROMPT: &str = r#"You are clemini, a coding assistant that helps us
 - Read files before editing them. Never guess at file contents.
 - Verify your changes work (run `cargo check`, tests, etc.) before considering a task complete.
 
+## Communication Style
+- Narrate what you're doing as you work, with brief status updates before each step
+- Examples: "First, let me read the file to understand the current code..." or "Now I'll update the function to handle the edge case..."
+- Keep narration concise - one line per step, not paragraphs
+- This helps users follow along with your thought process
+
 ## Tool Selection
 - `glob` - Find files by pattern: `**/*.rs`, `src/**/*.ts`
-- `grep` - Search file contents with regex. Use `case_insensitive: true` for case-insensitive. Use `context: N` to show surrounding lines. Use `include_large: true` to include files >1MB.
+- `grep` - Search file contents with regex. Use `case_insensitive: true` for case-insensitive. Use `context: N` to show surrounding lines.
 - `read_file` - Read specific files you know exist. For large files, use `offset` (1-indexed) and `limit` to paginate. If `truncated` is true, continue reading from `offset + limit`.
 - `edit` - Surgical string replacement. Use `replace_all: true` to rename variables or update recurring patterns. Default is unique match only.
 - `write_file` - Create new files or completely rewrite existing ones.
@@ -172,11 +180,12 @@ async fn main() -> Result<()> {
 
     // MCP server mode - handle early before consuming stdin or printing banner
     if args.mcp_server {
+        let mcp_server = Arc::new(mcp::McpServer::new(client, tool_service, model));
         if args.http {
-            anyhow::bail!("HTTP transport not yet implemented");
+            mcp_server.run_http(args.port).await?;
+        } else {
+            mcp_server.run_stdio().await?;
         }
-        let mcp_server = mcp::McpServer::new(client, tool_service, model);
-        mcp_server.run_stdio().await?;
         return Ok(());
     }
 
@@ -545,6 +554,7 @@ async fn stop_spinner(spinner: &mut Option<Spinner>) {
 
 fn flush_response(response_text: &mut String, skin: &MadSkin, stream_output: bool, force_newline: bool) {
     if !response_text.is_empty() {
+        log_event(&format!("> {}", response_text.trim()));
         if stream_output {
             let width = termimad::terminal_size().0.max(20);
             let mut visual_lines = 0;
@@ -620,6 +630,45 @@ fn format_tool_args(args: &Value) -> String {
     }
 }
 
+fn format_tool_result(
+    name: &str,
+    args: &Value,
+    duration: std::time::Duration,
+    token_count: u32,
+    has_error: bool,
+) -> String {
+    let error_suffix = if has_error {
+        " ERROR".bright_red().bold().to_string()
+    } else {
+        String::new()
+    };
+    let elapsed_secs = duration.as_secs_f32();
+    let args_str = format_tool_args(args);
+
+    let duration_str = if elapsed_secs < 0.001 {
+        format!("{:.3}s", elapsed_secs)
+    } else {
+        format!("{:.2}s", elapsed_secs)
+    };
+
+    let tokens_str = if token_count == 0 {
+        "—".to_string()
+    } else if token_count < 1000 {
+        format!("{} tokens", token_count)
+    } else {
+        format!("{:.1}k tokens", f64::from(token_count) / 1000.0)
+    };
+
+    format!(
+        "[{}] {}{}, {}{}",
+        name.cyan(),
+        args_str.dimmed(),
+        duration_str.yellow(),
+        tokens_str,
+        error_suffix
+    )
+}
+
 #[allow(clippy::too_many_lines)]
 pub async fn run_interaction(
     client: &Client,
@@ -644,11 +693,23 @@ pub async fn run_interaction(
         interaction = interaction.with_previous_interaction(prev_id);
     }
 
-    let mut stream = interaction.create_stream_with_auto_functions();
+    let cancel_token = CancellationToken::new();
+    let c_token = cancel_token.clone();
+    let ctrl_c_task = tokio::spawn(async move {
+        let _ = tokio::signal::ctrl_c().await;
+        c_token.cancel();
+    });
 
-    let mut last_id: Option<String> = None;
+    let mut stream = Box::pin(
+        interaction
+            .create_stream_with_auto_functions()
+            .take_until(cancel_token.cancelled()),
+    );
+
+    let mut last_id = previous_interaction_id.map(String::from);
     let mut current_context_size: u32 = 0;
     let mut total_tokens: u32 = 0;
+    let mut tool_start_time: Option<Instant> = None;
     let mut tool_calls: Vec<String> = Vec::new();
     let mut response_text = String::new();
     let mut full_response = String::new();
@@ -669,11 +730,17 @@ pub async fn run_interaction(
                     }
                 }
                 AutoFunctionStreamChunk::ExecutingFunctions(resp) => {
+                    tool_start_time = Some(Instant::now());
                     // Capture interaction ID early for conversation continuity
                     last_id.clone_from(&resp.id);
 
                     for call in resp.function_calls() {
-                        log_event(&format!("CALL {}: {}", call.name, call.args));
+                        log_event(&format!(
+                            "{} {} {}",
+                            "CALL".magenta().bold(),
+                            call.name.purple(),
+                            format_tool_args(&call.args).trim().dimmed()
+                        ));
                         if let Some(ref cb) = progress_fn {
                             cb(InteractionProgress {
                                 tool: call.name.to_string(),
@@ -689,10 +756,14 @@ pub async fn run_interaction(
 
                     // Update token count from the response that triggered function calls
                     if let Some(usage) = &resp.usage {
-                        let turn_tokens = usage.total_input_tokens.unwrap_or(0)
-                            + usage.total_output_tokens.unwrap_or(0);
-                        current_context_size = turn_tokens;
-                        total_tokens = turn_tokens;
+                        let turn_tokens = usage.total_tokens.unwrap_or_else(|| {
+                            usage.total_input_tokens.unwrap_or(0)
+                                + usage.total_output_tokens.unwrap_or(0)
+                        });
+                        if turn_tokens > 0 {
+                            current_context_size = turn_tokens;
+                            total_tokens = turn_tokens;
+                        }
                     }
 
                     // Start spinner if not an interactive tool
@@ -706,35 +777,37 @@ pub async fn run_interaction(
                     // Stop spinner
                     stop_spinner(&mut spinner).await;
 
+                    let manual_duration = tool_start_time.map(|t| t.elapsed()).unwrap_or_default();
+
                     for result in results {
                         tool_calls.push(result.name.clone());
 
-                        log_event(&format!("RESULT {}: {}", result.name, result.result));
+                        let has_error = result.result.get("error").is_some();
+
+                        let duration = if result.duration.as_nanos() == 0 {
+                            manual_duration
+                        } else {
+                            result.duration
+                        };
+
                         if let Some(ref cb) = progress_fn {
                             cb(InteractionProgress {
                                 tool: result.name.clone(),
                                 status: "completed".to_string(),
                                 args: result.args.clone(),
-                                duration_ms: Some(result.duration.as_millis() as u64),
+                                duration_ms: Some(duration.as_millis() as u64),
                             });
                         }
 
-                        let has_error = result.result.get("error").is_some();
-                        let error_suffix = if has_error {
-                            " ERROR".bright_red().bold().to_string()
-                        } else {
-                            String::new()
-                        };
-                        let elapsed_secs = result.duration.as_secs_f32();
-
-                        eprintln!(
-                            "[{}] {}{}, {:.1}k tokens{}",
-                            result.name.cyan(),
-                            format_tool_args(&result.args).dimmed(),
-                            format!("{:.1}s", elapsed_secs).yellow(),
-                            f64::from(current_context_size) / 1000.0,
-                            error_suffix
+                        let formatted = format_tool_result(
+                            &result.name,
+                            &result.args,
+                            duration,
+                            current_context_size,
+                            has_error,
                         );
+                        log_event(&formatted);
+                        eprintln!("{formatted}");
                     }
                 }
                 AutoFunctionStreamChunk::Complete(resp) => {
@@ -749,11 +822,7 @@ pub async fn run_interaction(
                         let total_out = usage.total_output_tokens.unwrap_or(0);
                         current_context_size = total_in + total_out;
                         total_tokens = current_context_size;
-                        eprintln!(
-                            "[{}→{} tok]",
-                            total_in,
-                            total_out
-                        );
+                        eprintln!("[{}→{} tok]", total_in, total_out);
                     }
                 }
                 AutoFunctionStreamChunk::MaxLoopsReached(_) => {
@@ -762,10 +831,18 @@ pub async fn run_interaction(
                 _ => {}
             },
             Err(e) => {
-                eprintln!("\n{}", format!("[stream error: {e}]").bright_red());
-                break;
+                ctrl_c_task.abort();
+                let err_msg = e.to_string();
+                eprintln!("\n{}", format!("[stream error: {err_msg}]").bright_red());
+                return Err(anyhow::anyhow!(err_msg));
             }
         }
+    }
+
+    ctrl_c_task.abort();
+
+    if cancel_token.is_cancelled() {
+        eprintln!("\n{}", "(tool execution cancelled by user)".yellow());
     }
 
     // Render any remaining text (e.g., if stream ended abruptly or on error)
