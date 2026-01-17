@@ -16,3 +16,11 @@ Thumbs.db
 .env
 .env.local
 tmp/
+
+# MCP config (local)
+.mcp.json
+
+# Logs
+*.log
+error.log
+output.txt
