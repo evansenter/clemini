@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use genai_rs::{CallableFunction, FunctionDeclaration, FunctionError, FunctionParameters};
 use serde_json::{Value, json};
 use std::io::{self, Write};
+use tracing::instrument;
 
 pub struct AskUserTool;
 
@@ -35,6 +36,7 @@ impl CallableFunction for AskUserTool {
         )
     }
 
+    #[instrument(skip(self, args))]
     async fn call(&self, args: Value) -> Result<Value, FunctionError> {
         let question = args
             .get("question")

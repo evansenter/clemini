@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use genai_rs::{CallableFunction, FunctionDeclaration, FunctionError, FunctionParameters};
 use serde_json::{Value, json};
 use std::path::PathBuf;
+use tracing::instrument;
 
 pub struct WebFetchTool {
     _cwd: PathBuf,
@@ -32,6 +33,7 @@ impl CallableFunction for WebFetchTool {
         )
     }
 
+    #[instrument(skip(self, args))]
     async fn call(&self, args: Value) -> Result<Value, FunctionError> {
         let url = args
             .get("url")

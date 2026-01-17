@@ -8,6 +8,7 @@ use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use globset::{Glob, GlobSetBuilder};
+use tracing::instrument;
 
 pub struct GrepTool {
     cwd: PathBuf,
@@ -181,6 +182,7 @@ impl CallableFunction for GrepTool {
         )
     }
 
+    #[instrument(skip(self, args))]
     async fn call(&self, args: Value) -> Result<Value, FunctionError> {
         let pattern = args
             .get("pattern")

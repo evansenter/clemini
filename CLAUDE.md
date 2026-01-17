@@ -60,7 +60,7 @@ Debugging: `LOUD_WIRE=1` logs all HTTP requests/responses.
 
 **Always verify compilation** - After making changes, run `cargo check` or `cargo clippy -- -D warnings` before reporting completion. Never leave code in a non-compiling state.
 
-**Restart clemini MCP after feature changes** - After implementing changes that affect the MCP server (SYSTEM_PROMPT, tools, mcp.rs), run `clemini_rebuild` to restart the server with the new code.
+**Always rebuild before testing** - After making ANY changes to clemini code, run `clemini_rebuild` and wait for completion BEFORE using `clemini_chat`. The rebuild replaces the running process, so calling `clemini_chat` too early will fail with AbortError.
 
 **Minimal scope** - Only implement what was asked. Don't add "nice to have" features beyond the request. For example, if asked for a stdio server, don't also add HTTP support.
 

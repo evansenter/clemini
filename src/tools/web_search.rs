@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use genai_rs::{CallableFunction, FunctionDeclaration, FunctionError, FunctionParameters};
 use serde_json::{Value, json};
 use std::path::PathBuf;
+use tracing::instrument;
 
 pub struct WebSearchTool {
     _cwd: PathBuf,
@@ -32,6 +33,7 @@ impl CallableFunction for WebSearchTool {
         )
     }
 
+    #[instrument(skip(self, args))]
     async fn call(&self, args: Value) -> Result<Value, FunctionError> {
         let query = args
             .get("query")

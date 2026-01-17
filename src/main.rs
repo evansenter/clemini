@@ -9,10 +9,12 @@ use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
 use std::env;
 use std::io::{self, IsTerminal, Read, Write};
+use std::path::PathBuf;
 use std::time::Instant;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use termimad::MadSkin;
+use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 mod tools;
 mod mcp;
@@ -22,17 +24,62 @@ use tools::CleminiToolService;
 const DEFAULT_MODEL: &str = "gemini-3-flash-preview";
 const CONTEXT_WINDOW_LIMIT: u32 = 1_000_000;
 
+/// Initialize tracing for structured JSON logs only.
+/// Human-readable logs go through log_event() instead.
+pub fn init_logging() {
+    let log_dir = dirs::data_local_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("clemini/logs");
+
+    let _ = std::fs::create_dir_all(&log_dir);
+
+    // JSON layer: clemini.json.YYYY-MM-DD
+    let json_file = tracing_appender::rolling::daily(&log_dir, "clemini.json");
+    let (json_writer, json_guard) = tracing_appender::non_blocking(json_file);
+    let json_layer = fmt::layer()
+        .json()
+        .with_writer(json_writer);
+
+    Box::leak(Box::new(json_guard));
+
+    tracing_subscriber::registry()
+        .with(json_layer)
+        .with(EnvFilter::from_default_env().add_directive(tracing::Level::INFO.into()))
+        .init();
+}
+
+/// Log to human-readable file with ANSI colors preserved
+/// Uses same naming as rolling::daily: clemini.log.YYYY-MM-DD
 pub fn log_event(message: &str) {
     colored::control::set_override(true);
+
+    // Write to the stable log location: clemini.log.YYYY-MM-DD
+    let log_dir = dirs::data_local_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("clemini/logs");
+    let _ = std::fs::create_dir_all(&log_dir);
+
+    let today = chrono::Local::now().format("%Y-%m-%d");
+    let log_path = log_dir.join(format!("clemini.log.{}", today));
+
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+    {
+        let timestamp = chrono::Local::now().format("%H:%M:%S%.3f");
+        use std::io::Write;
+        let _ = writeln!(file, "[{}] {}", timestamp, message);
+    }
+
+    // Also write to CLEMINI_LOG if set (backwards compat)
     if let Ok(path) = std::env::var("CLEMINI_LOG")
         && let Ok(mut file) = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(path)
     {
-        let now = std::time::SystemTime::now();
-        let datetime: chrono::DateTime<chrono::Local> = now.into();
-        let timestamp = datetime.format("%H:%M:%S%.3f").to_string();
+        let timestamp = chrono::Local::now().format("%H:%M:%S%.3f");
         use std::io::Write;
         let _ = writeln!(file, "[{}] {}", timestamp, message);
     }
@@ -160,6 +207,7 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    init_logging();
     let args = Args::parse();
     let config = load_config();
 

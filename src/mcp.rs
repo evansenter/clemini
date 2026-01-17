@@ -18,6 +18,8 @@ use tokio::sync::broadcast;
 use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio::sync::Mutex;
 use tower_http::cors::CorsLayer;
+use tracing::instrument;
+// Note: info! macro goes to JSON logs only. For human-readable logs, use crate::log_event()
 
 use crate::tools::CleminiToolService;
 use crate::InteractionProgress;
@@ -54,6 +56,7 @@ struct McpSession {
     last_interaction_id: Option<String>,
 }
 
+#[instrument(skip(server, request))]
 async fn handle_post(
     State(server): State<Arc<McpServer>>,
     Json(request): Json<JsonRpcRequest>,
@@ -154,6 +157,7 @@ impl McpServer {
         }
     }
 
+    #[instrument(skip(self))]
     pub async fn run_http(self: Arc<Self>, port: u16) -> Result<()> {
         crate::log_event(&format!(
             "MCP HTTP server starting on {} ({} enable multi-turn conversations)",
@@ -173,6 +177,7 @@ impl McpServer {
         Ok(())
     }
 
+    #[instrument(skip(self))]
     pub async fn run_stdio(self: Arc<Self>) -> Result<()> {
         crate::log_event(&format!(
             "MCP server starting ({} enable multi-turn conversations)",

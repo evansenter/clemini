@@ -3,6 +3,7 @@ use genai_rs::{CallableFunction, FunctionDeclaration, FunctionError, FunctionPar
 use glob::glob;
 use serde_json::{Value, json};
 use std::path::PathBuf;
+use tracing::instrument;
 
 use super::{make_relative, validate_path};
 
@@ -37,6 +38,7 @@ impl CallableFunction for GlobTool {
         )
     }
 
+    #[instrument(skip(self, args))]
     async fn call(&self, args: Value) -> Result<Value, FunctionError> {
         let pattern = args
             .get("pattern")

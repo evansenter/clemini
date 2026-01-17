@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use colored::Colorize;
 use genai_rs::{CallableFunction, FunctionDeclaration, FunctionError, FunctionParameters};
 use serde_json::{json, Value};
+use tracing::instrument;
 
 pub struct TodoWriteTool;
 
@@ -40,6 +41,7 @@ impl CallableFunction for TodoWriteTool {
         )
     }
 
+    #[instrument(skip(self, args))]
     async fn call(&self, args: Value) -> Result<Value, FunctionError> {
         let todos = args
             .get("todos")

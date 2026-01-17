@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use genai_rs::{CallableFunction, FunctionDeclaration, FunctionError, FunctionParameters};
 use serde_json::{Value, json};
 use std::path::PathBuf;
+use tracing::instrument;
 
 use super::resolve_and_validate_path;
 
@@ -46,6 +47,7 @@ impl CallableFunction for EditTool {
         )
     }
 
+    #[instrument(skip(self, args))]
     async fn call(&self, args: Value) -> Result<Value, FunctionError> {
         let file_path = args
             .get("file_path")

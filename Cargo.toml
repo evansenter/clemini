@@ -44,3 +44,7 @@ ctrlc = "3.4"
 grep = "0.3"
 ignore = "0.4"
 globset = "0.4"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+tracing-appender = "0.2"
+dirs = "5.0"

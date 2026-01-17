@@ -8,6 +8,7 @@ use std::process::Stdio;
 use std::sync::LazyLock;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
+use tracing::instrument;
 
 /// Blocked command patterns that are always rejected.
 static BLOCKED_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
@@ -92,6 +93,7 @@ impl CallableFunction for BashTool {
         )
     }
 
+    #[instrument(skip(self, args))]
     async fn call(&self, args: Value) -> Result<Value, FunctionError> {
         let command = args
             .get("command")
@@ -166,7 +168,7 @@ impl CallableFunction for BashTool {
                                 if logged_stdout_lines < MAX_LOG_LINES {
                                     let dimmed = line.dimmed();
                                     eprintln!("{}", dimmed);
-                                    crate::log_event(&format!("{}", dimmed));
+                                    crate::log_event(&dimmed.to_string());
                                     logged_stdout_lines += 1;
                                 } else if logged_stdout_lines == MAX_LOG_LINES {
                                     let msg = "[...more stdout...]";
@@ -188,7 +190,7 @@ impl CallableFunction for BashTool {
                                 if logged_stderr_lines < MAX_LOG_LINES {
                                     let dimmed = line.dimmed();
                                     eprintln!("{}", dimmed);
-                                    crate::log_event(&format!("{}", dimmed));
+                                    crate::log_event(&dimmed.to_string());
                                     logged_stderr_lines += 1;
                                 } else if logged_stderr_lines == MAX_LOG_LINES {
                                     let msg = "[...more stderr...]";
