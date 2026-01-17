@@ -130,6 +130,7 @@ impl CallableFunction for BashTool {
             .arg("-c")
             .arg(command)
             .current_dir(&self.cwd)
+            .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
