@@ -10,13 +10,11 @@ use futures_util::stream::Stream;
 use genai_rs::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::Arc;
 use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::broadcast;
 use tokio::sync::mpsc::{self, UnboundedSender};
-use tokio::sync::Mutex;
 use tower_http::cors::CorsLayer;
 use tracing::instrument;
 // Note: info! macro goes to JSON logs only. For human-readable logs, use crate::log_event()
@@ -48,12 +46,7 @@ pub struct McpServer {
     tool_service: Arc<CleminiToolService>,
     model: String,
     system_prompt: String,
-    sessions: Mutex<HashMap<String, McpSession>>,
     notification_tx: broadcast::Sender<String>,
-}
-
-struct McpSession {
-    last_interaction_id: Option<String>,
 }
 
 #[instrument(skip(server, request))]
@@ -70,11 +63,11 @@ async fn handle_post(
             detail.push_str(&format!(" {}", name.purple()));
         }
         if let Some(args) = params.get("arguments") {
-            if let Some(session_id) = args.get("session_id").and_then(|v| v.as_str()) {
+            if let Some(interaction_id) = args.get("interaction_id").and_then(|v| v.as_str()) {
                 detail.push_str(&format!(
                     " {}={}",
-                    "session".dimmed(),
-                    format!("\"{}\"", session_id).yellow()
+                    "interaction".dimmed(),
+                    format!("\"{}\"", interaction_id).yellow()
                 ));
             }
             if let Some(msg) = args.get("message").and_then(|v| v.as_str()) {
@@ -152,7 +145,6 @@ impl McpServer {
             tool_service,
             model,
             system_prompt,
-            sessions: Mutex::new(HashMap::new()),
             notification_tx,
         }
     }
@@ -162,7 +154,7 @@ impl McpServer {
         crate::log_event(&format!(
             "MCP HTTP server starting on {} ({} enable multi-turn conversations)",
             format!("http://0.0.0.0:{}", port).cyan(),
-            "session IDs".cyan()
+            "interaction IDs".cyan()
         ));
 
         let app = Router::new()
@@ -181,7 +173,7 @@ impl McpServer {
     pub async fn run_stdio(self: Arc<Self>) -> Result<()> {
         crate::log_event(&format!(
             "MCP server starting ({} enable multi-turn conversations)",
-            "session IDs".cyan()
+            "interaction IDs".cyan()
         ));
         let (tx, mut rx) = mpsc::unbounded_channel::<String>();
 
@@ -227,11 +219,11 @@ impl McpServer {
                             detail.push_str(&format!(" {}", name.purple()));
                         }
                         if let Some(args) = params.get("arguments") {
-                            if let Some(session_id) = args.get("session_id").and_then(|v| v.as_str()) {
+                            if let Some(interaction_id) = args.get("interaction_id").and_then(|v| v.as_str()) {
                                 detail.push_str(&format!(
                                     " {}={}",
-                                    "session".dimmed(),
-                                    format!("\"{}\"", session_id).yellow()
+                                    "interaction".dimmed(),
+                                    format!("\"{}\"", interaction_id).yellow()
                                 ));
                             }
                             if let Some(msg) = args.get("message").and_then(|v| v.as_str()) {
@@ -307,11 +299,11 @@ impl McpServer {
                     let mut detail = String::new();
                     let mut resp_body = String::new();
                     if let Some(res) = &response.result {
-                        if let Some(session_id) = res.get("session_id").and_then(|v| v.as_str()) {
+                        if let Some(interaction_id) = res.get("interaction_id").and_then(|v| v.as_str()) {
                             detail.push_str(&format!(
                                 " {}={}",
-                                "session".dimmed(),
-                                format!("\"{}\"", session_id).yellow()
+                                "interaction".dimmed(),
+                                format!("\"{}\"", interaction_id).yellow()
                             ));
                         }
                         if let Some(content) = res.get("content").and_then(|v| v.as_array())
@@ -427,25 +419,12 @@ impl McpServer {
                                 "type": "string",
                                 "description": "The message to send to clemini"
                             },
-                            "session_id": {
+                            "interaction_id": {
                                 "type": "string",
-                                "description": "Optional session ID for multi-turn conversation"
+                                "description": "Optional interaction ID for multi-turn conversation"
                             }
                         },
                         "required": ["message"]
-                    }
-                },
-                {
-                    "name": "clemini_reset",
-                    "description": "Reset clemini session state",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "session_id": {
-                                "type": "string",
-                                "description": "Optional session ID to reset"
-                            }
-                        }
                     }
                 },
                 {
@@ -476,7 +455,6 @@ impl McpServer {
 
         match name {
             "clemini_chat" => self.call_clemini_chat(arguments, tx).await,
-            "clemini_reset" => self.call_clemini_reset(arguments).await,
             "clemini_rebuild" => self.call_clemini_rebuild(arguments).await,
             _ => Err(anyhow!("Unknown tool: {}", name)),
         }
@@ -534,16 +512,10 @@ impl McpServer {
             .get("message")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("Missing message"))?;
-        let session_id = arguments
-            .get("session_id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("default")
-            .to_string();
-
-        let mut sessions = self.sessions.lock().await;
-        let session = sessions.entry(session_id.clone()).or_insert(McpSession {
-            last_interaction_id: None,
-        });
+        let interaction_id = arguments
+            .get("interaction_id")
+            .or_else(|| arguments.get("session_id")) // Backwards compat
+            .and_then(|v| v.as_str());
 
         let tx_clone = tx.clone();
         let progress_fn = Arc::new(move |p: InteractionProgress| {
@@ -561,15 +533,13 @@ impl McpServer {
             &self.client,
             &self.tool_service,
             message,
-            session.last_interaction_id.as_deref(),
+            interaction_id,
             &self.model,
             false,
             Some(progress_fn),
             &self.system_prompt,
         )
         .await?;
-
-        session.last_interaction_id = result.id.clone();
 
         Ok(json!({
             "content": [
@@ -579,27 +549,7 @@ impl McpServer {
                 }
             ],
             "tool_calls": result.tool_calls,
-            "session_id": session_id,
-            "isError": false
-        }))
-    }
-
-    async fn call_clemini_reset(&self, arguments: &Value) -> Result<Value> {
-        let session_id = arguments
-            .get("session_id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("default")
-            .to_string();
-        let mut sessions = self.sessions.lock().await;
-        sessions.remove(&session_id);
-
-        Ok(json!({
-            "content": [
-                {
-                    "type": "text",
-                    "text": format!("Session {} reset.", session_id)
-                }
-            ],
+            "interaction_id": result.id,
             "isError": false
         }))
     }

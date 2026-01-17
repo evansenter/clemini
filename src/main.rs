@@ -28,9 +28,9 @@ const CONTEXT_WINDOW_LIMIT: u32 = 1_000_000;
 /// Initialize tracing for structured JSON logs only.
 /// Human-readable logs go through log_event() instead.
 pub fn init_logging() {
-    let log_dir = dirs::data_local_dir()
+    let log_dir = dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("clemini/logs");
+        .join(".clemini/logs");
 
     let _ = std::fs::create_dir_all(&log_dir);
 
@@ -66,9 +66,9 @@ pub fn log_event(message: &str) {
     let rendered = SKIN.term_text(message).to_string();
 
     // Write to the stable log location: clemini.log.YYYY-MM-DD
-    let log_dir = dirs::data_local_dir()
+    let log_dir = dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("clemini/logs");
+        .join(".clemini/logs");
     let _ = std::fs::create_dir_all(&log_dir);
 
     let today = chrono::Local::now().format("%Y-%m-%d");
@@ -101,7 +101,9 @@ const SYSTEM_PROMPT: &str = r#"You are clemini, a coding assistant. Be concise. 
 
 ## Workflow
 1. **Understand** - Read files before editing. Never guess at contents.
-   - Given an issue/ticket number? Fetch it first: `gh issue view <number>`
+   - See `#N` or `issue N`? Fetch it: `gh issue view N`
+   - See `PR #N` or pull request reference? Fetch it: `gh pr view N`
+   - Always look up references you don't already know about
 2. **Plan** - For complex tasks, briefly state your approach before implementing.
 3. **Execute** - Make changes. Output narration BEFORE each tool call.
 4. **Verify** - Run tests/checks. Compilation passing ≠ working code.
@@ -115,9 +117,9 @@ const SYSTEM_PROMPT: &str = r#"You are clemini, a coding assistant. Be concise. 
 This is NOT optional. Users need to follow your thought process. One line per step, output text BEFORE calling tools.
 
 ## Tools
-- `read_file` - Read files. **ALWAYS use `limit: 100` for first read.** If `truncated: true`, continue with `offset: 101, limit: 100`. Never read entire large files at once.
-- `edit` - Surgical string replacement. Use `replace_all: true` for renaming across a file.
-- `write_file` - Create new files or completely overwrite existing ones.
+- `read_file(file_path, offset?, limit?)` - Read files. Use `limit: 100` for first read. If `truncated: true`, continue with `offset`.
+- `edit(file_path, old_string, new_string, replace_all?)` - Surgical string replacement. Params are TOP-LEVEL, not nested in operations.
+- `write_file(file_path, contents)` - Create new files or completely overwrite existing ones.
 - `glob` - Find files by pattern: `**/*.rs`, `src/**/*.ts`
 - `grep` - Search file contents. **Always prefer this over `bash grep`.** Use `context: N` for surrounding lines.
 - `bash` - Shell commands: git, builds, tests. For GitHub, use `gh`: `gh issue view 34`, `gh pr view`.
