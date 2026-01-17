@@ -49,16 +49,10 @@ pub struct McpServer {
     notification_tx: broadcast::Sender<String>,
 }
 
-#[instrument(skip(server, request))]
-async fn handle_post(
-    State(server): State<Arc<McpServer>>,
-    Json(request): Json<JsonRpcRequest>,
-) -> Json<JsonRpcResponse> {
+fn format_request_log(method: &str, params: &Option<Value>) -> (String, String) {
     let mut detail = String::new();
     let mut msg_body = String::new();
-    if request.method == "tools/call"
-        && let Some(params) = &request.params
-    {
+    if method == "tools/call" && let Some(params) = params {
         if let Some(name) = params.get("name").and_then(|v| v.as_str()) {
             detail.push_str(&format!(" {}", name.purple()));
         }
@@ -77,6 +71,15 @@ async fn handle_post(
             }
         }
     }
+    (detail, msg_body)
+}
+
+#[instrument(skip(server, request))]
+async fn handle_post(
+    State(server): State<Arc<McpServer>>,
+    Json(request): Json<JsonRpcRequest>,
+) -> Json<JsonRpcResponse> {
+    let (detail, msg_body) = format_request_log(&request.method, &request.params);
     crate::log_event(&format!(
         "{} {}{}{}",
         "IN".green(),
@@ -210,29 +213,7 @@ impl McpServer {
 
             let request: JsonRpcRequest = match serde_json::from_str::<JsonRpcRequest>(&line) {
                 Ok(req) => {
-                    let mut detail = String::new();
-                    let mut msg_body = String::new();
-                    if req.method == "tools/call"
-                        && let Some(params) = &req.params
-                    {
-                        if let Some(name) = params.get("name").and_then(|v| v.as_str()) {
-                            detail.push_str(&format!(" {}", name.purple()));
-                        }
-                        if let Some(args) = params.get("arguments") {
-                            if let Some(interaction_id) = args.get("interaction_id").and_then(|v| v.as_str()) {
-                                detail.push_str(&format!(
-                                    " {}={}",
-                                    "interaction".dimmed(),
-                                    format!("\"{}\"", interaction_id).yellow()
-                                ));
-                            }
-                            if let Some(msg) = args.get("message").and_then(|v| v.as_str()) {
-                                for line in msg.lines() {
-                                    msg_body.push_str(&format!("\n> {}", line));
-                                }
-                            }
-                        }
-                    }
+                    let (detail, msg_body) = format_request_log(&req.method, &req.params);
                     crate::log_event(&format!(
                         "{} {}{}{}",
                         "IN".green(),
