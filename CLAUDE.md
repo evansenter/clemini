@@ -52,6 +52,10 @@ Debugging: `LOUD_WIRE=1` logs all HTTP requests/responses.
 - Model: `gemini-3-flash-preview`
 - Config: `~/.clemini/config.toml` (optional)
 
+## Documentation
+
+- [docs/TEXT_RENDERING.md](docs/TEXT_RENDERING.md) - Output formatting guidelines (colors, truncation, spacing)
+
 ## Conventions
 
 - Rust 2024 edition (let chains, etc.)
