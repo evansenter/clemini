@@ -2,27 +2,19 @@ name: Claude Code Review
 
 on:
   pull_request:
-    types: [opened, synchronize, ready_for_review, reopened]
-    # Optional: Only run on specific file changes
-    # paths:
-    #   - "src/**/*.ts"
-    #   - "src/**/*.tsx"
-    #   - "src/**/*.js"
-    #   - "src/**/*.jsx"
+    types: [opened, synchronize]
+
+env:
+  # Centralized prompt - edit in dotfiles repo, all repos pick up changes
+  PROMPT_URL: https://raw.githubusercontent.com/evansenter/dotfiles/main/home/.claude/contrib/prompts/claude-review.md
 
 jobs:
   claude-review:
-    # Optional: Filter by PR author
-    # if: |
-    #   github.event.pull_request.user.login == 'external-contributor' ||
-    #   github.event.pull_request.user.login == 'new-developer' ||
-    #   github.event.pull_request.author_association == 'FIRST_TIME_CONTRIBUTOR'
-
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      pull-requests: read
-      issues: read
+      pull-requests: write  # Needed to post comments
+      issues: write         # Read linked issues, optionally comment if PR incomplete
       id-token: write
 
     steps:
@@ -31,14 +23,32 @@ jobs:
         with:
           fetch-depth: 1
 
+      - name: Fetch review prompt
+        id: prompt
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if curl -sfL "$PROMPT_URL" > /tmp/review-prompt.md && [ -s /tmp/review-prompt.md ]; then
+            echo "Fetched review prompt ($(wc -l < /tmp/review-prompt.md) lines)"
+            echo "use_file=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::Failed to fetch centralized prompt from $PROMPT_URL - using fallback"
+            echo "use_file=false" >> "$GITHUB_OUTPUT"
+            # Post warning comment on PR
+            gh pr comment ${{ github.event.pull_request.number }} --body "⚠️ **Claude Review Warning**: Could not fetch centralized review prompt from \`$PROMPT_URL\`. Using fallback inline prompt. This may result in less thorough reviews."
+          fi
+
       - name: Run Claude Code Review
         id: claude-review
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
-          plugins: 'code-review@claude-code-plugins'
-          prompt: '/code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }}'
-          # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
-          # or https://code.claude.com/docs/en/cli-reference for available options
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR_NUMBER: ${{ github.event.pull_request.number }}
 
+            ${{ steps.prompt.outputs.use_file == 'true' && 'First, read the review instructions from /tmp/review-prompt.md using your Read tool. Then follow those instructions to review this PR.' || 'Review this PR for code quality, bugs, security issues, and adherence to project conventions (check CLAUDE.md). Check for previous "Feedback Addressed" comments to avoid re-raising resolved issues. Be strict: REQUEST_CHANGES for any issues found, only APPROVE if genuinely ready to merge. Post your review using gh pr comment. Start your comment with: > **Prompt:** Fallback (centralized prompt fetch failed)' }}
+
+            Use the REPO and PR_NUMBER variables provided above.
+          # Tools required by the centralized prompt (see contrib/prompts/claude-review.md)
+          claude_args: '--model opus --allowed-tools "Read,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*),Bash(gh issue view:*),Bash(gh issue comment:*),Bash(gh api:*)"'

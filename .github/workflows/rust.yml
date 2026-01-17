@@ -18,8 +18,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Install mold linker
+        run: sudo apt-get update && sudo apt-get install -y mold
       - name: Check workspace
-        run: cargo check --all-targets
+        run: cargo check --workspace --all-targets --all-features
 
   test:
     name: Test Suite
@@ -27,9 +29,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@cargo-nextest
       - uses: Swatinem/rust-cache@v2
-      - name: Run tests
-        run: cargo test --workspace
+      - name: Install mold linker
+        run: sudo apt-get update && sudo apt-get install -y mold
+      - name: Run unit tests
+        run: cargo nextest run --workspace
+      # Note: No doctests - clemini is a binary crate without a library target
 
   fmt:
     name: Format
@@ -51,8 +57,24 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+      - name: Install mold linker
+        run: sudo apt-get update && sudo apt-get install -y mold
       - name: Run clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+  doc:
+    name: Documentation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install mold linker
+        run: sudo apt-get update && sudo apt-get install -y mold
+      - name: Check documentation
+        run: cargo doc --workspace --no-deps --document-private-items
+        env:
+          RUSTDOCFLAGS: -D warnings
 
   msrv:
     name: MSRV Check
@@ -61,5 +83,28 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.88.0
       - uses: Swatinem/rust-cache@v2
-      - name: Check with MSRV
-        run: cargo check
+      - name: Install mold linker
+        run: sudo apt-get update && sudo apt-get install -y mold
+      - name: Check workspace with MSRV
+        run: cargo check --workspace
+
+  coverage:
+    name: Code Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Install mold linker
+        run: sudo apt-get update && sudo apt-get install -y mold
+      - name: Generate coverage
+        run: cargo llvm-cov --workspace --lcov --output-path lcov.info
+      - uses: codecov/codecov-action@v4
+        with:
+          files: lcov.info
+          fail_ci_if_error: false
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
