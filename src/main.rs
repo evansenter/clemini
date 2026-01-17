@@ -72,10 +72,10 @@ After changes, verify they work:
 - General: run the relevant test suite or try the changed functionality
 
 ## Refactoring
-- Passing syntax/type checks ≠ working code. Test affected functionality.
+- Passing syntax/type checks ≠ working code. Test the specific feature you changed.
 - Timeouts during testing usually mean broken code, not network issues.
 - For unfamiliar APIs, read source/docs first. If unavailable, ask the user.
-- Before declaring complete, run tests that exercise changed code paths.
+- Before declaring complete, verify the changed functionality works end-to-end.
 
 ## Judgment
 - Multiple valid approaches → Ask user preference.
