@@ -105,7 +105,9 @@ impl CallableFunction for BashTool {
 
         // Safety check
         if let Some(pattern) = Self::is_blocked(command) {
-            eprintln!("[bash BLOCKED: {command}] (matches pattern: {pattern})");
+            let msg = format!("[bash BLOCKED: {command}] (matches pattern: {pattern})");
+            eprintln!("{}", msg);
+            crate::log_event(&msg);
             return Ok(json!({
                 "error": format!("Command blocked: matches pattern '{pattern}'"),
                 "command": command
@@ -113,7 +115,9 @@ impl CallableFunction for BashTool {
         }
 
         if Self::needs_caution(command) {
-            eprintln!("[bash CAUTION: {command}]");
+            let msg = format!("[bash CAUTION: {command}]");
+            eprintln!("{}", msg);
+            crate::log_event(&msg);
         }
 
         // Logging is handled by main.rs event loop with timing info
@@ -153,7 +157,9 @@ impl CallableFunction for BashTool {
                     line = stdout_reader.next_line(), if !stdout_done => {
                         match line {
                             Ok(Some(line)) => {
-                                eprintln!("{}", line.dimmed());
+                                let dimmed = line.dimmed();
+                                eprintln!("{}", dimmed);
+                                crate::log_event(&format!("{}", dimmed));
                                 captured_stdout.push_str(&line);
                                 captured_stdout.push('\n');
                             }
@@ -165,7 +171,9 @@ impl CallableFunction for BashTool {
                     line = stderr_reader.next_line(), if !stderr_done => {
                         match line {
                             Ok(Some(line)) => {
-                                eprintln!("{}", line.dimmed());
+                                let dimmed = line.dimmed();
+                                eprintln!("{}", dimmed);
+                                crate::log_event(&format!("{}", dimmed));
                                 captured_stderr.push_str(&line);
                                 captured_stderr.push('\n');
                             }

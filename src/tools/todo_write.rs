@@ -57,7 +57,9 @@ impl CallableFunction for TodoWriteTool {
                 _ => ("○".dimmed(), content.dimmed()),
             };
 
-            eprintln!("  {} {}", icon, colored_content);
+            let line = format!("  {} {}", icon, colored_content);
+            eprintln!("{}", line);
+            crate::log_event(&line);
         }
         eprintln!();
 
