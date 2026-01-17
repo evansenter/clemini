@@ -89,7 +89,6 @@ After changes, verify they work:
 - Scope creep (adding unrequested features)
 - Long explanations when action is needed
 - Declaring success without functional verification
-- Running `cargo run` or spawning clemini to test yourself (causes timeouts)
 
 ## Self-Improvement
 When you discover patterns that would help future tasks:
