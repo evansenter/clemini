@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use termimad::MadSkin;
 
 mod tools;
+mod mcp;
 
 use tools::CleminiToolService;
 
@@ -61,6 +62,8 @@ For tasks with 3+ steps, use `todo_write` to:
 - Making changes without verifying they work
 - Long explanations when action is needed
 - Guessing when you could ask
+- Adding features beyond what was asked (scope creep)
+- Using crates without adding them to Cargo.toml first
 
 ## Self-Improvement
 When you encounter recurring issues or discover better patterns:
@@ -116,6 +119,18 @@ struct Args {
     /// Stream raw text output (non-interactive mode)
     #[arg(long)]
     stream: bool,
+
+    /// Start as an MCP server (stdio mode)
+    #[arg(long)]
+    mcp_server: bool,
+
+    /// Use HTTP transport for MCP server (requires --mcp-server)
+    #[arg(long)]
+    http: bool,
+
+    /// HTTP port for MCP server (requires --http)
+    #[arg(long, default_value_t = 8080)]
+    port: u16,
 }
 
 #[tokio::main]
@@ -135,6 +150,16 @@ async fn main() -> Result<()> {
 
     let cwd = std::fs::canonicalize(&args.cwd)?;
     let tool_service = Arc::new(CleminiToolService::new(cwd.clone(), bash_timeout));
+
+    // MCP server mode - handle early before consuming stdin or printing banner
+    if args.mcp_server {
+        if args.http {
+            anyhow::bail!("HTTP transport not yet implemented");
+        }
+        let mcp_server = mcp::McpServer::new(client, tool_service, model);
+        mcp_server.run_stdio().await?;
+        return Ok(());
+    }
 
     eprintln!(
         "{} v{} | {} | {}",
@@ -358,7 +383,7 @@ async fn run_repl(
                         last_interaction_id = result.id;
                         last_estimated_context_size = result.context_size;
                         total_interactions += 1;
-                        total_tool_calls += result.tool_calls;
+                        total_tool_calls += result.tool_calls.len() as u32;
                         total_session_tokens += result.total_tokens;
                     }
                     Err(e) => {
@@ -508,7 +533,7 @@ fn flush_response(response_text: &mut String, skin: &MadSkin, stream_output: boo
                 if len == 0 {
                     visual_lines += 1;
                 } else {
-                    visual_lines += (len as u16 + width - 1) / width;
+                    visual_lines += (len as u16).div_ceil(width);
                 }
             }
             for i in 0..visual_lines {
@@ -528,11 +553,13 @@ fn flush_response(response_text: &mut String, skin: &MadSkin, stream_output: boo
     }
 }
 
-struct InteractionResult {
-    id: Option<String>,
-    context_size: u32,
-    total_tokens: u32,
-    tool_calls: u32,
+#[derive(Debug, Clone)]
+pub struct InteractionResult {
+    pub id: Option<String>,
+    pub response: String,
+    pub context_size: u32,
+    pub total_tokens: u32,
+    pub tool_calls: Vec<String>,
 }
 
 fn format_tool_args(args: &Value) -> String {
@@ -565,7 +592,7 @@ fn format_tool_args(args: &Value) -> String {
 }
 
 #[allow(clippy::too_many_lines)]
-async fn run_interaction(
+pub async fn run_interaction(
     client: &Client,
     tool_service: &Arc<CleminiToolService>,
     input: &str,
@@ -594,8 +621,9 @@ async fn run_interaction(
     let mut last_id: Option<String> = None;
     let mut current_context_size: u32 = 0;
     let mut total_tokens: u32 = 0;
-    let mut tool_calls: u32 = 0;
+    let mut tool_calls: Vec<String> = Vec::new();
     let mut response_text = String::new();
+    let mut full_response = String::new();
     let skin = MadSkin::default();
     let mut spinner: Option<Spinner> = None;
 
@@ -609,6 +637,7 @@ async fn run_interaction(
                             io::stdout().flush()?;
                         }
                         response_text.push_str(text);
+                        full_response.push_str(text);
                     }
                 }
                 AutoFunctionStreamChunk::ExecutingFunctions(resp) => {
@@ -641,7 +670,7 @@ async fn run_interaction(
                     // Note: This is a crude estimate (approx. 4 chars per token).
                     let mut tokens_added: u32 = 0;
                     for result in results {
-                        tool_calls += 1;
+                        tool_calls.push(result.name.clone());
                         let result_str = result.result.to_string();
                         tokens_added += u32::try_from(result_str.len() / 4).unwrap_or(u32::MAX); // ~4 chars per token
                     }
@@ -720,6 +749,7 @@ async fn run_interaction(
 
     Ok(InteractionResult {
         id: last_id,
+        response: full_response,
         context_size: current_context_size,
         total_tokens,
         tool_calls,

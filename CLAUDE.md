@@ -2,6 +2,13 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Important Distinction
+
+- **This file (CLAUDE.md)** guides Claude Code when working on clemini's codebase
+- **SYSTEM_PROMPT in src/main.rs** guides clemini itself (what Gemini sees)
+
+When updating clemini's behavior, modify `SYSTEM_PROMPT` in main.rs. This file is for codebase conventions and development process.
+
 ## Project Overview
 
 Clemini is a Gemini-powered coding CLI built with genai-rs. It's designed to be self-improving - we use clemini to build clemini.
@@ -19,7 +26,7 @@ cargo fmt            # Format
 
 ## Architecture
 
-The CLI has two modes: single-prompt (`-p "prompt"`) and interactive REPL.
+The CLI has three modes: single-prompt (`-p "prompt"`), interactive REPL, and MCP server (`--mcp-server`).
 
 **Streaming with auto-functions**: Uses `create_stream_with_auto_functions()` which handles the tool execution loop automatically. The stream emits `ExecutingFunctions` before tool calls and `FunctionResults` after, with timing/token info.
 
@@ -50,3 +57,9 @@ Debugging: `LOUD_WIRE=1` logs all HTTP requests/responses.
 ## Development Process
 
 **Test features yourself before considering them done** - Run clemini and verify the feature works before reporting completion.
+
+**Always verify compilation** - After making changes, run `cargo check` or `cargo clippy -- -D warnings` before reporting completion. Never leave code in a non-compiling state.
+
+**Minimal scope** - Only implement what was asked. Don't add "nice to have" features beyond the request. For example, if asked for a stdio server, don't also add HTTP support.
+
+**Complete dependency management** - When using a new crate, ensure it's added to Cargo.toml with the proper features before writing code that depends on it. Never reference crates that aren't in dependencies.

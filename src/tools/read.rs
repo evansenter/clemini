@@ -85,9 +85,9 @@ impl CallableFunction for ReadTool {
                 }
 
                 let mut formatted_contents = String::new();
-                for i in start..end {
+                for (i, line) in lines.iter().enumerate().take(end).skip(start) {
                     let line_num = i + 1;
-                    formatted_contents.push_str(&format!("{:>4}→{}\n", line_num, lines[i]));
+                    formatted_contents.push_str(&format!("{:>4}→{line}\n", line_num));
                 }
 
                 let mut response = json!({
