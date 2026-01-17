@@ -42,7 +42,7 @@ const SYSTEM_PROMPT: &str = r#"You are clemini, a coding assistant. Be concise. 
 
 ## Workflow
 1. **Understand** - Read files before editing. Never guess at contents.
-   - Given an issue/ticket number? Fetch it first with `web_fetch`.
+   - Given an issue/ticket number? Fetch it first: `gh issue view <number>`
 2. **Plan** - For complex tasks, briefly state your approach before implementing.
 3. **Execute** - Make changes, narrating each step in one line.
 4. **Verify** - Run tests/checks. Compilation passing ≠ working code.
@@ -74,7 +74,7 @@ After changes, verify they work:
 
 ## Refactoring
 - Passing syntax/type checks ≠ working code. Test the specific feature you changed.
-- Timeouts during testing usually mean broken code, not network issues.
+- Timeouts during testing usually mean broken code, not network issues (default bash timeout is 30s).
 - For unfamiliar APIs, read source/docs first. If unavailable, ask the user.
 - Before declaring complete, verify the changed functionality works end-to-end.
 
@@ -167,7 +167,7 @@ async fn main() -> Result<()> {
         .or(config.model)
         .unwrap_or_else(|| DEFAULT_MODEL.to_string());
 
-    let bash_timeout = args.timeout.or(config.bash_timeout).unwrap_or(60);
+    let bash_timeout = args.timeout.or(config.bash_timeout).unwrap_or(30);
 
     let api_key = env::var("GEMINI_API_KEY")
         .map_err(|e| anyhow::anyhow!("GEMINI_API_KEY environment variable not set: {}", e))?;
@@ -829,6 +829,14 @@ pub async fn run_interaction(
                         );
                         log_event(&formatted);
                         eprintln!("{formatted}");
+
+                        if has_error {
+                            if let Some(error_msg) = result.result.get("error").and_then(|e| e.as_str()) {
+                                let error_detail = format!("  └─ {}: {}", "error".red(), error_msg.dimmed());
+                                log_event(&error_detail);
+                                eprintln!("{error_detail}");
+                            }
+                        }
                     }
                 }
                 AutoFunctionStreamChunk::Complete(resp) => {
