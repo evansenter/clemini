@@ -62,10 +62,23 @@ static CANCELLED: AtomicBool = AtomicBool::new(false);
 /// Log to human-readable file with ANSI colors preserved
 /// Uses same naming as rolling::daily: clemini.log.YYYY-MM-DD
 pub fn log_event(message: &str) {
+    log_event_internal(message, true)
+}
+
+/// Log without markdown rendering (for protocol messages with long content)
+pub fn log_event_raw(message: &str) {
+    log_event_internal(message, false)
+}
+
+fn log_event_internal(message: &str, render_markdown: bool) {
     colored::control::set_override(true);
 
-    // Render markdown to ANSI string
-    let rendered = SKIN.term_text(message).to_string();
+    // Optionally render markdown (can wrap long lines)
+    let rendered = if render_markdown {
+        SKIN.term_text(message).to_string()
+    } else {
+        message.to_string()
+    };
 
     // Write to the stable log location: clemini.log.YYYY-MM-DD
     let log_dir = dirs::home_dir()

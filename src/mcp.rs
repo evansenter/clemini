@@ -301,7 +301,8 @@ impl McpServer {
                     }
                     if let Ok(resp_str) = serde_json::to_string(&response) {
                         crate::log_event("");
-                        crate::log_event(&format!(
+                        // Use log_event_raw to avoid markdown wrapping long interaction IDs
+                        crate::log_event_raw(&format!(
                             "{} {} ({}){}",
                             "OUT".cyan(),
                             request_clone.method.bold(),
