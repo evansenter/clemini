@@ -9,6 +9,13 @@ impl WebFetchTool {
     pub fn new() -> Self {
         Self {}
     }
+
+    fn parse_args(&self, args: Value) -> Result<String, FunctionError> {
+        args.get("url")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| FunctionError::ArgumentMismatch("Missing url".to_string()))
+    }
 }
 
 #[async_trait]
@@ -32,17 +39,14 @@ impl CallableFunction for WebFetchTool {
 
     #[instrument(skip(self, args))]
     async fn call(&self, args: Value) -> Result<Value, FunctionError> {
-        let url = args
-            .get("url")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| FunctionError::ArgumentMismatch("Missing url".to_string()))?;
+        let url = self.parse_args(args)?;
 
         let client = match super::create_http_client() {
             Ok(c) => c,
             Err(e) => return Ok(json!({ "error": e })),
         };
 
-        match client.get(url).send().await {
+        match client.get(&url).send().await {
             Ok(resp) => {
                 let status = resp.status();
                 if !status.is_success() {
@@ -71,6 +75,73 @@ impl CallableFunction for WebFetchTool {
                 }
             }
             Err(e) => Ok(json!({ "error": format!("Network error: {}", e) })),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use genai_rs::CallableFunction;
+    use serde_json::json;
+
+    #[test]
+    fn test_declaration() {
+        let tool = WebFetchTool::new();
+        let decl = tool.declaration();
+
+        assert_eq!(decl.name(), "web_fetch");
+        assert_eq!(
+            decl.description(),
+            "Fetch the content of a web page from a URL."
+        );
+
+        let params = decl.parameters();
+        let params_json = serde_json::to_value(params).unwrap();
+        assert_eq!(params_json["type"], "object");
+        assert_eq!(params.required(), vec!["url".to_string()]);
+
+        let properties = params.properties();
+        assert!(properties.get("url").is_some());
+        assert_eq!(properties["url"]["type"], "string");
+    }
+
+    #[test]
+    fn test_parse_args_success() {
+        let tool = WebFetchTool::new();
+        let args = json!({
+            "url": "https://example.com"
+        });
+
+        let url = tool.parse_args(args).unwrap();
+        assert_eq!(url, "https://example.com");
+    }
+
+    #[test]
+    fn test_parse_args_missing_url() {
+        let tool = WebFetchTool::new();
+        let args = json!({});
+
+        let result = tool.parse_args(args);
+        assert!(result.is_err());
+        match result {
+            Err(FunctionError::ArgumentMismatch(msg)) => assert_eq!(msg, "Missing url"),
+            _ => panic!("Expected ArgumentMismatch error"),
+        }
+    }
+
+    #[test]
+    fn test_parse_args_invalid_url_type() {
+        let tool = WebFetchTool::new();
+        let args = json!({
+            "url": 123
+        });
+
+        let result = tool.parse_args(args);
+        assert!(result.is_err());
+        match result {
+            Err(FunctionError::ArgumentMismatch(msg)) => assert_eq!(msg, "Missing url"),
+            _ => panic!("Expected ArgumentMismatch error"),
         }
     }
 }
