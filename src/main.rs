@@ -532,6 +532,15 @@ enum AppEvent {
     ContextWarning(String),
 }
 
+/// Format the tool completion duration for display.
+fn format_tool_duration(duration_ms: u64) -> String {
+    if duration_ms < 1000 {
+        format!("{}ms", duration_ms)
+    } else {
+        format!("{:.1}s", duration_ms as f64 / 1000.0)
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_repl(
     client: &Client,
@@ -970,11 +979,7 @@ async fn run_tui_event_loop(
                     }
                     AppEvent::ToolCompleted { name, duration_ms } => {
                         // Tool completed - show duration
-                        let duration_str = if duration_ms < 1000 {
-                            format!("{}ms", duration_ms)
-                        } else {
-                            format!("{:.1}s", duration_ms as f64 / 1000.0)
-                        };
+                        let duration_str = format_tool_duration(duration_ms);
                         let msg = format!(
                             "  {} {} {}",
                             "└─".dimmed(),
@@ -1302,5 +1307,32 @@ mod event_handling_tests {
         assert_eq!(app.chat_lines()[4], "[grep] 0.01s, ~50 tok");
         assert_eq!(app.chat_lines()[5], "");
         assert_eq!(app.chat_lines()[6], "Found it in src/main.rs");
+    }
+
+    // =========================================
+    // Duration formatting tests
+    // =========================================
+
+    #[test]
+    fn test_format_tool_duration_milliseconds() {
+        assert_eq!(format_tool_duration(0), "0ms");
+        assert_eq!(format_tool_duration(50), "50ms");
+        assert_eq!(format_tool_duration(999), "999ms");
+    }
+
+    #[test]
+    fn test_format_tool_duration_seconds() {
+        assert_eq!(format_tool_duration(1000), "1.0s");
+        assert_eq!(format_tool_duration(1500), "1.5s");
+        assert_eq!(format_tool_duration(2500), "2.5s");
+        assert_eq!(format_tool_duration(10000), "10.0s");
+    }
+
+    #[test]
+    fn test_format_tool_duration_boundary() {
+        // Just under 1 second
+        assert_eq!(format_tool_duration(999), "999ms");
+        // Exactly 1 second
+        assert_eq!(format_tool_duration(1000), "1.0s");
     }
 }

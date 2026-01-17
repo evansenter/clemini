@@ -86,6 +86,32 @@ fn format_status(response: &JsonRpcResponse) -> colored::ColoredString {
     }
 }
 
+/// Create a progress notification for a tool starting execution.
+fn create_tool_executing_notification(name: &str, args: &Value) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/progress",
+        "params": {
+            "tool": name,
+            "status": "executing",
+            "args": args
+        }
+    })
+}
+
+/// Create a progress notification for a completed tool execution.
+fn create_tool_result_notification(name: &str, duration_ms: u64) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/progress",
+        "params": {
+            "tool": name,
+            "status": "completed",
+            "duration_ms": duration_ms
+        }
+    })
+}
+
 #[instrument(skip(server, request))]
 async fn handle_post(
     State(server): State<Arc<McpServer>>,
@@ -546,15 +572,7 @@ impl McpServer {
                             ));
 
                             // Send MCP notification
-                            let notif = json!({
-                                "jsonrpc": "2.0",
-                                "method": "notifications/progress",
-                                "params": {
-                                    "tool": call.name,
-                                    "status": "executing",
-                                    "args": call.args
-                                }
-                            });
+                            let notif = create_tool_executing_notification(&call.name, &call.args);
                             if let Ok(s) = serde_json::to_string(&notif) {
                                 let _ = tx_clone.send(format!("{}\n", s));
                             }
@@ -576,15 +594,10 @@ impl McpServer {
                         }
 
                         // Send MCP notification
-                        json!({
-                            "jsonrpc": "2.0",
-                            "method": "notifications/progress",
-                            "params": {
-                                "tool": result.name,
-                                "status": "completed",
-                                "duration_ms": result.duration.as_millis() as u64
-                            }
-                        })
+                        create_tool_result_notification(
+                            &result.name,
+                            result.duration.as_millis() as u64,
+                        )
                     }
                     _ => continue,
                 };
@@ -781,5 +794,51 @@ mod tests {
         let resp = server.handle_request(req, tx, ct).await.unwrap();
         assert!(resp.result.is_some());
         assert!(resp.error.is_none());
+    }
+
+    #[test]
+    fn test_create_tool_executing_notification() {
+        let args = json!({"file_path": "test.txt"});
+        let notif = create_tool_executing_notification("read_file", &args);
+
+        assert_eq!(notif["jsonrpc"], "2.0");
+        assert_eq!(notif["method"], "notifications/progress");
+        assert_eq!(notif["params"]["tool"], "read_file");
+        assert_eq!(notif["params"]["status"], "executing");
+        assert_eq!(notif["params"]["args"]["file_path"], "test.txt");
+    }
+
+    #[test]
+    fn test_create_tool_executing_notification_complex_args() {
+        let args = json!({
+            "pattern": "*.rs",
+            "path": "src",
+            "limit": 100
+        });
+        let notif = create_tool_executing_notification("glob", &args);
+
+        assert_eq!(notif["params"]["tool"], "glob");
+        assert_eq!(notif["params"]["args"]["pattern"], "*.rs");
+        assert_eq!(notif["params"]["args"]["path"], "src");
+        assert_eq!(notif["params"]["args"]["limit"], 100);
+    }
+
+    #[test]
+    fn test_create_tool_result_notification() {
+        let notif = create_tool_result_notification("bash", 1500);
+
+        assert_eq!(notif["jsonrpc"], "2.0");
+        assert_eq!(notif["method"], "notifications/progress");
+        assert_eq!(notif["params"]["tool"], "bash");
+        assert_eq!(notif["params"]["status"], "completed");
+        assert_eq!(notif["params"]["duration_ms"], 1500);
+    }
+
+    #[test]
+    fn test_create_tool_result_notification_zero_duration() {
+        let notif = create_tool_result_notification("read_file", 0);
+
+        assert_eq!(notif["params"]["tool"], "read_file");
+        assert_eq!(notif["params"]["duration_ms"], 0);
     }
 }
