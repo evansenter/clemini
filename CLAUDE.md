@@ -38,6 +38,7 @@ The CLI has three modes: single-prompt (`-p "prompt"`), interactive REPL, and MC
 src/
 ├── main.rs          # CLI entry, UI loops (TUI/REPL), MCP server startup
 ├── agent.rs         # Core interaction logic, AgentEvent enum
+├── diff.rs          # Diff formatting for edit tool output
 ├── events.rs        # EventHandler trait, TerminalEventHandler
 ├── mcp.rs           # MCP server implementation
 ├── tui/             # TUI mode (ratatui)
