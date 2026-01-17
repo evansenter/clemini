@@ -41,12 +41,22 @@ impl TodoWriteTool {
             .ok_or_else(|| FunctionError::ArgumentMismatch("Missing todos array".to_string()))?;
 
         let mut todos = Vec::with_capacity(todos_value.len());
+        let mut skipped_empty = 0;
+
         for todo in todos_value {
             let content = todo
                 .get("content")
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
+                .trim()
                 .to_string();
+
+            // Skip items with empty content
+            if content.is_empty() {
+                skipped_empty += 1;
+                continue;
+            }
+
             let status = todo
                 .get("status")
                 .and_then(|v| v.as_str())
@@ -54,6 +64,21 @@ impl TodoWriteTool {
                 .unwrap_or(TodoStatus::Pending);
 
             todos.push(TodoItem { content, status });
+        }
+
+        // Warn if some items were skipped
+        if skipped_empty > 0 {
+            tracing::warn!(
+                "Skipped {} todo item(s) with empty content",
+                skipped_empty
+            );
+        }
+
+        // Error if ALL items were empty
+        if todos.is_empty() && skipped_empty > 0 {
+            return Err(FunctionError::ArgumentMismatch(
+                "All todo items have empty content - provide meaningful task descriptions".to_string(),
+            ));
         }
 
         Ok(todos)
@@ -252,5 +277,57 @@ mod tests {
         let rendered_pending = TodoWriteTool::render_todo(&pending);
         assert!(rendered_pending.contains("○"));
         assert!(rendered_pending.contains("Waiting"));
+    }
+
+    #[test]
+    fn test_parse_args_all_empty_content_errors() {
+        let tool = TodoWriteTool::new();
+        let args = json!({
+            "todos": [
+                { "content": "", "status": "pending" },
+                { "content": "   ", "status": "pending" },
+                { "content": "", "status": "in_progress" }
+            ]
+        });
+
+        let result = tool.parse_args(args);
+        assert!(result.is_err());
+        match result {
+            Err(FunctionError::ArgumentMismatch(msg)) => {
+                assert!(msg.contains("empty content"));
+            }
+            _ => panic!("Expected ArgumentMismatch error"),
+        }
+    }
+
+    #[test]
+    fn test_parse_args_skips_empty_content() {
+        let tool = TodoWriteTool::new();
+        let args = json!({
+            "todos": [
+                { "content": "Valid task", "status": "pending" },
+                { "content": "", "status": "pending" },
+                { "content": "Another valid", "status": "completed" }
+            ]
+        });
+
+        let todos = tool.parse_args(args).unwrap();
+        // Should have 2 items, skipping the empty one
+        assert_eq!(todos.len(), 2);
+        assert_eq!(todos[0].content, "Valid task");
+        assert_eq!(todos[1].content, "Another valid");
+    }
+
+    #[test]
+    fn test_parse_args_trims_whitespace() {
+        let tool = TodoWriteTool::new();
+        let args = json!({
+            "todos": [
+                { "content": "  Task with spaces  ", "status": "pending" }
+            ]
+        });
+
+        let todos = tool.parse_args(args).unwrap();
+        assert_eq!(todos[0].content, "Task with spaces");
     }
 }
