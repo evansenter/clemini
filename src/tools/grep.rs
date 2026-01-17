@@ -15,7 +15,10 @@ pub struct GrepTool {
     allowed_paths: Vec<PathBuf>,
 }
 
-use crate::tools::{DEFAULT_EXCLUDES, make_relative, resolve_and_validate_path, validate_path};
+use crate::tools::{
+    DEFAULT_EXCLUDES, error_codes, error_response, make_relative, resolve_and_validate_path,
+    validate_path,
+};
 
 const MAX_LINE_LENGTH: usize = 1000;
 
@@ -242,9 +245,14 @@ impl CallableFunction for GrepTool {
             match resolve_and_validate_path(p, &self.cwd, &self.allowed_paths) {
                 Ok(p) => p,
                 Err(e) => {
-                    return Ok(json!({
-                        "error": format!("Access denied for path '{}': {}. Path must be within allowed paths.", p, e)
-                    }));
+                    return Ok(error_response(
+                        &format!(
+                            "Access denied for path '{}': {}. Path must be within allowed paths.",
+                            p, e
+                        ),
+                        error_codes::ACCESS_DENIED,
+                        json!({"path": p}),
+                    ));
                 }
             }
         } else {
@@ -338,11 +346,14 @@ impl CallableFunction for GrepTool {
         let final_matches = Arc::try_unwrap(matches).unwrap().into_inner().unwrap();
 
         if final_matches.is_empty() {
-            return Ok(json!({
-                "error": format!("No matches found for pattern '{}' in files matching '{}'.", pattern, file_pattern),
-                "pattern": pattern,
-                "file_pattern": file_pattern
-            }));
+            return Ok(error_response(
+                &format!(
+                    "No matches found for pattern '{}' in files matching '{}'",
+                    pattern, file_pattern
+                ),
+                error_codes::NOT_FOUND,
+                json!({"pattern": pattern, "file_pattern": file_pattern}),
+            ));
         }
 
         Ok(json!({
@@ -421,6 +432,8 @@ mod tests {
                 .unwrap()
                 .contains("No matches found")
         );
+        assert_eq!(result["error_code"], error_codes::NOT_FOUND);
+        assert_eq!(result["context"]["pattern"], "nonexistent");
     }
 
     #[tokio::test]

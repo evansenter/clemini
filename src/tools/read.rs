@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use tokio::io::AsyncReadExt;
 use tracing::instrument;
 
-use super::resolve_and_validate_path;
+use super::{error_codes, error_response, resolve_and_validate_path};
 
 pub struct ReadTool {
     cwd: PathBuf,
@@ -60,9 +60,11 @@ impl CallableFunction for ReadTool {
         let path = match resolve_and_validate_path(file_path, &self.cwd, &self.allowed_paths) {
             Ok(p) => p,
             Err(e) => {
-                return Ok(json!({
-                    "error": format!("Access denied: {}. Path must be within allowed paths.", e)
-                }));
+                return Ok(error_response(
+                    &format!("Access denied: {}. Path must be within allowed paths.", e),
+                    error_codes::ACCESS_DENIED,
+                    json!({"path": file_path}),
+                ));
             }
         };
 
@@ -70,9 +72,15 @@ impl CallableFunction for ReadTool {
         let mut file = match tokio::fs::File::open(&path).await {
             Ok(f) => f,
             Err(e) => {
-                return Ok(json!({
-                    "error": format!("Failed to read {}: {}. Ensure the file exists and is not a directory.", path.display(), e)
-                }));
+                return Ok(error_response(
+                    &format!(
+                        "Failed to read {}: {}. Ensure the file exists and is not a directory.",
+                        path.display(),
+                        e
+                    ),
+                    error_codes::IO_ERROR,
+                    json!({"path": path.display().to_string()}),
+                ));
             }
         };
 
@@ -80,19 +88,21 @@ impl CallableFunction for ReadTool {
         let bytes_read = match file.read(&mut buffer).await {
             Ok(n) => n,
             Err(e) => {
-                return Ok(json!({
-                    "error": format!("Failed to read {}: {}", path.display(), e)
-                }));
+                return Ok(error_response(
+                    &format!("Failed to read {}: {}", path.display(), e),
+                    error_codes::IO_ERROR,
+                    json!({"path": path.display().to_string()}),
+                ));
             }
         };
         buffer.truncate(bytes_read);
 
         if is_binary(&buffer) {
-            return Ok(json!({
-                "error": "File appears to be binary. This tool is for reading text files.",
-                "path": path.display().to_string(),
-                "is_binary": true
-            }));
+            return Ok(error_response(
+                "File appears to be binary. This tool is for reading text files.",
+                error_codes::BINARY_FILE,
+                json!({"path": path.display().to_string()}),
+            ));
         }
 
         match tokio::fs::read_to_string(&path).await {
@@ -104,11 +114,14 @@ impl CallableFunction for ReadTool {
                 let end = (start + limit).min(total_lines);
 
                 if start >= total_lines && total_lines > 0 {
-                    return Ok(json!({
-                        "path": path.display().to_string(),
-                        "total_lines": total_lines,
-                        "error": format!("Offset {} is out of bounds (total lines: {})", offset, total_lines)
-                    }));
+                    return Ok(error_response(
+                        &format!(
+                            "Offset {} is out of bounds (total lines: {})",
+                            offset, total_lines
+                        ),
+                        error_codes::INVALID_ARGUMENT,
+                        json!({"path": path.display().to_string(), "offset": offset, "total_lines": total_lines}),
+                    ));
                 }
 
                 let mut formatted_contents = String::new();
@@ -134,9 +147,15 @@ impl CallableFunction for ReadTool {
 
                 Ok(response)
             }
-            Err(e) => Ok(json!({
-                "error": format!("Failed to read {}: {}. Ensure the file exists and is not a directory.", path.display(), e)
-            })),
+            Err(e) => Ok(error_response(
+                &format!(
+                    "Failed to read {}: {}. Ensure the file exists and is not a directory.",
+                    path.display(),
+                    e
+                ),
+                error_codes::IO_ERROR,
+                json!({"path": path.display().to_string()}),
+            )),
         }
     }
 }
@@ -197,6 +216,8 @@ mod tests {
 
         let result = tool.call(args).await.unwrap();
         assert!(result["error"].as_str().unwrap().contains("Failed to read"));
+        assert_eq!(result["error_code"], error_codes::IO_ERROR);
+        assert!(result["context"]["path"].is_string());
     }
 
     #[tokio::test]
@@ -207,6 +228,8 @@ mod tests {
 
         let result = tool.call(args).await.unwrap();
         assert!(result["error"].as_str().unwrap().contains("Access denied"));
+        assert_eq!(result["error_code"], error_codes::ACCESS_DENIED);
+        assert!(result["context"]["path"].is_string());
     }
 
     #[tokio::test]
@@ -224,6 +247,8 @@ mod tests {
 
         let result = tool.call(args).await.unwrap();
         assert!(result["error"].as_str().unwrap().contains("out of bounds"));
+        assert_eq!(result["error_code"], error_codes::INVALID_ARGUMENT);
+        assert_eq!(result["context"]["offset"], 5);
     }
 
     #[tokio::test]
@@ -283,6 +308,7 @@ mod tests {
                 .unwrap()
                 .contains("File appears to be binary")
         );
-        assert_eq!(result["is_binary"], true);
+        assert_eq!(result["error_code"], error_codes::BINARY_FILE);
+        assert!(result["context"]["path"].is_string());
     }
 }

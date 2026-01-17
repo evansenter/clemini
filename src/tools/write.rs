@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 use std::path::PathBuf;
 use tracing::instrument;
 
-use super::resolve_and_validate_path;
+use super::{error_codes, error_response, resolve_and_validate_path};
 
 pub struct WriteTool {
     cwd: PathBuf,
@@ -56,9 +56,11 @@ impl CallableFunction for WriteTool {
         let path = match resolve_and_validate_path(file_path, &self.cwd, &self.allowed_paths) {
             Ok(p) => p,
             Err(e) => {
-                return Ok(json!({
-                    "error": format!("Access denied: {}. Path must be within allowed paths.", e)
-                }));
+                return Ok(error_response(
+                    &format!("Access denied: {}. Path must be within allowed paths.", e),
+                    error_codes::ACCESS_DENIED,
+                    json!({"path": file_path}),
+                ));
             }
         };
 
@@ -69,9 +71,15 @@ impl CallableFunction for WriteTool {
             && !parent.exists()
             && let Err(e) = tokio::fs::create_dir_all(parent).await
         {
-            return Ok(json!({
-                "error": format!("Failed to create directory {}: {}. Check permissions for the parent directory.", parent.display(), e)
-            }));
+            return Ok(error_response(
+                &format!(
+                    "Failed to create directory {}: {}. Check permissions for the parent directory.",
+                    parent.display(),
+                    e
+                ),
+                error_codes::IO_ERROR,
+                json!({"path": parent.display().to_string()}),
+            ));
         }
 
         let metadata = tokio::fs::metadata(&path).await.ok();
@@ -97,9 +105,15 @@ impl CallableFunction for WriteTool {
 
                 Ok(response)
             }
-            Err(e) => Ok(json!({
-                "error": format!("Failed to write {}: {}. Check file permissions.", path.display(), e)
-            })),
+            Err(e) => Ok(error_response(
+                &format!(
+                    "Failed to write {}: {}. Check file permissions.",
+                    path.display(),
+                    e
+                ),
+                error_codes::IO_ERROR,
+                json!({"path": path.display().to_string()}),
+            )),
         }
     }
 }
@@ -167,5 +181,7 @@ mod tests {
 
         let result = tool.call(args).await.unwrap();
         assert!(result["error"].as_str().unwrap().contains("Access denied"));
+        assert_eq!(result["error_code"], error_codes::ACCESS_DENIED);
+        assert!(result["context"]["path"].is_string());
     }
 }

@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use strsim::normalized_levenshtein;
 use tracing::instrument;
 
-use super::resolve_and_validate_path;
+use super::{error_codes, error_response, resolve_and_validate_path};
 
 pub struct EditTool {
     cwd: PathBuf,
@@ -115,18 +115,22 @@ impl CallableFunction for EditTool {
             .unwrap_or(false);
 
         if old_string == new_string {
-            return Ok(json!({
-                "error": "The 'old_string' and 'new_string' are the same. No replacement needed."
-            }));
+            return Ok(error_response(
+                "The 'old_string' and 'new_string' are the same. No replacement needed.",
+                error_codes::INVALID_ARGUMENT,
+                json!({}),
+            ));
         }
 
         // Resolve and validate path
         let path = match resolve_and_validate_path(file_path, &self.cwd, &self.allowed_paths) {
             Ok(p) => p,
             Err(e) => {
-                return Ok(json!({
-                    "error": format!("Access denied: {}. Path must be within allowed paths.", e)
-                }));
+                return Ok(error_response(
+                    &format!("Access denied: {}. Path must be within allowed paths.", e),
+                    error_codes::ACCESS_DENIED,
+                    json!({"path": file_path}),
+                ));
             }
         };
 
@@ -134,9 +138,15 @@ impl CallableFunction for EditTool {
         let content = match tokio::fs::read_to_string(&path).await {
             Ok(c) => c,
             Err(e) => {
-                return Ok(json!({
-                    "error": format!("Failed to read {}: {}. Ensure the file exists and is not a directory.", path.display(), e)
-                }));
+                return Ok(error_response(
+                    &format!(
+                        "Failed to read {}: {}. Ensure the file exists and is not a directory.",
+                        path.display(),
+                        e
+                    ),
+                    error_codes::IO_ERROR,
+                    json!({"path": file_path}),
+                ));
             }
         };
 
@@ -146,12 +156,8 @@ impl CallableFunction for EditTool {
         if matches.is_empty() {
             let suggestions = find_similar_strings(&content, old_string, 3, 0.6);
 
-            let mut response = json!({
-                "error": format!(
-                    "The 'old_string' was not found in {}. Ensure the string matches exactly, including whitespace and indentation.",
-                    file_path
-                ),
-                "file_path": file_path
+            let mut context = json!({
+                "path": file_path
             });
 
             if !suggestions.is_empty() {
@@ -170,13 +176,20 @@ impl CallableFunction for EditTool {
                     })
                     .collect();
 
-                response["suggestions"] = json!(suggestion_details);
-                response["hint"] = json!(
+                context["suggestions"] = json!(suggestion_details);
+                context["hint"] = json!(
                     "Similar content found. Check for whitespace differences or use read_file to verify current content."
                 );
             }
 
-            return Ok(response);
+            return Ok(error_response(
+                &format!(
+                    "The 'old_string' was not found in {}. Ensure the string matches exactly, including whitespace and indentation.",
+                    file_path
+                ),
+                error_codes::NOT_FOUND,
+                context,
+            ));
         }
 
         if !replace_all && matches.len() > 1 {
@@ -191,12 +204,20 @@ impl CallableFunction for EditTool {
                 .collect::<Vec<_>>()
                 .join(", ");
 
-            return Ok(json!({
-                "error": format!("The 'old_string' was found {} times in {} at lines {}. It must be unique to ensure the correct replacement. Provide more surrounding context to make it unique, or set 'replace_all' to true.", matches.len(), file_path, lines_str),
-                "file_path": file_path,
-                "occurrences": matches.len(),
-                "lines": lines
-            }));
+            return Ok(error_response(
+                &format!(
+                    "The 'old_string' was found {} times in {} at lines {}. It must be unique to ensure the correct replacement. Provide more surrounding context to make it unique, or set 'replace_all' to true.",
+                    matches.len(),
+                    file_path,
+                    lines_str
+                ),
+                error_codes::NOT_UNIQUE,
+                json!({
+                    "path": file_path,
+                    "occurrences": matches.len(),
+                    "lines": lines
+                }),
+            ));
         }
 
         // Perform the replacement
@@ -224,9 +245,15 @@ impl CallableFunction for EditTool {
                     "replacements": count
                 }))
             }
-            Err(e) => Ok(json!({
-                "error": format!("Failed to write {}: {}. Check file permissions.", path.display(), e)
-            })),
+            Err(e) => Ok(error_response(
+                &format!(
+                    "Failed to write {}: {}. Check file permissions.",
+                    path.display(),
+                    e
+                ),
+                error_codes::IO_ERROR,
+                json!({"path": file_path}),
+            )),
         }
     }
 }
@@ -275,6 +302,8 @@ mod tests {
 
         let result = tool.call(args).await.unwrap();
         assert!(result["error"].as_str().unwrap().contains("was not found"));
+        assert_eq!(result["error_code"], error_codes::NOT_FOUND);
+        assert_eq!(result["context"]["path"], "test.txt");
     }
 
     #[tokio::test]
@@ -294,8 +323,9 @@ mod tests {
         let result = tool.call(args).await.unwrap();
         assert!(result["error"].as_str().unwrap().contains("must be unique"));
         assert!(result["error"].as_str().unwrap().contains("at lines 1, 2"));
-        assert_eq!(result["occurrences"], 2);
-        assert_eq!(result["lines"], json!([1, 2]));
+        assert_eq!(result["error_code"], error_codes::NOT_UNIQUE);
+        assert_eq!(result["context"]["occurrences"], 2);
+        assert_eq!(result["context"]["lines"], json!([1, 2]));
     }
 
     #[tokio::test]
@@ -337,6 +367,7 @@ mod tests {
 
         let result = tool.call(args).await.unwrap();
         assert!(result["error"].as_str().unwrap().contains("was not found"));
+        assert_eq!(result["error_code"], error_codes::NOT_FOUND);
     }
 
     #[tokio::test]
@@ -397,8 +428,14 @@ mod tests {
 
         let result = tool.call(args).await.unwrap();
         assert!(result["error"].as_str().unwrap().contains("not found"));
-        assert!(result["suggestions"].is_array());
-        assert!(!result["suggestions"].as_array().unwrap().is_empty());
+        assert_eq!(result["error_code"], error_codes::NOT_FOUND);
+        assert!(result["context"]["suggestions"].is_array());
+        assert!(
+            !result["context"]["suggestions"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -417,9 +454,13 @@ mod tests {
 
         let result = tool.call(args).await.unwrap();
         assert!(result["error"].as_str().unwrap().contains("not found"));
+        assert_eq!(result["error_code"], error_codes::NOT_FOUND);
         assert!(
-            result.get("suggestions").is_none()
-                || result["suggestions"].as_array().unwrap().is_empty()
+            result["context"].get("suggestions").is_none()
+                || result["context"]["suggestions"]
+                    .as_array()
+                    .unwrap()
+                    .is_empty()
         );
     }
 
@@ -437,5 +478,6 @@ mod tests {
 
         let result = tool.call(args).await.unwrap();
         assert!(result["error"].as_str().unwrap().contains("Failed to read"));
+        assert_eq!(result["error_code"], error_codes::IO_ERROR);
     }
 }

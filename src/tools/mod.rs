@@ -197,6 +197,27 @@ pub fn create_http_client() -> Result<reqwest::Client, String> {
         .map_err(|e| format!("Failed to create HTTP client: {}", e))
 }
 
+/// Standard error codes for tool responses
+pub mod error_codes {
+    pub const NOT_FOUND: &str = "NOT_FOUND";
+    pub const ACCESS_DENIED: &str = "ACCESS_DENIED";
+    pub const INVALID_ARGUMENT: &str = "INVALID_ARGUMENT";
+    pub const NOT_UNIQUE: &str = "NOT_UNIQUE";
+    pub const IO_ERROR: &str = "IO_ERROR";
+    pub const BINARY_FILE: &str = "BINARY_FILE";
+    pub const TIMEOUT: &str = "TIMEOUT";
+    pub const BLOCKED: &str = "BLOCKED";
+}
+
+/// Create a standardized error response
+pub fn error_response(message: &str, code: &str, context: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "error": message,
+        "error_code": code,
+        "context": context
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

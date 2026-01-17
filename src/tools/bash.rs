@@ -1,3 +1,4 @@
+use crate::tools::{error_codes, error_response};
 use async_trait::async_trait;
 use colored::Colorize;
 use genai_rs::{CallableFunction, FunctionDeclaration, FunctionError, FunctionParameters};
@@ -182,14 +183,14 @@ impl CallableFunction for BashTool {
         if let Some(pattern) = Self::is_blocked(command) {
             let msg = format!("[bash BLOCKED: {command}] (matches pattern: {pattern})");
             crate::log_event(&msg);
-            let mut resp = json!({
-                "error": format!("Command blocked: matches pattern '{pattern}'"),
-                "command": command
-            });
-            if let Some(desc) = description {
-                resp["description"] = json!(desc);
-            }
-            return Ok(resp);
+            return Ok(error_response(
+                &format!("Command blocked: matches pattern '{}'", pattern),
+                error_codes::BLOCKED,
+                json!({
+                    "command": command,
+                    "description": description
+                }),
+            ));
         }
 
         if Self::needs_caution(command) {
@@ -210,14 +211,14 @@ impl CallableFunction for BashTool {
             } else if !confirmed && !self.confirm_execution(command) {
                 let msg = format!("[bash CANCELLED: {command}]");
                 crate::log_event(&msg);
-                let mut resp = json!({
-                    "error": "Command cancelled by user",
-                    "command": command
-                });
-                if let Some(desc) = description {
-                    resp["description"] = json!(desc);
-                }
-                return Ok(resp);
+                return Ok(error_response(
+                    "Command cancelled by user",
+                    error_codes::BLOCKED,
+                    json!({
+                        "command": command,
+                        "description": description
+                    }),
+                ));
             }
             let msg = if let Some(desc) = description {
                 format!("[bash CAUTION: {}] (user confirmed): \"{}\"", desc, command)
@@ -326,16 +327,17 @@ impl CallableFunction for BashTool {
         };
 
         if timed_out {
-            let mut resp = json!({
-                "error": format!("Command timed out after {} seconds", timeout_secs),
-                "command": command,
-                "stdout": captured_stdout,
-                "stderr": captured_stderr,
-            });
-            if let Some(desc) = description {
-                resp["description"] = json!(desc);
-            }
-            return Ok(resp);
+            return Ok(error_response(
+                &format!("Command timed out after {} seconds", timeout_secs),
+                error_codes::TIMEOUT,
+                json!({
+                    "command": command,
+                    "description": description,
+                    "timeout_seconds": timeout_secs,
+                    "stdout": captured_stdout,
+                    "stderr": captured_stderr,
+                }),
+            ));
         }
 
         let exit_code = exit_status_final.and_then(|s| s.code()).unwrap_or(-1);
@@ -414,6 +416,7 @@ mod tests {
 
         let result = tool.call(args).await.unwrap();
         assert!(result["error"].as_str().unwrap().contains("timed out"));
+        assert_eq!(result["error_code"], error_codes::TIMEOUT);
     }
 
     #[test]

@@ -5,7 +5,10 @@ use serde_json::{Value, json};
 use std::path::PathBuf;
 use tracing::instrument;
 
-use super::{DEFAULT_EXCLUDES, make_relative, resolve_and_validate_path, validate_path};
+use super::{
+    DEFAULT_EXCLUDES, error_codes, error_response, make_relative, resolve_and_validate_path,
+    validate_path,
+};
 
 pub struct GlobTool {
     cwd: PathBuf,
@@ -55,9 +58,14 @@ impl CallableFunction for GlobTool {
             match resolve_and_validate_path(p, &self.cwd, &self.allowed_paths) {
                 Ok(p) => p,
                 Err(e) => {
-                    return Ok(json!({
-                        "error": format!("Access denied for path '{}': {}. Path must be within allowed paths.", p, e)
-                    }));
+                    return Ok(error_response(
+                        &format!(
+                            "Access denied for path '{}': {}. Path must be within allowed paths.",
+                            p, e
+                        ),
+                        error_codes::ACCESS_DENIED,
+                        json!({"path": p}),
+                    ));
                 }
             }
         } else {
@@ -114,14 +122,21 @@ impl CallableFunction for GlobTool {
                     // Check if the pattern matches a directory
                     let full_path = base_dir.join(pattern);
                     if validate_path(&full_path, &self.allowed_paths).is_ok_and(|p| p.is_dir()) {
-                        return Ok(json!({
-                            "error": format!("The pattern '{}' matches a directory, but this tool is for finding files. Suggestion: use '{}/*' to find files within this directory or '{}/**/*' for recursive search.", pattern, pattern, pattern)
-                        }));
+                        return Ok(error_response(
+                            &format!(
+                                "Pattern '{}' matches a directory. Use '{}/*' for files.",
+                                pattern, pattern
+                            ),
+                            error_codes::INVALID_ARGUMENT,
+                            json!({"pattern": pattern}),
+                        ));
                     }
 
-                    return Ok(json!({
-                        "error": format!("No files matched the pattern '{}'. Suggestions: ensure the pattern is correct, check that the files exist, and that they are not in excluded directories (e.g., .git, node_modules).", pattern)
-                    }));
+                    return Ok(error_response(
+                        &format!("No files matched pattern '{}'", pattern),
+                        error_codes::NOT_FOUND,
+                        json!({"pattern": pattern}),
+                    ));
                 }
 
                 Ok(json!({
@@ -131,9 +146,11 @@ impl CallableFunction for GlobTool {
                     "errors": if errors.is_empty() { Value::Null } else { json!(errors) }
                 }))
             }
-            Err(e) => Ok(json!({
-                "error": format!("Invalid glob pattern: {}. Ensure you are using valid glob syntax (e.g., '**/*.rs', 'src/*.ts'). Suggestions: check for invalid characters or incorrectly nested patterns.", e)
-            })),
+            Err(e) => Ok(error_response(
+                &format!("Invalid glob pattern: {}", e),
+                error_codes::INVALID_ARGUMENT,
+                json!({"pattern": pattern}),
+            )),
         }
     }
 }
@@ -193,6 +210,8 @@ mod tests {
                 .unwrap()
                 .contains("No files matched")
         );
+        assert_eq!(result["error_code"], error_codes::NOT_FOUND);
+        assert_eq!(result["context"]["pattern"], "*.nonexistent");
     }
 
     #[tokio::test]
