@@ -725,7 +725,6 @@ fn flush_response(
         }
         skin.print_text(response_text);
         response_text.clear();
-        println!();
     } else if force_newline {
         println!();
     }
