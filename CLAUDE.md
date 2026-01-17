@@ -71,8 +71,8 @@ Debugging: `LOUD_WIRE=1` logs all HTTP requests/responses.
 **Complete dependency management** - When using a new crate, ensure it's added to Cargo.toml with the proper features before writing code that depends on it. Never reference crates that aren't in dependencies.
 
 **Quality gates before pushing** - All of these must pass:
-- `cargo clippy -- -D warnings` (no warnings)
-- `cargo fmt --check` (formatted)
-- `cargo test` (tests pass)
+- `make clippy` (no warnings)
+- `make fmt` then check for changes (formatted)
+- `make test` (tests pass)
 
 Don't skip tests. If a test is flaky or legitimately broken by your change, fix the test as part of the PR.
