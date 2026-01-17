@@ -281,11 +281,36 @@ When you discover patterns that would help future tasks:
 - This helps you get better over time
 "#;
 
-#[derive(Deserialize, Default)]
+fn expand_tilde(path_str: &str) -> PathBuf {
+    if path_str.starts_with('~') {
+        home::home_dir()
+            .map(|h| h.join(path_str.trim_start_matches("~/").trim_start_matches('~')))
+            .unwrap_or_else(|| PathBuf::from(path_str))
+    } else {
+        PathBuf::from(path_str)
+    }
+}
+
+fn default_allowed_paths() -> Vec<String> {
+    vec!["~/.clemini".to_string(), "~/Documents/projects".to_string()]
+}
+
+#[derive(Deserialize)]
 struct Config {
     model: Option<String>,
     bash_timeout: Option<u64>,
-    allowed_paths: Option<Vec<String>>,
+    #[serde(default = "default_allowed_paths")]
+    allowed_paths: Vec<String>,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            model: None,
+            bash_timeout: None,
+            allowed_paths: default_allowed_paths(),
+        }
+    }
 }
 
 fn load_config() -> Config {
@@ -299,6 +324,55 @@ fn load_config() -> Config {
         .and_then(|p| std::fs::read_to_string(p).ok())
         .and_then(|s| toml::from_str(&s).ok())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_expand_tilde() {
+        let home = home::home_dir().expect("Home dir should exist");
+        assert_eq!(expand_tilde("~/.clemini"), home.join(".clemini"));
+        assert_eq!(
+            expand_tilde("~/Documents/projects"),
+            home.join("Documents/projects")
+        );
+        assert_eq!(expand_tilde("/tmp"), PathBuf::from("/tmp"));
+    }
+
+    #[test]
+    fn test_config_defaults() {
+        let config = Config::default();
+        assert_eq!(
+            config.allowed_paths,
+            vec!["~/.clemini", "~/Documents/projects"]
+        );
+        assert!(config.model.is_none());
+        assert!(config.bash_timeout.is_none());
+    }
+
+    #[test]
+    fn test_config_deserialization_defaults() {
+        let toml_str = r#"
+            model = "test-model"
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.model, Some("test-model".to_string()));
+        assert_eq!(
+            config.allowed_paths,
+            vec!["~/.clemini", "~/Documents/projects"]
+        );
+    }
+
+    #[test]
+    fn test_config_deserialization_override() {
+        let toml_str = r#"
+            allowed_paths = ["/etc", "/var"]
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.allowed_paths, vec!["/etc", "/var"]);
+    }
 }
 
 #[derive(Parser)]
@@ -368,26 +442,15 @@ async fn main() -> Result<()> {
 
     // Resolve allowed paths
     let mut allowed_paths = Vec::new();
-    if let Some(config_paths) = config.allowed_paths {
-        for path_str in config_paths {
-            let path = if path_str.starts_with('~') {
-                home::home_dir()
-                    .map(|h| h.join(path_str.trim_start_matches("~/").trim_start_matches('~')))
-                    .unwrap_or_else(|| PathBuf::from(&path_str))
-            } else {
-                PathBuf::from(&path_str)
-            };
-            allowed_paths.push(path);
-        }
-    } else {
-        // Default allowed paths: cwd + home dirs + tmp
-        let home = home::home_dir().expect("Failed to get home directory");
-        allowed_paths.push(cwd.clone());
-        allowed_paths.push(home.join(".clemini"));
-        allowed_paths.push(home.join("Documents/projects"));
-        allowed_paths.push(PathBuf::from("/tmp"));
-        #[cfg(target_os = "macos")]
-        allowed_paths.push(PathBuf::from("/private/tmp"));
+    // Always allowed: CWD and tmp
+    allowed_paths.push(cwd.clone());
+    allowed_paths.push(PathBuf::from("/tmp"));
+    #[cfg(target_os = "macos")]
+    allowed_paths.push(PathBuf::from("/private/tmp"));
+
+    // Add paths from config (which includes defaults if not specified)
+    for path_str in config.allowed_paths {
+        allowed_paths.push(expand_tilde(&path_str));
     }
 
     let tool_service = Arc::new(CleminiToolService::new(
