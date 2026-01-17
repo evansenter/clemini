@@ -74,12 +74,29 @@ impl CallableFunction for WriteTool {
             }));
         }
 
+        let metadata = tokio::fs::metadata(&path).await.ok();
+        let previous_size = metadata.as_ref().map(|m| m.len());
+        let exists = metadata.is_some();
+
         match tokio::fs::write(&path, content).await {
-            Ok(()) => Ok(json!({
-                "path": path.display().to_string(),
-                "bytes_written": content.len(),
-                "success": true
-            })),
+            Ok(()) => {
+                let mut response = json!({
+                    "path": path.display().to_string(),
+                    "bytes_written": content.len(),
+                    "success": true
+                });
+
+                if exists {
+                    response["overwritten"] = json!(true);
+                    if let Some(size) = previous_size {
+                        response["previous_size"] = json!(size);
+                    }
+                } else {
+                    response["created"] = json!(true);
+                }
+
+                Ok(response)
+            }
             Err(e) => Ok(json!({
                 "error": format!("Failed to write {}: {}. Check file permissions.", path.display(), e)
             })),
@@ -109,6 +126,7 @@ mod tests {
 
         let result = tool.call(args).await.unwrap();
         assert!(result["success"].as_bool().unwrap());
+        assert!(result["created"].as_bool().unwrap());
         assert_eq!(result["bytes_written"], content.len());
 
         let saved_content = fs::read_to_string(cwd.join(file_path)).unwrap();
@@ -120,7 +138,8 @@ mod tests {
         let dir = tempdir().unwrap();
         let cwd = dir.path().to_path_buf();
         let file_path = cwd.join("test.txt");
-        fs::write(&file_path, "old content").unwrap();
+        let old_content = "old content";
+        fs::write(&file_path, old_content).unwrap();
 
         let tool = WriteTool::new(cwd.clone(), vec![cwd.clone()]);
         let args = json!({
@@ -130,6 +149,8 @@ mod tests {
 
         let result = tool.call(args).await.unwrap();
         assert!(result["success"].as_bool().unwrap());
+        assert!(result["overwritten"].as_bool().unwrap());
+        assert_eq!(result["previous_size"], old_content.len());
 
         let saved_content = fs::read_to_string(&file_path).unwrap();
         assert_eq!(saved_content, "new content");
