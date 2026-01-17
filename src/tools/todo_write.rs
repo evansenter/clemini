@@ -6,9 +6,67 @@ use tracing::instrument;
 
 pub struct TodoWriteTool;
 
+#[derive(Debug, PartialEq, Clone)]
+struct TodoItem {
+    content: String,
+    status: TodoStatus,
+}
+
+#[derive(Debug, PartialEq, Clone, Copy)]
+enum TodoStatus {
+    Pending,
+    InProgress,
+    Completed,
+}
+
+impl From<&str> for TodoStatus {
+    fn from(s: &str) -> Self {
+        match s {
+            "completed" => TodoStatus::Completed,
+            "in_progress" => TodoStatus::InProgress,
+            _ => TodoStatus::Pending,
+        }
+    }
+}
+
 impl TodoWriteTool {
     pub fn new() -> Self {
         Self
+    }
+
+    fn parse_args(&self, args: Value) -> Result<Vec<TodoItem>, FunctionError> {
+        let todos_value = args
+            .get("todos")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| FunctionError::ArgumentMismatch("Missing todos array".to_string()))?;
+
+        let mut todos = Vec::with_capacity(todos_value.len());
+        for todo in todos_value {
+            let content = todo
+                .get("content")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let status = todo
+                .get("status")
+                .and_then(|v| v.as_str())
+                .map(TodoStatus::from)
+                .unwrap_or(TodoStatus::Pending);
+
+            todos.push(TodoItem { content, status });
+        }
+
+        Ok(todos)
+    }
+
+    fn render_todo(todo: &TodoItem) -> String {
+        let (icon, colored_content) = match todo.status {
+            TodoStatus::Completed => ("✓".green(), todo.content.normal()),
+            TodoStatus::InProgress => ("→".yellow(), todo.content.normal()),
+            TodoStatus::Pending => ("○".dimmed(), todo.content.dimmed()),
+        };
+
+        format!("  {} {}", icon, colored_content)
     }
 }
 
@@ -43,32 +101,156 @@ impl CallableFunction for TodoWriteTool {
 
     #[instrument(skip(self, args))]
     async fn call(&self, args: Value) -> Result<Value, FunctionError> {
-        let todos = args
-            .get("todos")
-            .and_then(|v| v.as_array())
-            .ok_or_else(|| FunctionError::ArgumentMismatch("Missing todos array".to_string()))?;
+        let todos = self.parse_args(args)?;
 
         crate::log_event(""); // Leading newline before list
-        for todo in todos {
-            let content = todo.get("content").and_then(|v| v.as_str()).unwrap_or("");
-            let status = todo
-                .get("status")
-                .and_then(|v| v.as_str())
-                .unwrap_or("pending");
-
-            let (icon, colored_content) = match status {
-                "completed" => ("✓".green(), content.normal()),
-                "in_progress" => ("→".yellow(), content.normal()),
-                _ => ("○".dimmed(), content.dimmed()),
-            };
-
-            let line = format!("  {} {}", icon, colored_content);
-            crate::log_event(&line);
+        for todo in &todos {
+            crate::log_event(&Self::render_todo(todo));
         }
 
         Ok(json!({
             "success": true,
             "count": todos.len()
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use genai_rs::CallableFunction;
+    use serde_json::json;
+
+    #[test]
+    fn test_declaration() {
+        let tool = TodoWriteTool::new();
+        let decl = tool.declaration();
+
+        assert_eq!(decl.name(), "todo_write");
+        assert_eq!(
+            decl.description(),
+            "Display a todo list to track progress on multi-step tasks."
+        );
+
+        let params = decl.parameters();
+        let params_json = serde_json::to_value(params).unwrap();
+        assert_eq!(params_json["type"], "object");
+        assert_eq!(params.required(), vec!["todos".to_string()]);
+
+        let properties = params.properties();
+        assert!(properties.get("todos").is_some());
+        assert_eq!(properties["todos"]["type"], "array");
+        assert_eq!(properties["todos"]["items"]["type"], "object");
+
+        let todo_props = &properties["todos"]["items"]["properties"];
+        assert_eq!(todo_props["content"]["type"], "string");
+        assert_eq!(todo_props["status"]["type"], "string");
+        assert_eq!(
+            todo_props["status"]["enum"],
+            json!(["pending", "in_progress", "completed"])
+        );
+    }
+
+    #[test]
+    fn test_parse_args_success() {
+        let tool = TodoWriteTool::new();
+        let args = json!({
+            "todos": [
+                { "content": "Task 1", "status": "completed" },
+                { "content": "Task 2", "status": "in_progress" },
+                { "content": "Task 3", "status": "pending" }
+            ]
+        });
+
+        let todos = tool.parse_args(args).unwrap();
+        assert_eq!(todos.len(), 3);
+        assert_eq!(
+            todos[0],
+            TodoItem {
+                content: "Task 1".to_string(),
+                status: TodoStatus::Completed
+            }
+        );
+        assert_eq!(
+            todos[1],
+            TodoItem {
+                content: "Task 2".to_string(),
+                status: TodoStatus::InProgress
+            }
+        );
+        assert_eq!(
+            todos[2],
+            TodoItem {
+                content: "Task 3".to_string(),
+                status: TodoStatus::Pending
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_args_missing_todos() {
+        let tool = TodoWriteTool::new();
+        let args = json!({});
+
+        let result = tool.parse_args(args);
+        assert!(result.is_err());
+        match result {
+            Err(FunctionError::ArgumentMismatch(msg)) => assert_eq!(msg, "Missing todos array"),
+            _ => panic!("Expected ArgumentMismatch error"),
+        }
+    }
+
+    #[test]
+    fn test_parse_args_empty_array() {
+        let tool = TodoWriteTool::new();
+        let args = json!({ "todos": [] });
+
+        let todos = tool.parse_args(args).unwrap();
+        assert!(todos.is_empty());
+    }
+
+    #[test]
+    fn test_parse_args_invalid_status() {
+        let tool = TodoWriteTool::new();
+        let args = json!({
+            "todos": [
+                { "content": "Unknown status", "status": "something_else" }
+            ]
+        });
+
+        let todos = tool.parse_args(args).unwrap();
+        assert_eq!(todos[0].status, TodoStatus::Pending);
+    }
+
+    #[test]
+    fn test_render_todo_output() {
+        // We can't easily test colors without a terminal or checking escape codes,
+        // but we can at least check if it contains the right icons and content.
+        // Status: Completed -> ✓
+        let completed = TodoItem {
+            content: "Done".to_string(),
+            status: TodoStatus::Completed,
+        };
+        let rendered_completed = TodoWriteTool::render_todo(&completed);
+        assert!(rendered_completed.contains("✓"));
+        assert!(rendered_completed.contains("Done"));
+
+        // Status: InProgress -> →
+        let in_progress = TodoItem {
+            content: "Working".to_string(),
+            status: TodoStatus::InProgress,
+        };
+        let rendered_in_progress = TodoWriteTool::render_todo(&in_progress);
+        assert!(rendered_in_progress.contains("→"));
+        assert!(rendered_in_progress.contains("Working"));
+
+        // Status: Pending -> ○
+        let pending = TodoItem {
+            content: "Waiting".to_string(),
+            status: TodoStatus::Pending,
+        };
+        let rendered_pending = TodoWriteTool::render_todo(&pending);
+        assert!(rendered_pending.contains("○"));
+        assert!(rendered_pending.contains("Waiting"));
     }
 }
