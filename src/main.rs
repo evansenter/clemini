@@ -1,9 +1,10 @@
 use anyhow::Result;
 use clap::Parser;
 use colored::Colorize;
+use crossterm::event::{Event, EventStream, KeyCode, KeyModifiers};
 use futures_util::StreamExt;
 use genai_rs::{CallableFunction, Client, Content, StreamChunk, ToolService};
-use reedline::{DefaultPrompt, FileBackedHistory, Reedline, Signal};
+use ratatui::DefaultTerminal;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::env;
@@ -12,12 +13,15 @@ use std::path::PathBuf;
 use std::sync::{Arc, LazyLock, OnceLock};
 use std::time::Instant;
 use termimad::MadSkin;
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
+use tui_textarea::{Input, TextArea};
 
 mod diff;
 mod mcp;
 mod tools;
+mod tui;
 
 use tools::CleminiToolService;
 
@@ -56,6 +60,8 @@ static SKIN: LazyLock<MadSkin> = LazyLock::new(|| {
 
 pub trait OutputSink: Send + Sync {
     fn emit(&self, message: &str, render_markdown: bool);
+    /// Emit streaming text (no newline, no markdown). Used for model response streaming.
+    fn emit_streaming(&self, text: &str);
 }
 
 /// Writes to log files only (current behavior of log_event)
@@ -64,6 +70,9 @@ pub struct FileSink;
 impl OutputSink for FileSink {
     fn emit(&self, message: &str, render_markdown: bool) {
         log_event_to_file(message, render_markdown);
+    }
+    fn emit_streaming(&self, _text: &str) {
+        // No terminal to stream to
     }
 }
 
@@ -79,6 +88,47 @@ impl OutputSink for TerminalSink {
             eprintln!("{}", message);
         }
         log_event_to_file(message, render_markdown);
+    }
+    fn emit_streaming(&self, text: &str) {
+        print!("{text}");
+        let _ = io::stdout().flush();
+    }
+}
+
+/// Message types for TUI output channel
+#[derive(Debug)]
+pub enum TuiMessage {
+    /// Complete line/message (uses append_to_chat)
+    Line(String),
+    /// Streaming text chunk (uses append_streaming)
+    Streaming(String),
+}
+
+/// Channel for TUI output - global sender that TuiSink writes to
+static TUI_OUTPUT_TX: OnceLock<mpsc::UnboundedSender<TuiMessage>> = OnceLock::new();
+
+/// Set the TUI output channel sender
+pub fn set_tui_output_channel(tx: mpsc::UnboundedSender<TuiMessage>) {
+    let _ = TUI_OUTPUT_TX.set(tx);
+}
+
+/// Writes to TUI buffer (via channel) AND log files - no termimad, no stderr
+pub struct TuiSink;
+
+impl OutputSink for TuiSink {
+    fn emit(&self, message: &str, _render_markdown: bool) {
+        // Send to TUI via channel (no termimad rendering - just plain text with ANSI colors)
+        if let Some(tx) = TUI_OUTPUT_TX.get() {
+            let _ = tx.send(TuiMessage::Line(message.to_string()));
+        }
+        // Also log to file (without markdown rendering to avoid termimad formatting issues)
+        log_event_to_file(message, false);
+    }
+    fn emit_streaming(&self, text: &str) {
+        // Send streaming text to TUI via channel
+        if let Some(tx) = TUI_OUTPUT_TX.get() {
+            let _ = tx.send(TuiMessage::Streaming(text.to_string()));
+        }
     }
 }
 
@@ -109,6 +159,13 @@ pub fn log_event_raw(message: &str) {
 /// Log to file only (skip terminal output even with TerminalSink)
 pub fn log_to_file(message: &str) {
     log_event_to_file(message, true);
+}
+
+/// Emit streaming text (for model response streaming)
+pub fn emit_streaming(text: &str) {
+    if let Some(sink) = OUTPUT_SINK.get() {
+        sink.emit_streaming(text);
+    }
 }
 
 fn log_event_to_file(message: &str, render_markdown: bool) {
@@ -277,6 +334,10 @@ struct Args {
     /// HTTP port for MCP server (requires --http)
     #[arg(long, default_value_t = 8080)]
     port: u16,
+
+    /// Disable TUI and use plain text mode
+    #[arg(long)]
+    no_tui: bool,
 }
 
 #[tokio::main]
@@ -414,18 +475,27 @@ async fn main() -> Result<()> {
             None,
             &system_prompt,
             cancellation_token,
+            false, // not TUI mode
         )
         .await?;
     } else {
-        set_output_sink(Arc::new(TerminalSink));
         // Interactive REPL mode
+        // Use TUI if terminal and --no-tui not specified
+        let use_tui = !args.no_tui && io::stderr().is_terminal();
+        // Set output sink based on mode (TUI sets its own sink, plain REPL uses TerminalSink)
+        if !use_tui {
+            set_output_sink(Arc::new(TerminalSink));
+        }
+        // TUI mode always needs streaming for incremental updates
+        let stream_output = use_tui || args.stream;
         run_repl(
             &client,
             &tool_service,
             cwd,
             &model,
-            args.stream,
+            stream_output,
             system_prompt,
+            use_tui,
         )
         .await?;
     }
@@ -433,6 +503,15 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+/// Events from the async interaction task
+#[allow(dead_code)] // StreamChunk reserved for future streaming text updates
+enum AppEvent {
+    StreamChunk(String),
+    ToolProgress(InteractionProgress),
+    InteractionComplete(Result<InteractionResult>),
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn run_repl(
     client: &Client,
     tool_service: &Arc<CleminiToolService>,
@@ -440,205 +519,104 @@ async fn run_repl(
     model: &str,
     stream_output: bool,
     system_prompt: String,
+    use_tui: bool,
 ) -> Result<()> {
-    let history_path = home::home_dir().map(|mut p| {
-        p.push(".clemini_history");
-        p
-    });
-
-    let mut line_editor = Reedline::create();
-    if let Some(ref path) = history_path {
-        let history = Box::new(FileBackedHistory::with_file(1000, path.to_path_buf())?);
-        line_editor = line_editor.with_history(history);
+    if use_tui {
+        run_tui_repl(
+            client,
+            tool_service,
+            cwd,
+            model,
+            stream_output,
+            system_prompt,
+        )
+        .await
+    } else {
+        run_plain_repl(
+            client,
+            tool_service,
+            cwd,
+            model,
+            stream_output,
+            system_prompt,
+        )
+        .await
     }
+}
 
-    let prompt = DefaultPrompt::default();
-
+/// Plain text REPL for non-TTY or --no-tui mode
+#[allow(clippy::too_many_arguments)]
+async fn run_plain_repl(
+    client: &Client,
+    tool_service: &Arc<CleminiToolService>,
+    cwd: std::path::PathBuf,
+    model: &str,
+    stream_output: bool,
+    system_prompt: String,
+) -> Result<()> {
     let mut last_interaction_id: Option<String> = None;
-    let mut last_estimated_context_size: u32 = 0;
-
-    let session_start = std::time::Instant::now();
-    let mut total_interactions = 0;
-    let mut total_tool_calls = 0;
-    let mut total_session_tokens = 0;
 
     loop {
-        match line_editor.read_line(&prompt) {
-            Ok(Signal::Success(buffer)) => {
-                let input = buffer.trim();
-                if input.is_empty() {
-                    continue;
-                }
+        eprint!("> ");
+        io::stderr().flush()?;
 
-                if input == "/quit" || input == "/exit" || input == "/q" {
-                    break;
-                }
+        let mut input = String::new();
+        if io::stdin().read_line(&mut input)? == 0 {
+            break; // EOF
+        }
+        let input = input.trim();
+        if input.is_empty() {
+            continue;
+        }
 
-                if input == "/clear" || input == "/c" {
-                    last_interaction_id = None;
-                    last_estimated_context_size = 0;
-                    eprintln!("[conversation cleared]");
-                    continue;
-                }
+        if input == "/quit" || input == "/exit" || input == "/q" {
+            break;
+        }
 
-                if input == "/version" || input == "/v" {
-                    println!(
-                        "clemini v{} | {}",
-                        env!("CARGO_PKG_VERSION").cyan(),
-                        model.green()
-                    );
-                    continue;
-                }
+        if input == "/clear" || input == "/c" {
+            last_interaction_id = None;
+            eprintln!("[conversation cleared]");
+            continue;
+        }
 
-                if input == "/model" || input == "/m" {
-                    println!("{model}");
-                    continue;
-                }
+        if input == "/help" || input == "/h" {
+            print_help();
+            continue;
+        }
 
-                if input == "/pwd" || input == "/cwd" {
-                    println!("{}", cwd.display().to_string().yellow());
-                    continue;
-                }
+        // Handle other commands
+        if let Some(response) = handle_builtin_command(input, model, &cwd) {
+            eprintln!("{response}");
+            continue;
+        }
 
-                if input == "/diff" || input == "/d" {
-                    run_git_command(&["diff"], "no uncommitted changes");
-                    continue;
-                }
+        let cancellation_token = CancellationToken::new();
+        let ct_clone = cancellation_token.clone();
+        ctrlc::set_handler(move || {
+            eprintln!("\n{}", "[ctrl-c received]".yellow());
+            ct_clone.cancel();
+        })
+        .ok();
 
-                if input == "/status" || input == "/s" {
-                    run_git_command(&["status", "--short"], "clean working directory");
-                    continue;
-                }
-
-                if input == "/log" || input == "/l" {
-                    run_git_command(&["log", "--oneline", "-5"], "no commits found");
-                    continue;
-                }
-
-                if input == "/branch" || input == "/b" {
-                    run_git_command(&["branch"], "no branches found");
-                    continue;
-                }
-
-                if input == "/tokens" || input == "/t" {
-                    println!(
-                        "Context usage: {}/{} tokens ({:.1}%)",
-                        last_estimated_context_size.to_string().yellow(),
-                        CONTEXT_WINDOW_LIMIT.to_string().dimmed(),
-                        (f64::from(last_estimated_context_size) / f64::from(CONTEXT_WINDOW_LIMIT))
-                            * 100.0
-                    );
-                    println!(
-                        "Session total: {} tokens",
-                        total_session_tokens.to_string().cyan()
-                    );
-                    continue;
-                }
-
-                if input == "/stats" {
-                    let elapsed = session_start.elapsed();
-                    let mins = elapsed.as_secs() / 60;
-                    let secs = elapsed.as_secs() % 60;
-                    println!("{}", "Session Statistics:".bold().underline());
-                    println!("  Uptime:        {}m {}s", mins, secs);
-                    println!("  Model:         {}", model.green());
-                    println!("  Interactions:  {}", total_interactions);
-                    println!("  Tool Calls:    {}", total_tool_calls);
-                    println!(
-                        "  Total Tokens:  {}",
-                        total_session_tokens.to_string().cyan()
-                    );
-                    println!(
-                        "  Context usage: {}/{} tokens ({:.1}%)",
-                        last_estimated_context_size.to_string().yellow(),
-                        CONTEXT_WINDOW_LIMIT.to_string().dimmed(),
-                        (f64::from(last_estimated_context_size) / f64::from(CONTEXT_WINDOW_LIMIT))
-                            * 100.0
-                    );
-                    continue;
-                }
-
-                if input == "/help" || input == "/h" {
-                    eprintln!("Commands:");
-                    eprintln!("  /q, /quit, /exit  Exit the REPL");
-                    eprintln!("  /c, /clear        Clear conversation history");
-                    eprintln!("  /v, /version      Show version and model");
-                    eprintln!("  /m, /model        Show model name");
-                    eprintln!("  /t, /tokens       Show token usage statistics");
-                    eprintln!("  /stats            Show session statistics");
-                    eprintln!("  /pwd, /cwd        Show current working directory");
-                    eprintln!("  /d, /diff         Show git diff");
-                    eprintln!("  /s, /status       Show git status");
-                    eprintln!("  /l, /log          Show git log");
-                    eprintln!("  /b, /branch       Show git branches");
-                    eprintln!("  /h, /help         Show this help message");
-                    eprintln!();
-                    eprintln!("Shell escape:");
-                    eprintln!("  ! <command>       Run a shell command directly");
-                    eprintln!();
-                    eprintln!("Tools:");
-                    eprintln!("  read_file         Read file contents");
-                    eprintln!("  write_file        Create/overwrite files");
-                    eprintln!("  edit              Surgical string replacement");
-                    eprintln!("  bash              Run shell commands");
-                    eprintln!("  glob              Find files by pattern");
-                    eprintln!("  grep              Search text in files");
-                    eprintln!("  web_search        Search the web");
-                    eprintln!("  web_fetch         Fetch web content");
-                    eprintln!();
-                    continue;
-                }
-
-                if let Some(cmd) = input.strip_prefix('!') {
-                    let cmd = cmd.trim();
-                    if !cmd.is_empty() {
-                        run_shell_command(cmd);
-                    }
-                    continue;
-                }
-
-                let cancellation_token = CancellationToken::new();
-                let ct_clone = cancellation_token.clone();
-                ctrlc::set_handler(move || {
-                    eprintln!("\n{}", "[ctrl-c received]".yellow());
-                    ct_clone.cancel();
-                })
-                .ok();
-
-                match run_interaction(
-                    client,
-                    tool_service,
-                    input,
-                    last_interaction_id.as_deref(),
-                    model,
-                    stream_output,
-                    None,
-                    &system_prompt,
-                    cancellation_token,
-                )
-                .await
-                {
-                    Ok(result) => {
-                        last_interaction_id = result.id;
-                        last_estimated_context_size = result.context_size;
-                        total_interactions += 1;
-                        total_tool_calls += result.tool_calls.len() as u32;
-                        total_session_tokens += result.total_tokens;
-                    }
-                    Err(e) => {
-                        eprintln!("\n{}", format!("[error: {e}]").bright_red());
-                    }
-                }
+        match run_interaction(
+            client,
+            tool_service,
+            input,
+            last_interaction_id.as_deref(),
+            model,
+            stream_output,
+            None,
+            &system_prompt,
+            cancellation_token,
+            false, // not TUI mode
+        )
+        .await
+        {
+            Ok(result) => {
+                last_interaction_id = result.id;
             }
-            Ok(Signal::CtrlC) => {
-                eprintln!("[interrupted]");
-            }
-            Ok(Signal::CtrlD) => {
-                break;
-            }
-            Err(err) => {
-                eprintln!("[readline error: {err}]");
-                break;
+            Err(e) => {
+                eprintln!("\n{}", format!("[error: {e}]").bright_red());
             }
         }
     }
@@ -646,49 +624,425 @@ async fn run_repl(
     Ok(())
 }
 
-fn run_git_command(args: &[&str], empty_msg: &str) {
-    let output = std::process::Command::new("git").args(args).output();
+/// TUI REPL with ratatui
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+async fn run_tui_repl(
+    client: &Client,
+    tool_service: &Arc<CleminiToolService>,
+    cwd: std::path::PathBuf,
+    model: &str,
+    stream_output: bool,
+    system_prompt: String,
+) -> Result<()> {
+    let mut terminal = ratatui::init();
+    let result = run_tui_event_loop(
+        &mut terminal,
+        client,
+        tool_service,
+        cwd,
+        model,
+        stream_output,
+        system_prompt,
+    )
+    .await;
+    ratatui::restore();
+    result
+}
 
-    match output {
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+async fn run_tui_event_loop(
+    terminal: &mut DefaultTerminal,
+    client: &Client,
+    tool_service: &Arc<CleminiToolService>,
+    cwd: std::path::PathBuf,
+    model: &str,
+    stream_output: bool,
+    system_prompt: String,
+) -> Result<()> {
+    // Set up TUI output channel (for OutputSink -> TUI)
+    let (tui_tx, mut tui_rx) = mpsc::unbounded_channel::<TuiMessage>();
+    set_tui_output_channel(tui_tx);
+    set_output_sink(Arc::new(TuiSink));
+
+    let mut app = tui::App::new(model);
+    let mut textarea = TextArea::default();
+    textarea.set_block(
+        ratatui::widgets::Block::default()
+            .borders(ratatui::widgets::Borders::ALL)
+            .title(" Input (Enter to send, Ctrl-D to quit) "),
+    );
+
+    let mut event_stream = EventStream::new();
+    let (tx, mut rx) = mpsc::channel::<AppEvent>(100);
+
+    let mut last_interaction_id: Option<String> = None;
+    let mut history: Vec<String> = Vec::new();
+    let mut history_index: Option<usize> = None;
+
+    // Load history from file
+    if let Some(history_path) = home::home_dir().map(|p| p.join(".clemini_history"))
+        && let Ok(content) = std::fs::read_to_string(&history_path)
+    {
+        history = content.lines().map(String::from).collect();
+    }
+
+    loop {
+        // Render
+        terminal.draw(|frame| {
+            tui::render(frame, &app, textarea.lines().len() as u16);
+            let input_area = tui::ui::get_input_area(frame, textarea.lines().len() as u16);
+            frame.render_widget(&textarea, input_area);
+        })?;
+
+        // Handle events
+        tokio::select! {
+            // Keyboard input
+            Some(Ok(event)) = event_stream.next() => {
+                if let Event::Key(key) = event {
+                    // Check for quit
+                    if key.code == KeyCode::Char('d') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                        break;
+                    }
+
+                    // Check for cancel during streaming
+                    if key.code == KeyCode::Esc && app.activity().is_busy() {
+                        app.cancel();
+                        app.append_to_chat(&"[cancelled]".yellow().to_string());
+                        app.set_activity(tui::Activity::Idle);
+                        continue;
+                    }
+
+                    // Handle Enter to submit
+                    if key.code == KeyCode::Enter && !app.activity().is_busy() {
+                        let input: String = textarea.lines().join("\n");
+                        let input = input.trim();
+
+                        if !input.is_empty() {
+                            // Add to history
+                            history.push(input.to_string());
+                            history_index = None;
+
+                            // Save to history file
+                            if let Some(history_path) = home::home_dir().map(|p| p.join(".clemini_history")) {
+                                let _ = std::fs::write(&history_path, history.join("\n"));
+                            }
+
+                            // Check for quit command
+                            if input == "/quit" || input == "/exit" || input == "/q" {
+                                break;
+                            }
+
+                            // Check for clear command
+                            if input == "/clear" || input == "/c" {
+                                last_interaction_id = None;
+                                app.clear_chat();
+                                app.estimated_tokens = 0;
+                                textarea = TextArea::default();
+                                textarea.set_block(
+                                    ratatui::widgets::Block::default()
+                                        .borders(ratatui::widgets::Borders::ALL)
+                                        .title(" Input (Enter to send, Ctrl-D to quit) "),
+                                );
+                                continue;
+                            }
+
+                            // Check for help command
+                            if input == "/help" || input == "/h" {
+                                app.append_to_chat(&get_help_text());
+                                textarea = TextArea::default();
+                                textarea.set_block(
+                                    ratatui::widgets::Block::default()
+                                        .borders(ratatui::widgets::Borders::ALL)
+                                        .title(" Input (Enter to send, Ctrl-D to quit) "),
+                                );
+                                continue;
+                            }
+
+                            // Handle other builtin commands
+                            if let Some(response) = handle_builtin_command(input, model, &cwd) {
+                                app.append_to_chat(&response);
+                                textarea = TextArea::default();
+                                textarea.set_block(
+                                    ratatui::widgets::Block::default()
+                                        .borders(ratatui::widgets::Borders::ALL)
+                                        .title(" Input (Enter to send, Ctrl-D to quit) "),
+                                );
+                                continue;
+                            }
+
+                            // Show user input in chat
+                            app.append_to_chat(&format!("> {}", input.cyan()));
+                            app.append_to_chat("");
+
+                            // Start interaction
+                            app.set_activity(tui::Activity::Streaming);
+                            app.reset_cancellation();
+
+                            let tx = tx.clone();
+                            let client = client.clone();
+                            let tool_service = tool_service.clone();
+                            let input = input.to_string();
+                            let prev_id = last_interaction_id.clone();
+                            let model = model.to_string();
+                            let system_prompt = system_prompt.clone();
+                            let cancellation_flag = app.cancellation_flag();
+
+                            tokio::spawn(async move {
+                                let cancellation_token = CancellationToken::new();
+                                let ct_clone = cancellation_token.clone();
+
+                                // Watch for cancellation flag
+                                let cancel_flag = cancellation_flag.clone();
+                                tokio::spawn(async move {
+                                    loop {
+                                        if cancel_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                                            ct_clone.cancel();
+                                            break;
+                                        }
+                                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                                    }
+                                });
+
+                                let progress_tx = tx.clone();
+                                let progress_fn: Option<Arc<dyn Fn(InteractionProgress) + Send + Sync>> =
+                                    Some(Arc::new(move |progress: InteractionProgress| {
+                                        let _ = progress_tx.try_send(AppEvent::ToolProgress(progress));
+                                    }));
+
+                                let result = run_interaction(
+                                    &client,
+                                    &tool_service,
+                                    &input,
+                                    prev_id.as_deref(),
+                                    &model,
+                                    stream_output,
+                                    progress_fn,
+                                    &system_prompt,
+                                    cancellation_token,
+                                    true, // TUI mode
+                                )
+                                .await;
+
+                                let _ = tx.send(AppEvent::InteractionComplete(result)).await;
+                            });
+
+                            // Clear input
+                            textarea = TextArea::default();
+                            textarea.set_block(
+                                ratatui::widgets::Block::default()
+                                    .borders(ratatui::widgets::Borders::ALL)
+                                    .title(" Input (Enter to send, Ctrl-D to quit) "),
+                            );
+                        }
+                        continue;
+                    }
+
+                    // History navigation
+                    if key.code == KeyCode::Up && !app.activity().is_busy() {
+                        if !history.is_empty() {
+                            let new_index = match history_index {
+                                None => history.len().saturating_sub(1),
+                                Some(i) => i.saturating_sub(1),
+                            };
+                            history_index = Some(new_index);
+                            textarea = TextArea::new(vec![history[new_index].clone()]);
+                            textarea.set_block(
+                                ratatui::widgets::Block::default()
+                                    .borders(ratatui::widgets::Borders::ALL)
+                                    .title(" Input (Enter to send, Ctrl-D to quit) "),
+                            );
+                        }
+                        continue;
+                    }
+
+                    if key.code == KeyCode::Down && !app.activity().is_busy() {
+                        if let Some(i) = history_index {
+                            if i + 1 < history.len() {
+                                history_index = Some(i + 1);
+                                textarea = TextArea::new(vec![history[i + 1].clone()]);
+                            } else {
+                                history_index = None;
+                                textarea = TextArea::default();
+                            }
+                            textarea.set_block(
+                                ratatui::widgets::Block::default()
+                                    .borders(ratatui::widgets::Borders::ALL)
+                                    .title(" Input (Enter to send, Ctrl-D to quit) "),
+                            );
+                        }
+                        continue;
+                    }
+
+                    // Scroll chat with Page Up/Down
+                    if key.code == KeyCode::PageUp {
+                        app.scroll_up(10);
+                        continue;
+                    }
+                    if key.code == KeyCode::PageDown {
+                        app.scroll_down(10);
+                        continue;
+                    }
+
+                    // Pass other keys to textarea
+                    if !app.activity().is_busy() {
+                        textarea.input(Input::from(key));
+                    }
+                }
+            }
+
+            // Events from interaction task
+            Some(event) = rx.recv() => {
+                match event {
+                    AppEvent::StreamChunk(text) => {
+                        app.append_to_chat(&text);
+                    }
+                    AppEvent::ToolProgress(progress) => {
+                        if progress.status == "executing" {
+                            app.set_activity(tui::Activity::Executing(progress.tool.clone()));
+                        }
+                    }
+                    AppEvent::InteractionComplete(result) => {
+                        app.set_activity(tui::Activity::Idle);
+                        match result {
+                            Ok(result) => {
+                                last_interaction_id = result.id;
+                                app.update_stats(result.context_size, result.tool_calls.len());
+                            }
+                            Err(e) => {
+                                app.append_to_chat(&format!("[error: {}]", e).bright_red().to_string());
+                            }
+                        }
+                    }
+                }
+            }
+
+            // TUI output messages from OutputSink (via TuiSink)
+            Some(message) = tui_rx.recv() => {
+                match message {
+                    TuiMessage::Line(text) => app.append_to_chat(&text),
+                    TuiMessage::Streaming(text) => app.append_streaming(&text),
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn handle_builtin_command(input: &str, model: &str, cwd: &std::path::Path) -> Option<String> {
+    match input {
+        "/version" | "/v" => Some(format!(
+            "clemini v{} | {}",
+            env!("CARGO_PKG_VERSION"),
+            model
+        )),
+        "/model" | "/m" => Some(model.to_string()),
+        "/pwd" | "/cwd" => Some(cwd.display().to_string()),
+        "/diff" | "/d" => Some(run_git_command_capture(&["diff"], "no uncommitted changes")),
+        "/status" | "/s" => Some(run_git_command_capture(
+            &["status", "--short"],
+            "clean working directory",
+        )),
+        "/log" | "/l" => Some(run_git_command_capture(
+            &["log", "--oneline", "-5"],
+            "no commits found",
+        )),
+        "/branch" | "/b" => Some(run_git_command_capture(&["branch"], "no branches found")),
+        _ if input.starts_with('!') => {
+            let cmd = input.strip_prefix('!').unwrap().trim();
+            if cmd.is_empty() {
+                None
+            } else {
+                Some(run_shell_command_capture(cmd))
+            }
+        }
+        _ => None,
+    }
+}
+
+fn get_help_text() -> String {
+    [
+        "Commands:",
+        "  /q, /quit, /exit  Exit the REPL",
+        "  /c, /clear        Clear conversation history",
+        "  /v, /version      Show version and model",
+        "  /m, /model        Show model name",
+        "  /pwd, /cwd        Show current working directory",
+        "  /d, /diff         Show git diff",
+        "  /s, /status       Show git status",
+        "  /l, /log          Show git log",
+        "  /b, /branch       Show git branches",
+        "  /h, /help         Show this help message",
+        "",
+        "Navigation:",
+        "  Up/Down           History navigation",
+        "  PageUp/PageDown   Scroll chat",
+        "  Esc               Cancel current operation",
+        "  Ctrl-D            Quit",
+        "",
+        "Shell escape:",
+        "  ! <command>       Run a shell command directly",
+    ]
+    .join("\n")
+}
+
+fn print_help() {
+    eprintln!("{}", get_help_text());
+}
+
+fn run_git_command_capture(args: &[&str], empty_msg: &str) -> String {
+    match std::process::Command::new("git").args(args).output() {
         Ok(o) => {
             if o.status.success() {
                 let stdout = String::from_utf8_lossy(&o.stdout);
                 if stdout.is_empty() {
-                    eprintln!("[{empty_msg}]");
+                    format!("[{empty_msg}]")
                 } else {
-                    println!("{stdout}");
+                    stdout.trim().to_string()
                 }
             } else {
                 let stderr = String::from_utf8_lossy(&o.stderr);
-                eprintln!("[git {} error: {}]", args[0], stderr.trim());
+                format!("[git {} error: {}]", args[0], stderr.trim())
             }
         }
-        Err(e) => {
-            eprintln!("[failed to run git {}: {}]", args[0], e);
-        }
+        Err(e) => format!("[failed to run git {}: {}]", args[0], e),
     }
 }
 
-fn run_shell_command(command: &str) {
-    let mut cmd = if cfg!(target_os = "windows") {
-        let mut c = std::process::Command::new("cmd");
-        c.args(["/C", command]);
-        c
+fn run_shell_command_capture(command: &str) -> String {
+    let output = if cfg!(target_os = "windows") {
+        std::process::Command::new("cmd")
+            .args(["/C", command])
+            .output()
     } else {
-        let mut c = std::process::Command::new("sh");
-        c.args(["-c", command]);
-        c
+        std::process::Command::new("sh")
+            .args(["-c", command])
+            .output()
     };
 
-    match cmd.status() {
-        Ok(status) => {
-            if let Some(code) = status.code().filter(|_| !status.success()) {
-                eprintln!("[process exited with code: {code}]");
+    match output {
+        Ok(o) => {
+            let mut result = String::new();
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            if !stdout.is_empty() {
+                result.push_str(&stdout);
             }
+            if !stderr.is_empty() {
+                if !result.is_empty() {
+                    result.push('\n');
+                }
+                result.push_str(&stderr);
+            }
+            if !o.status.success() {
+                if !result.is_empty() {
+                    result.push('\n');
+                }
+                result.push_str(&format!("[exit code: {:?}]", o.status.code()));
+            }
+            result.trim().to_string()
         }
-        Err(e) => {
-            eprintln!("[failed to run command: {e}]");
-        }
+        Err(e) => format!("[failed to run command: {}]", e),
     }
 }
 
@@ -726,33 +1080,38 @@ fn flush_response(
     skin: &MadSkin,
     stream_output: bool,
     force_newline: bool,
+    tui_mode: bool,
 ) {
     if !response_text.is_empty() {
         // Log to file only - don't duplicate to terminal since we're rendering it
         log_to_file(&format!("> {}", response_text.trim()));
-        if stream_output {
-            let width = termimad::terminal_size().0.max(20);
-            let mut visual_lines = 0;
-            for line in response_text.split('\n') {
-                let len = line.chars().count();
-                if len == 0 {
-                    visual_lines += 1;
-                } else {
-                    visual_lines += (len as u16).div_ceil(width);
+
+        // In TUI mode, text is already sent through the channel - don't print to terminal
+        if !tui_mode {
+            if stream_output {
+                let width = termimad::terminal_size().0.max(20);
+                let mut visual_lines = 0;
+                for line in response_text.split('\n') {
+                    let len = line.chars().count();
+                    if len == 0 {
+                        visual_lines += 1;
+                    } else {
+                        visual_lines += (len as u16).div_ceil(width);
+                    }
                 }
-            }
-            for i in 0..visual_lines {
-                if i == 0 {
-                    print!("\r\x1B[2K");
-                } else {
-                    print!("\x1B[F\x1B[2K");
+                for i in 0..visual_lines {
+                    if i == 0 {
+                        print!("\r\x1B[2K");
+                    } else {
+                        print!("\x1B[F\x1B[2K");
+                    }
                 }
+                let _ = io::stdout().flush();
             }
-            let _ = io::stdout().flush();
+            skin.print_text(response_text);
         }
-        skin.print_text(response_text);
         response_text.clear();
-    } else if force_newline {
+    } else if force_newline && !tui_mode {
         println!();
     }
 }
@@ -932,6 +1291,7 @@ pub async fn run_interaction(
     progress_fn: Option<Arc<dyn Fn(InteractionProgress) + Send + Sync>>,
     system_prompt: &str,
     cancellation_token: CancellationToken,
+    tui_mode: bool,
 ) -> Result<InteractionResult> {
     let functions: Vec<_> = tool_service
         .tools()
@@ -986,8 +1346,7 @@ pub async fn run_interaction(
                     StreamChunk::Delta(content) => {
                         if let Some(text) = content.as_text() {
                             if stream_output {
-                                print!("{text}");
-                                io::stdout().flush()?;
+                                emit_streaming(text);
                             }
                             response_text.push_str(text);
                             full_response.push_str(text);
@@ -1008,7 +1367,11 @@ pub async fn run_interaction(
                 },
                 Err(e) => {
                     let err_msg = e.to_string();
-                    eprintln!("\n{}", format!("[stream error: {err_msg}]").bright_red());
+                    log_event_raw(
+                        &format!("\n[stream error: {err_msg}]")
+                            .bright_red()
+                            .to_string(),
+                    );
                     return Err(anyhow::anyhow!(err_msg));
                 }
             }
@@ -1031,12 +1394,12 @@ pub async fn run_interaction(
         // Use accumulated function calls from Delta chunks (streaming mode doesn't populate Complete.outputs)
         if accumulated_function_calls.is_empty() {
             // Render final text
-            flush_response(&mut response_text, &skin, stream_output, true);
+            flush_response(&mut response_text, &skin, stream_output, true, tui_mode);
             break;
         }
 
         // Process function calls (accumulated from Delta chunks)
-        flush_response(&mut response_text, &skin, stream_output, false);
+        flush_response(&mut response_text, &skin, stream_output, false, tui_mode);
         full_response.clear(); // Clear accumulated text before tools as we'll only return text after final tool
 
         let tool_result = execute_tools(
@@ -1074,7 +1437,7 @@ pub async fn run_interaction(
     }
 
     // Render any remaining text (e.g., if stream ended abruptly or on error)
-    flush_response(&mut response_text, &skin, stream_output, false);
+    flush_response(&mut response_text, &skin, stream_output, false, tui_mode);
 
     if current_context_size > 0 {
         check_context_window(current_context_size);

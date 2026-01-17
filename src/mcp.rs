@@ -547,6 +547,7 @@ impl McpServer {
             Some(progress_fn),
             &self.system_prompt,
             cancellation_token,
+            false, // not TUI mode
         )
         .await?;
 

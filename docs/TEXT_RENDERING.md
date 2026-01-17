@@ -6,12 +6,18 @@ This document defines the visual output standards for clemini across all output 
 
 ### OutputSink Trait
 
-All user-facing output flows through the `OutputSink` trait, which has two implementations:
+All user-facing output flows through the `OutputSink` trait, which has three implementations:
 
 | Sink | Mode | Behavior |
 |------|------|----------|
-| `TerminalSink` | REPL | Writes to stderr + log files |
+| `TerminalSink` | Plain REPL (`--no-tui`) | Writes to stderr + log files, uses termimad for markdown |
+| `TuiSink` | TUI REPL (default) | Sends to TUI via channel + log files, plain text (no termimad) |
 | `FileSink` | MCP Server | Writes to log files only |
+
+The trait also includes `emit_streaming()` for real-time streaming output:
+- `TerminalSink`: Uses `print!()` to stdout
+- `TuiSink`: Sends `TuiMessage::Streaming` through channel
+- `FileSink`: No-op (no terminal to stream to)
 
 ### Logging Functions
 

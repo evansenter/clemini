@@ -18,7 +18,12 @@ async-trait = "0.1"
 
 # CLI
 clap = { version = "4", features = ["derive"] }
-reedline = "0.38"
+
+# TUI
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }
+tui-textarea = { version = "0.7", features = ["crossterm"] }
+ansi-to-tui = "7"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
