@@ -196,6 +196,12 @@ fn log_event_to_file(message: &str, render_markdown: bool) {
     }
 }
 
+/// Format a log line with timestamp, ensuring ANSI codes don't bleed between lines.
+fn format_log_line(timestamp: &str, content: &str) -> String {
+    // Reset before and after timestamp to prevent ANSI code bleed between lines
+    format!("\x1b[0m{}\x1b[0m {}", timestamp.cyan(), content)
+}
+
 fn write_to_log_file(path: impl Into<PathBuf>, rendered: &str) -> std::io::Result<()> {
     let mut file = std::fs::OpenOptions::new()
         .create(true)
@@ -207,9 +213,8 @@ fn write_to_log_file(path: impl Into<PathBuf>, rendered: &str) -> std::io::Resul
         writeln!(file)?;
     } else {
         for line in rendered.lines() {
-            let timestamp = format!("[{}]", chrono::Local::now().format("%H:%M:%S%.3f")).cyan();
-            // Reset before and after timestamp to prevent ANSI code bleed between lines
-            writeln!(file, "\x1b[0m{}\x1b[0m {}", timestamp, line)?;
+            let timestamp = format!("[{}]", chrono::Local::now().format("%H:%M:%S%.3f"));
+            writeln!(file, "{}", format_log_line(&timestamp, line))?;
         }
     }
     Ok(())
@@ -1525,5 +1530,50 @@ mod event_handling_tests {
             app_events.is_empty(),
             "Cancelled should not produce AppEvents"
         );
+    }
+
+    // =========================================
+    // Log formatting tests
+    // =========================================
+
+    #[test]
+    fn test_format_log_line_has_reset_before_timestamp() {
+        let line = format_log_line("[12:34:56.789]", "some content");
+        // Should start with ANSI reset to prevent color bleed from previous lines
+        assert!(line.starts_with("\x1b[0m"), "Should start with ANSI reset");
+    }
+
+    #[test]
+    fn test_format_log_line_has_reset_after_timestamp() {
+        let line = format_log_line("[12:34:56.789]", "some content");
+        // Should have reset after timestamp (before content) to isolate timestamp color
+        // The cyan codes wrap the timestamp, then reset, then content
+        assert!(
+            line.contains("\x1b[0m \x1b[0m") || line.contains("\x1b[0m some"),
+            "Should have reset before content"
+        );
+    }
+
+    #[test]
+    fn test_format_log_line_with_ansi_content() {
+        // Simulate dimmed content like bash output
+        let dimmed_content = "\x1b[2msome dimmed text\x1b[0m";
+        let line = format_log_line("[12:34:56.789]", dimmed_content);
+
+        // The line should start with reset (protecting from previous line bleed)
+        assert!(line.starts_with("\x1b[0m"));
+        // And contain the content
+        assert!(line.contains("some dimmed text"));
+    }
+
+    #[test]
+    fn test_format_log_line_timestamp_gets_cyan() {
+        colored::control::set_override(true);
+        let line = format_log_line("[12:34:56.789]", "content");
+        colored::control::unset_override();
+
+        // Cyan ANSI code is \x1b[36m
+        assert!(line.contains("\x1b[36m"), "Timestamp should be cyan");
+        assert!(line.contains("[12:34:56.789]"));
     }
 }
