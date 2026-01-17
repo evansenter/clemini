@@ -21,6 +21,7 @@ use tracing::instrument;
 // Note: info! macro goes to JSON logs only. For human-readable logs, use crate::log_event()
 
 use crate::agent::{AgentEvent, run_interaction};
+use crate::events::{estimate_tokens, format_tool_args, format_tool_result};
 use crate::tools::CleminiToolService;
 
 #[derive(Debug, Deserialize, Clone)]
@@ -528,13 +529,23 @@ impl McpServer {
         // Create channel for agent events
         let (events_tx, mut events_rx) = mpsc::channel::<AgentEvent>(100);
 
-        // Spawn task to send progress notifications from agent events
+        // Spawn task to send progress notifications and log tool events
         let tx_clone = tx.clone();
         tokio::spawn(async move {
             while let Some(event) = events_rx.recv().await {
                 let notification = match &event {
                     AgentEvent::ToolExecuting(calls) => {
                         for call in calls {
+                            // Log to human-readable log
+                            let args_str = format_tool_args(&call.args);
+                            crate::log_event(&format!(
+                                "{} {} {}",
+                                "🔧".dimmed(),
+                                call.name.cyan(),
+                                args_str.dimmed()
+                            ));
+
+                            // Send MCP notification
                             let notif = json!({
                                 "jsonrpc": "2.0",
                                 "method": "notifications/progress",
@@ -551,6 +562,20 @@ impl McpServer {
                         continue;
                     }
                     AgentEvent::ToolResult(result) => {
+                        // Log to human-readable log
+                        let tokens = estimate_tokens(&result.result);
+                        let has_error = result.is_error();
+                        crate::log_event(&format_tool_result(
+                            &result.name,
+                            result.duration,
+                            tokens,
+                            has_error,
+                        ));
+                        if let Some(err_msg) = result.error_message() {
+                            crate::log_event(&format!("  └─ error: {}", err_msg.dimmed()));
+                        }
+
+                        // Send MCP notification
                         json!({
                             "jsonrpc": "2.0",
                             "method": "notifications/progress",
