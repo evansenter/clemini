@@ -9,7 +9,6 @@ use serde_json::Value;
 use std::env;
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, OnceLock};
 use std::time::Instant;
 use termimad::MadSkin;
@@ -750,43 +749,6 @@ fn check_context_window(total_tokens: u32) {
     }
 }
 
-struct Spinner {
-    handle: tokio::task::JoinHandle<()>,
-    stop: Arc<AtomicBool>,
-}
-
-impl Spinner {
-    fn start() -> Self {
-        let stop = Arc::new(AtomicBool::new(false));
-        let stop_clone = stop.clone();
-        let handle = tokio::spawn(async move {
-            let chars = ['|', '/', '-', '\\'];
-            let mut i = 0;
-            while !stop_clone.load(Ordering::SeqCst) {
-                eprint!("\r{}", chars[i]);
-                let _ = io::stderr().flush();
-                i = (i + 1) % chars.len();
-                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-            }
-            // Clear spinner
-            eprint!("\r\x1B[K");
-            let _ = io::stderr().flush();
-        });
-        Self { handle, stop }
-    }
-
-    async fn stop(self) {
-        self.stop.store(true, Ordering::SeqCst);
-        let _ = self.handle.await;
-    }
-}
-
-async fn stop_spinner(spinner: &mut Option<Spinner>) {
-    if let Some(s) = spinner.take() {
-        s.stop().await;
-    }
-}
-
 fn flush_response(
     response_text: &mut String,
     skin: &MadSkin,
@@ -872,18 +834,7 @@ fn format_tool_args(args: &Value) -> String {
     }
 }
 
-fn estimate_tokens(value: &serde_json::Value) -> u32 {
-    // Rough estimate: ~4 chars per token
-    (value.to_string().len() / 4) as u32
-}
-
-fn format_tool_result(
-    name: &str,
-    duration: std::time::Duration,
-    estimated_tokens: u32,
-    cumulative_percent: f64,
-    has_error: bool,
-) -> String {
+fn format_tool_result(name: &str, duration: std::time::Duration, has_error: bool) -> String {
     let error_suffix = if has_error {
         " ERROR".bright_red().bold().to_string()
     } else {
@@ -897,46 +848,27 @@ fn format_tool_result(
         format!("{:.2}s", elapsed_secs)
     };
 
-    format!(
-        "[{}] {}, ~{} tok ({:.1}%){}",
-        name.cyan(),
-        duration_str.yellow(),
-        estimated_tokens,
-        cumulative_percent,
-        error_suffix
-    )
+    format!("[{}] {}{}", name.cyan(), duration_str.yellow(), error_suffix)
 }
 
 struct ToolExecutionResult {
     results: Vec<Content>,
-    cumulative_tool_tokens: u32,
     cancelled: bool,
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn execute_tools(
     tool_service: &Arc<CleminiToolService>,
     accumulated_function_calls: &[(Option<String>, String, Value)],
-    spinner: &mut Option<Spinner>,
     progress_fn: &Option<Arc<dyn Fn(InteractionProgress) + Send + Sync>>,
     tool_calls: &mut Vec<String>,
-    mut cumulative_tool_tokens: u32,
     cancellation_token: &CancellationToken,
 ) -> ToolExecutionResult {
     let mut results = Vec::new();
-    let has_interactive = accumulated_function_calls
-        .iter()
-        .any(|(_, name, _)| name == "ask_user");
-
-    if !has_interactive {
-        *spinner = Some(Spinner::start());
-    }
 
     for (call_id, call_name, call_args) in accumulated_function_calls {
         if cancellation_token.is_cancelled() {
             return ToolExecutionResult {
                 results,
-                cumulative_tool_tokens,
                 cancelled: true,
             };
         }
@@ -957,9 +889,6 @@ async fn execute_tools(
             });
         }
 
-        // Stop spinner during tool execution (tools may print output)
-        stop_spinner(spinner).await;
-
         let start = Instant::now();
         let result: Value = match tool_service.execute(call_name, call_args.clone()).await {
             Ok(v) => v,
@@ -969,11 +898,6 @@ async fn execute_tools(
             }
         };
         let duration = start.elapsed();
-
-        // Restart spinner for next tool (if not interactive)
-        if !has_interactive && spinner.is_none() {
-            *spinner = Some(Spinner::start());
-        }
 
         tool_calls.push(call_name.to_string());
         let has_error = result.get("error").is_some();
@@ -987,27 +911,12 @@ async fn execute_tools(
             });
         }
 
-        let call_tokens = estimate_tokens(call_args);
-        let response_tokens = estimate_tokens(&result);
-        let total_tool_tokens = call_tokens + response_tokens;
-        cumulative_tool_tokens += total_tool_tokens;
-        let cumulative_percent =
-            (f64::from(cumulative_tool_tokens) / f64::from(CONTEXT_WINDOW_LIMIT)) * 100.0;
-
-        let formatted = format_tool_result(
-            call_name,
-            duration,
-            total_tool_tokens,
-            cumulative_percent,
-            has_error,
-        );
+        let formatted = format_tool_result(call_name, duration, has_error);
         log_event(&formatted);
-        eprintln!("{formatted}");
 
         if has_error && let Some(error_msg) = result.get("error").and_then(|e: &Value| e.as_str()) {
             let error_detail = format!("  └─ {}: {}", "error".red(), error_msg.dimmed());
             log_event(&error_detail);
-            eprintln!("{error_detail}");
         }
 
         results.push(Content::function_result(
@@ -1019,7 +928,6 @@ async fn execute_tools(
 
     ToolExecutionResult {
         results,
-        cumulative_tool_tokens,
         cancelled: false,
     }
 }
@@ -1059,13 +967,11 @@ pub async fn run_interaction(
 
     let mut last_id = previous_interaction_id.map(String::from);
     let mut current_context_size: u32 = 0;
-    let mut cumulative_tool_tokens: u32 = 0;
     let mut total_tokens: u32 = 0;
     let mut tool_calls: Vec<String> = Vec::new();
     let mut response_text = String::new();
     let mut full_response = String::new();
     let skin = MadSkin::default();
-    let mut spinner: Option<Spinner> = None;
 
     const MAX_ITERATIONS: usize = 100;
     for _ in 0..MAX_ITERATIONS {
@@ -1077,7 +983,6 @@ pub async fn run_interaction(
             // Check for cancellation at each iteration
             if cancellation_token.is_cancelled() {
                 eprintln!("{}", "[cancelled]".yellow());
-                stop_spinner(&mut spinner).await;
                 return Ok(InteractionResult {
                     id: last_id,
                     response: full_response,
@@ -1153,19 +1058,14 @@ pub async fn run_interaction(
         let tool_result = execute_tools(
             tool_service,
             &accumulated_function_calls,
-            &mut spinner,
             &progress_fn,
             &mut tool_calls,
-            cumulative_tool_tokens,
             &cancellation_token,
         )
         .await;
 
-        cumulative_tool_tokens = tool_result.cumulative_tool_tokens;
-
         if tool_result.cancelled {
             eprintln!("{}", "[cancelled]".yellow());
-            stop_spinner(&mut spinner).await;
             return Ok(InteractionResult {
                 id: last_id,
                 response: full_response,
@@ -1176,8 +1076,6 @@ pub async fn run_interaction(
         }
 
         let results = tool_result.results;
-
-        stop_spinner(&mut spinner).await;
 
         // Create new stream for the next turn
         stream = Box::pin(
@@ -1193,9 +1091,6 @@ pub async fn run_interaction(
 
     // Render any remaining text (e.g., if stream ended abruptly or on error)
     flush_response(&mut response_text, &skin, stream_output, false);
-
-    // Cleanup spinner if it's still running
-    stop_spinner(&mut spinner).await;
 
     if current_context_size > 0 {
         check_context_window(current_context_size);
