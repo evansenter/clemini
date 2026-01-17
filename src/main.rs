@@ -74,7 +74,7 @@ After changes, verify they work:
 ## Refactoring
 - Passing syntax/type checks ≠ working code. Test affected functionality.
 - Timeouts during testing usually mean broken code, not network issues.
-- For unfamiliar APIs, read source/docs before trial-and-error guessing.
+- For unfamiliar APIs, read source/docs first. If unavailable, ask the user.
 - Before declaring complete, run tests that exercise changed code paths.
 
 ## Judgment
