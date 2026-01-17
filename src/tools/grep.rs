@@ -6,7 +6,7 @@ use grep::searcher::{BinaryDetection, SearcherBuilder, Sink, SinkContext, SinkFi
 use ignore::WalkBuilder;
 use ignore::overrides::OverrideBuilder;
 use serde_json::{Value, json};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tracing::instrument;
 
@@ -15,7 +15,7 @@ pub struct GrepTool {
     allowed_paths: Vec<PathBuf>,
 }
 
-use crate::tools::{DEFAULT_EXCLUDES, validate_path};
+use crate::tools::{DEFAULT_EXCLUDES, make_relative, resolve_and_validate_path, validate_path};
 
 const MAX_LINE_LENGTH: usize = 1000;
 
@@ -34,8 +34,8 @@ fn truncate_line(l: &str) -> String {
     }
 }
 
-struct GrepSink<'a> {
-    path: &'a Path,
+struct GrepSink {
+    path: String,
     matches: Arc<Mutex<Vec<Value>>>,
     max_results: usize,
     context: u64,
@@ -48,7 +48,7 @@ struct MatchBlock {
     lines: Vec<(u64, String, bool)>, // (line_number, content, is_match)
 }
 
-impl<'a> GrepSink<'a> {
+impl GrepSink {
     fn flush_block(&mut self) {
         if let Some(block) = self.current_block.take() {
             let mut matches = self.matches.lock().unwrap();
@@ -75,7 +75,7 @@ impl<'a> GrepSink<'a> {
     }
 }
 
-impl<'a> Sink for GrepSink<'a> {
+impl Sink for GrepSink {
     type Error = std::io::Error;
 
     fn matched(
@@ -88,7 +88,7 @@ impl<'a> Sink for GrepSink<'a> {
             .unwrap_or("")
             .trim_end()
             .to_string();
-        let path_str = self.path.to_string_lossy().to_string();
+        let path_str = self.path.clone();
 
         if self.context == 0 {
             let mut matches = self.matches.lock().unwrap();
@@ -137,7 +137,7 @@ impl<'a> Sink for GrepSink<'a> {
             .unwrap_or("")
             .trim_end()
             .to_string();
-        let path_str = self.path.to_string_lossy().to_string();
+        let path_str = self.path.clone();
 
         if let Some(block) = self.current_block.as_mut() {
             if line_number > block.lines.last().unwrap().0 + 1 {
@@ -189,6 +189,10 @@ impl CallableFunction for GrepTool {
                         "type": "string",
                         "description": "Glob pattern for files to search (e.g., '**/*.rs', 'src/*.ts'). Defaults to '**/*' if not specified."
                     },
+                    "path": {
+                        "type": "string",
+                        "description": "Directory to search in (relative to cwd or absolute), defaults to cwd"
+                    },
                     "case_insensitive": {
                         "type": "boolean",
                         "description": "If true, perform case-insensitive matching (default: false)"
@@ -231,6 +235,22 @@ impl CallableFunction for GrepTool {
             .and_then(|v| v.as_u64())
             .unwrap_or(100) as usize;
 
+        let search_path = args.get("path").and_then(|v| v.as_str());
+
+        // Resolve and validate the search path
+        let base_dir = if let Some(p) = search_path {
+            match resolve_and_validate_path(p, &self.cwd, &self.allowed_paths) {
+                Ok(p) => p,
+                Err(e) => {
+                    return Ok(json!({
+                        "error": format!("Access denied for path '{}': {}. Path must be within allowed paths.", p, e)
+                    }));
+                }
+            }
+        } else {
+            self.cwd.clone()
+        };
+
         let matcher = RegexMatcherBuilder::new()
             .case_insensitive(case_insensitive)
             .build(pattern)
@@ -255,7 +275,7 @@ impl CallableFunction for GrepTool {
             FunctionError::ExecutionError(format!("Failed to build glob set: {}", e).into())
         })?;
 
-        let mut override_builder = OverrideBuilder::new(&self.cwd);
+        let mut override_builder = OverrideBuilder::new(&base_dir);
         for exclude in DEFAULT_EXCLUDES {
             override_builder
                 .add(&format!("!{}", exclude))
@@ -267,7 +287,7 @@ impl CallableFunction for GrepTool {
             FunctionError::ExecutionError(format!("Failed to build overrides: {}", e).into())
         })?;
 
-        let mut walker = WalkBuilder::new(&self.cwd);
+        let mut walker = WalkBuilder::new(&base_dir);
         walker.overrides(overrides);
         let walk = walker.build();
         for result in walk {
@@ -287,15 +307,15 @@ impl CallableFunction for GrepTool {
                 continue;
             }
 
-            let relative_path = path.strip_prefix(&self.cwd).unwrap_or(path);
+            let relative_path_str = make_relative(path, &self.cwd);
 
-            if !glob_set.is_match(relative_path) {
+            if !glob_set.is_match(&relative_path_str) {
                 continue;
             }
 
             files_searched += 1;
             let mut sink = GrepSink {
-                path: relative_path,
+                path: relative_path_str,
                 matches: Arc::clone(&matches),
                 max_results,
                 context,
@@ -465,6 +485,31 @@ mod tests {
 
         let result = tool.call(args).await.unwrap();
         let matches = result["matches"].as_array().unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0]["file"], "subdir/test.txt");
+    }
+
+    #[tokio::test]
+    async fn test_grep_with_path() {
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().to_path_buf();
+        let sub = cwd.join("subdir");
+        fs::create_dir(&sub).unwrap();
+        fs::write(sub.join("test.txt"), "match in subdir").unwrap();
+        fs::write(cwd.join("test.txt"), "match in root").unwrap();
+
+        let tool = GrepTool::new(cwd.clone(), vec![cwd.clone()]);
+
+        // Search ONLY in subdir using the new path parameter
+        let args = json!({
+            "pattern": "match",
+            "path": "subdir"
+        });
+
+        let result = tool.call(args).await.unwrap();
+        let matches = result["matches"].as_array().unwrap();
+
+        // Should ONLY find the one in subdir
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0]["file"], "subdir/test.txt");
     }
