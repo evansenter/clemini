@@ -3,7 +3,7 @@ use clap::Parser;
 use colored::Colorize;
 use futures_util::StreamExt;
 use genai_rs::{CallableFunction, Client, Content, StreamChunk, ToolService};
-use reedline::{Completer, DefaultPrompt, FileBackedHistory, Reedline, Signal, Span, Suggestion};
+use reedline::{DefaultPrompt, FileBackedHistory, Reedline, Signal};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::env;
@@ -401,66 +401,6 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-struct CleminiCompleter {
-    commands: Vec<String>,
-}
-
-impl CleminiCompleter {
-    fn new() -> Self {
-        Self {
-            commands: vec![
-                "/quit".to_string(),
-                "/exit".to_string(),
-                "/q".to_string(),
-                "/clear".to_string(),
-                "/c".to_string(),
-                "/version".to_string(),
-                "/v".to_string(),
-                "/model".to_string(),
-                "/m".to_string(),
-                "/pwd".to_string(),
-                "/cwd".to_string(),
-                "/diff".to_string(),
-                "/d".to_string(),
-                "/status".to_string(),
-                "/s".to_string(),
-                "/log".to_string(),
-                "/l".to_string(),
-                "/branch".to_string(),
-                "/b".to_string(),
-                "/tokens".to_string(),
-                "/t".to_string(),
-                "/stats".to_string(),
-                "/help".to_string(),
-                "/h".to_string(),
-                "/?".to_string(),
-            ],
-        }
-    }
-}
-
-impl Completer for CleminiCompleter {
-    fn complete(&mut self, line: &str, pos: usize) -> Vec<Suggestion> {
-        if line.starts_with('/') && pos <= line.len() {
-            let prefix = &line[..pos];
-            self.commands
-                .iter()
-                .filter(|cmd| cmd.starts_with(prefix))
-                .map(|cmd| Suggestion {
-                    value: cmd.clone(),
-                    description: None,
-                    style: None,
-                    extra: None,
-                    span: Span { start: 0, end: pos },
-                    append_whitespace: true,
-                })
-                .collect()
-        } else {
-            vec![]
-        }
-    }
-}
-
 async fn run_repl(
     client: &Client,
     tool_service: &Arc<CleminiToolService>,
@@ -474,7 +414,7 @@ async fn run_repl(
         p
     });
 
-    let mut line_editor = Reedline::create().with_completer(Box::new(CleminiCompleter::new()));
+    let mut line_editor = Reedline::create();
     if let Some(ref path) = history_path {
         let history = Box::new(FileBackedHistory::with_file(1000, path.to_path_buf())?);
         line_editor = line_editor.with_history(history);
@@ -586,7 +526,7 @@ async fn run_repl(
                     continue;
                 }
 
-                if input == "/help" || input == "/h" || input == "/?" {
+                if input == "/help" || input == "/h" {
                     eprintln!("Commands:");
                     eprintln!("  /q, /quit, /exit  Exit the REPL");
                     eprintln!("  /c, /clear        Clear conversation history");
@@ -599,7 +539,7 @@ async fn run_repl(
                     eprintln!("  /s, /status       Show git status");
                     eprintln!("  /l, /log          Show git log");
                     eprintln!("  /b, /branch       Show git branches");
-                    eprintln!("  /h, /help, /?     Show this help message");
+                    eprintln!("  /h, /help         Show this help message");
                     eprintln!();
                     eprintln!("Shell escape:");
                     eprintln!("  ! <command>       Run a shell command directly");
