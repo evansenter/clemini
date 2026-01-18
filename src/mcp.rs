@@ -642,13 +642,18 @@ impl McpServer {
         )
         .await?;
 
-        // Include interaction_id in the content text so it's visible to the LLM
+        // Include interaction_id and needs_confirmation in the content text so it's visible to the LLM
         // (MCP protocol only guarantees content array is surfaced, not extra fields)
-        let response_text = if let Some(ref id) = result.id {
-            format!("{}\n\ninteraction_id: {}", result.response, id)
-        } else {
-            result.response
-        };
+        let mut response_text = result.response;
+        if let Some(ref confirmation) = result.needs_confirmation {
+            response_text = format!(
+                "Command requires confirmation: {}\n\nTo proceed, continue this conversation and explicitly approve.",
+                confirmation
+            );
+        }
+        if let Some(ref id) = result.id {
+            response_text = format!("{}\n\ninteraction_id: {}", response_text, id);
+        }
 
         Ok(json!({
             "content": [
@@ -659,6 +664,7 @@ impl McpServer {
             ],
             "tool_calls": result.tool_calls,
             "interaction_id": result.id,
+            "needs_confirmation": result.needs_confirmation,
             "isError": false
         }))
     }
