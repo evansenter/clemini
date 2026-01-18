@@ -71,7 +71,7 @@ fn format_request_log(method: &str, params: &Option<Value>) -> (String, String) 
             }
             if let Some(msg) = args.get("message").and_then(|v| v.as_str()) {
                 for line in msg.lines() {
-                    msg_body.push_str(&format!("\n> {}", line));
+                    msg_body.push_str(&format!("\n{}", line));
                 }
             }
         }
@@ -744,8 +744,8 @@ mod tests {
         assert!(detail.contains("clemini_chat"));
         assert!(detail.contains("interaction"));
         assert!(detail.contains("test-id"));
-        assert!(body.contains("> hello"));
-        assert!(body.contains("> world"));
+        assert!(body.contains("hello"));
+        assert!(body.contains("world"));
     }
 
     #[test]
