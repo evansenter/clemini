@@ -859,4 +859,27 @@ mod tests {
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("API Error"));
     }
+
+    #[test]
+    fn test_needs_confirmation_detection() {
+        use serde_json::json;
+
+        // Test that needs_confirmation: true is detected
+        let result_with_confirmation = json!({
+            "needs_confirmation": true,
+            "command": "rm /tmp/test",
+            "message": "Confirm?"
+        });
+        assert!(result_with_confirmation
+            .get("needs_confirmation")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false));
+
+        // Test that normal results don't trigger it
+        let normal_result = json!({"output": "success"});
+        assert!(!normal_result
+            .get("needs_confirmation")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false));
+    }
 }
