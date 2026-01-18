@@ -31,13 +31,18 @@ use crate::log_event;
 // ============================================================================
 
 /// Format function call arguments for display.
-pub fn format_tool_args(args: &Value) -> String {
+pub fn format_tool_args(tool_name: &str, args: &Value) -> String {
     let Some(obj) = args.as_object() else {
         return String::new();
     };
 
     let mut parts = Vec::new();
     for (k, v) in obj {
+        // Skip large strings for the edit tool as they are shown in the diff
+        if tool_name == "edit" && (k == "old_string" || k == "new_string") {
+            continue;
+        }
+
         let val_str = match v {
             Value::String(s) => {
                 let trimmed = s.replace('\n', " ");
@@ -144,7 +149,7 @@ impl EventHandler for TerminalEventHandler {
     }
 
     fn on_tool_executing(&mut self, name: &str, args: &Value) {
-        let args_str = format_tool_args(args);
+        let args_str = format_tool_args(name, args);
         log_event(&format!(
             "{} {} {}",
             "🔧".dimmed(),
@@ -492,9 +497,12 @@ mod tests {
 
     #[test]
     fn test_format_tool_args_empty() {
-        assert_eq!(format_tool_args(&serde_json::json!({})), "");
-        assert_eq!(format_tool_args(&serde_json::json!(null)), "");
-        assert_eq!(format_tool_args(&serde_json::json!("not an object")), "");
+        assert_eq!(format_tool_args("test", &serde_json::json!({})), "");
+        assert_eq!(format_tool_args("test", &serde_json::json!(null)), "");
+        assert_eq!(
+            format_tool_args("test", &serde_json::json!("not an object")),
+            ""
+        );
     }
 
     #[test]
@@ -505,7 +513,7 @@ mod tests {
             "null": null,
             "str": "hello"
         });
-        let formatted = format_tool_args(&args);
+        let formatted = format_tool_args("test", &args);
         // serde_json::Map is sorted by key
         assert_eq!(formatted, "bool=true null=null num=42 str=\"hello\" ");
     }
@@ -516,7 +524,7 @@ mod tests {
             "arr": [1, 2],
             "obj": {"a": 1}
         });
-        let formatted = format_tool_args(&args);
+        let formatted = format_tool_args("test", &args);
         assert_eq!(formatted, "arr=... obj=... ");
     }
 
@@ -524,7 +532,7 @@ mod tests {
     fn test_format_tool_args_truncation() {
         let long_str = "a".repeat(100);
         let args = serde_json::json!({"long": long_str});
-        let formatted = format_tool_args(&args);
+        let formatted = format_tool_args("test", &args);
         let expected_val = format!("\"{}...\"", "a".repeat(77));
         assert_eq!(formatted, format!("long={} ", expected_val));
     }
@@ -532,8 +540,19 @@ mod tests {
     #[test]
     fn test_format_tool_args_newlines() {
         let args = serde_json::json!({"text": "hello\nworld"});
-        let formatted = format_tool_args(&args);
+        let formatted = format_tool_args("test", &args);
         assert_eq!(formatted, "text=\"hello world\" ");
+    }
+
+    #[test]
+    fn test_format_tool_args_edit_filtering() {
+        let args = serde_json::json!({
+            "file_path": "test.rs",
+            "old_string": "old content",
+            "new_string": "new content"
+        });
+        let formatted = format_tool_args("edit", &args);
+        assert_eq!(formatted, "file_path=\"test.rs\" ");
     }
 
     #[test]

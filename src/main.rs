@@ -595,8 +595,15 @@ async fn main() -> Result<()> {
 /// Events from the async interaction task
 enum AppEvent {
     StreamChunk(String),
-    ToolExecuting { name: String, args: Value },
-    ToolCompleted { name: String, duration_ms: u64, tokens: u32 },
+    ToolExecuting {
+        name: String,
+        args: Value,
+    },
+    ToolCompleted {
+        name: String,
+        duration_ms: u64,
+        tokens: u32,
+    },
     InteractionComplete(Result<InteractionResult>),
     ContextWarning(String),
 }
@@ -1047,7 +1054,7 @@ async fn run_tui_event_loop(
                     AppEvent::ToolExecuting { name, args } => {
                         app.set_activity(tui::Activity::Executing(name.clone()));
                         // Display tool call in chat
-                        let args_str = events::format_tool_args(&args);
+                        let args_str = events::format_tool_args(&name, &args);
                         let msg = format!(
                             "{} {} {}",
                             "🔧".dimmed(),
@@ -1244,7 +1251,7 @@ mod event_handling_tests {
     #[test]
     fn test_tool_executing_format() {
         let args = json!({"file_path": "src/main.rs", "limit": 100});
-        let formatted = events::format_tool_args(&args);
+        let formatted = events::format_tool_args("read_file", &args);
 
         // Args should be formatted as key=value pairs
         assert!(formatted.contains("file_path="));
@@ -1529,7 +1536,11 @@ mod event_handling_tests {
 
         assert_eq!(app_events.len(), 1);
         match &app_events[0] {
-            AppEvent::ToolCompleted { name, duration_ms, tokens } => {
+            AppEvent::ToolCompleted {
+                name,
+                duration_ms,
+                tokens,
+            } => {
                 assert_eq!(name, "bash");
                 assert_eq!(*duration_ms, 150);
                 assert!(*tokens > 0); // Should have some token estimate

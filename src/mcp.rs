@@ -563,7 +563,7 @@ impl McpServer {
                     AgentEvent::ToolExecuting(calls) => {
                         for call in calls {
                             // Log to human-readable log
-                            let args_str = format_tool_args(&call.args);
+                            let args_str = format_tool_args(&call.name, &call.args);
                             crate::log_event(&format!(
                                 "{} {} {}",
                                 "🔧".dimmed(),
@@ -581,7 +581,8 @@ impl McpServer {
                     }
                     AgentEvent::ToolResult(result) => {
                         // Log to human-readable log (include both args and result for full context impact)
-                        let tokens = estimate_tokens(&result.args) + estimate_tokens(&result.result);
+                        let tokens =
+                            estimate_tokens(&result.args) + estimate_tokens(&result.result);
                         let has_error = result.is_error();
                         crate::log_event(&format_tool_result(
                             &result.name,

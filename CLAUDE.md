@@ -134,3 +134,10 @@ Debugging: `LOUD_WIRE=1` logs all HTTP requests/responses.
 - `make test` (tests pass)
 
 Don't skip tests. If a test is flaky or legitimately broken by your change, fix the test as part of the PR.
+
+**Visual output changes** - When modifying how output is displayed (formatting, colors, log messages), ensure changes are applied consistently across all three output modes:
+- **MCP mode** (`src/mcp.rs`) - Logs via `log_event()`, used when clemini runs as MCP server
+- **Plain REPL** (`--no-tui`) - Uses `TerminalEventHandler` in `src/events.rs`
+- **TUI mode** (default) - Uses `AppEvent` handling in `src/main.rs`
+
+Test visual changes by running clemini in each mode and verifying the output looks correct.
