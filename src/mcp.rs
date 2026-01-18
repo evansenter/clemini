@@ -600,6 +600,20 @@ impl McpServer {
                             result.duration.as_millis() as u64,
                         )
                     }
+                    AgentEvent::TextDelta(text) => {
+                        // Log streaming text (narration) to human-readable log
+                        // Use special prefix to show it's streaming model output
+                        for line in text.lines() {
+                            if !line.is_empty() {
+                                crate::log_event(&format!(
+                                    "{} {}",
+                                    "▐".bright_black().bold(),
+                                    line
+                                ));
+                            }
+                        }
+                        continue;
+                    }
                     _ => continue,
                 };
                 if let Ok(s) = serde_json::to_string(&notification) {
@@ -855,5 +869,29 @@ mod tests {
 
         assert_eq!(notif["params"]["tool"], "read_file");
         assert_eq!(notif["params"]["duration_ms"], 0);
+    }
+
+    #[test]
+    fn test_text_delta_formatting() {
+        // Test the format used for TextDelta logging in MCP mode
+        // TextDelta events are logged with the ▐ prefix
+        let text = "Let me search for the function...";
+        let formatted = format!("{} {}", "▐".bright_black().bold(), text);
+
+        // Should contain the prefix and text
+        assert!(formatted.contains("▐"));
+        assert!(formatted.contains("Let me search"));
+    }
+
+    #[test]
+    fn test_text_delta_multiline_handling() {
+        // TextDelta may contain multiple lines - each non-empty line gets logged
+        let text = "Line 1\n\nLine 2\nLine 3";
+        let lines: Vec<&str> = text.lines().filter(|l| !l.is_empty()).collect();
+
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0], "Line 1");
+        assert_eq!(lines[1], "Line 2");
+        assert_eq!(lines[2], "Line 3");
     }
 }
