@@ -156,6 +156,64 @@ async fn execute_tools(
     }
 }
 
+#[derive(Debug)]
+struct StreamProcessingResult {
+    response: Option<InteractionResponse>,
+    accumulated_function_calls: Vec<(Option<String>, String, Value)>,
+    cancelled: bool,
+}
+
+async fn process_interaction_stream<S>(
+    mut stream: S,
+    events_tx: &mpsc::Sender<AgentEvent>,
+    cancellation_token: &CancellationToken,
+    full_response: &mut String,
+) -> Result<StreamProcessingResult>
+where
+    S: futures_util::Stream<Item = Result<genai_rs::StreamEvent, genai_rs::GenaiError>> + Unpin,
+{
+    let mut response: Option<InteractionResponse> = None;
+    let mut accumulated_function_calls: Vec<(Option<String>, String, Value)> = Vec::new();
+
+    while let Some(event) = stream.next().await {
+        if cancellation_token.is_cancelled() {
+            let _ = events_tx.try_send(AgentEvent::Cancelled);
+            return Ok(StreamProcessingResult {
+                response: None,
+                accumulated_function_calls: Vec::new(),
+                cancelled: true,
+            });
+        }
+
+        match event {
+            Ok(event) => match event.chunk {
+                StreamChunk::Delta(content) => {
+                    if let Some(text) = content.as_text() {
+                        let _ = events_tx.try_send(AgentEvent::TextDelta(text.to_string()));
+                        full_response.push_str(text);
+                    }
+                    if let Content::FunctionCall { id, name, args } = content {
+                        accumulated_function_calls.push((id, name, args));
+                    }
+                }
+                StreamChunk::Complete(resp) => {
+                    response = Some(resp);
+                }
+                _ => {}
+            },
+            Err(e) => {
+                return Err(anyhow::anyhow!(e.to_string()));
+            }
+        }
+    }
+
+    Ok(StreamProcessingResult {
+        response,
+        accumulated_function_calls,
+        cancelled: false,
+    })
+}
+
 /// Run an interaction with Gemini, sending events through the channel.
 ///
 /// # Arguments
@@ -209,50 +267,25 @@ pub async fn run_interaction(
 
     const MAX_ITERATIONS: usize = 100;
     for _ in 0..MAX_ITERATIONS {
-        let mut response: Option<InteractionResponse> = None;
-        let mut accumulated_function_calls: Vec<(Option<String>, String, Value)> = Vec::new();
+        let stream_result =
+            process_interaction_stream(stream, &events_tx, &cancellation_token, &mut full_response)
+                .await?;
 
-        while let Some(event) = stream.next().await {
-            // Check for cancellation at each iteration
-            if cancellation_token.is_cancelled() {
-                let _ = events_tx.try_send(AgentEvent::Cancelled);
-                return Ok(InteractionResult {
-                    id: last_id,
-                    response: full_response,
-                    context_size: current_context_size,
-                    total_tokens,
-                    tool_calls,
-                });
-            }
-
-            match event {
-                Ok(event) => match &event.chunk {
-                    StreamChunk::Delta(content) => {
-                        if let Some(text) = content.as_text() {
-                            let _ = events_tx.try_send(AgentEvent::TextDelta(text.to_string()));
-                            full_response.push_str(text);
-                        }
-                        // Accumulate function calls from Delta chunks (streaming doesn't put them in Complete)
-                        if let Content::FunctionCall { id, name, args } = content {
-                            accumulated_function_calls.push((
-                                id.clone(),
-                                name.clone(),
-                                args.clone(),
-                            ));
-                        }
-                    }
-                    StreamChunk::Complete(resp) => {
-                        response = Some(resp.clone());
-                    }
-                    _ => {}
-                },
-                Err(e) => {
-                    return Err(anyhow::anyhow!(e.to_string()));
-                }
-            }
+        if stream_result.cancelled {
+            return Ok(InteractionResult {
+                id: last_id,
+                response: full_response,
+                context_size: current_context_size,
+                total_tokens,
+                tool_calls,
+            });
         }
 
-        let resp = response.ok_or_else(|| anyhow::anyhow!("Stream ended without completion"))?;
+        let resp = stream_result
+            .response
+            .ok_or_else(|| anyhow::anyhow!("Stream ended without completion"))?;
+        let accumulated_function_calls = stream_result.accumulated_function_calls;
+
         last_id = resp.id.clone();
         last_response = Some(resp.clone());
 
@@ -395,5 +428,324 @@ mod tests {
             }
             _ => panic!("Expected ContextWarning event"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_process_interaction_stream_text() {
+        use genai_rs::{StreamChunk, StreamEvent};
+
+        let (tx, mut rx) = mpsc::channel(10);
+        let token = CancellationToken::new();
+        let mut full_response = String::new();
+
+        // Create a mock stream
+        let chunks = vec![
+            Ok(StreamEvent::new(StreamChunk::Delta(Content::text("Hello ")), None)),
+            Ok(StreamEvent::new(StreamChunk::Delta(Content::text("world!")), None)),
+            Ok(StreamEvent::new(StreamChunk::Complete(InteractionResponse {
+                id: Some("id-1".to_string()),
+                model: None,
+                agent: None,
+                input: vec![],
+                outputs: vec![],
+                status: genai_rs::InteractionStatus::Completed,
+                usage: None,
+                tools: None,
+                grounding_metadata: None,
+                url_context_metadata: None,
+                previous_interaction_id: None,
+                created: None,
+                updated: None,
+            }), None)),
+        ];
+        let stream = futures_util::stream::iter(chunks);
+
+        let result = process_interaction_stream(stream, &tx, &token, &mut full_response)
+            .await
+            .unwrap();
+
+        assert!(!result.cancelled);
+        assert_eq!(full_response, "Hello world!");
+        assert!(result.response.is_some());
+        assert_eq!(result.response.unwrap().id, Some("id-1".to_string()));
+        assert!(result.accumulated_function_calls.is_empty());
+
+        // Check events
+        assert_eq!(
+            match rx.recv().await.unwrap() {
+                AgentEvent::TextDelta(t) => t,
+                _ => panic!(),
+            },
+            "Hello "
+        );
+        assert_eq!(
+            match rx.recv().await.unwrap() {
+                AgentEvent::TextDelta(t) => t,
+                _ => panic!(),
+            },
+            "world!"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_process_interaction_stream_tool_calls() {
+        use genai_rs::{StreamChunk, StreamEvent};
+
+        let (tx, _rx) = mpsc::channel(10);
+        let token = CancellationToken::new();
+        let mut full_response = String::new();
+
+        let chunks = vec![
+            Ok(StreamEvent::new(StreamChunk::Delta(Content::FunctionCall {
+                id: Some("call-1".to_string()),
+                name: "read_file".to_string(),
+                args: serde_json::json!({"file_path": "test.txt"}),
+            }), None)),
+            Ok(StreamEvent::new(StreamChunk::Complete(InteractionResponse {
+                id: Some("id-1".to_string()),
+                model: None,
+                agent: None,
+                input: vec![],
+                outputs: vec![],
+                status: genai_rs::InteractionStatus::Completed,
+                usage: None,
+                tools: None,
+                grounding_metadata: None,
+                url_context_metadata: None,
+                previous_interaction_id: None,
+                created: None,
+                updated: None,
+            }), None)),
+        ];
+        let stream = futures_util::stream::iter(chunks);
+
+        let result = process_interaction_stream(stream, &tx, &token, &mut full_response)
+            .await
+            .unwrap();
+
+        assert!(!result.cancelled);
+        assert_eq!(result.accumulated_function_calls.len(), 1);
+        assert_eq!(result.accumulated_function_calls[0].1, "read_file");
+    }
+
+    #[tokio::test]
+    async fn test_process_interaction_stream_cancellation() {
+        use genai_rs::{StreamChunk, StreamEvent};
+        use std::time::Duration;
+        use futures_util::StreamExt;
+
+        let (tx, _rx) = mpsc::channel(10);
+        let token = CancellationToken::new();
+        let mut full_response = String::new();
+
+        // This stream yields periodically
+        let stream = futures_util::stream::unfold((), |_| async {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            Some((
+                Ok(StreamEvent::new(
+                    StreamChunk::Delta(Content::text("...")),
+                    None,
+                )),
+                (),
+            ))
+        });
+
+        let token_clone = token.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            token_clone.cancel();
+        });
+
+        let result = process_interaction_stream(stream.boxed(), &tx, &token, &mut full_response)
+            .await
+            .unwrap();
+
+        assert!(result.cancelled);
+    }
+
+    #[tokio::test]
+    async fn test_execute_tools_success() {
+        let temp = tempfile::tempdir().unwrap();
+        let tool_service = Arc::new(CleminiToolService::new(
+            temp.path().to_path_buf(),
+            30,
+            false,
+            vec![temp.path().to_path_buf()],
+            "fake-key".to_string(),
+        ));
+        let (tx, mut rx) = mpsc::channel(10);
+        let token = CancellationToken::new();
+        let mut tool_calls = Vec::new();
+
+        let calls = vec![(
+            Some("call-1".to_string()),
+            "todo_write".to_string(),
+            serde_json::json!({"todos": [{"content": "test", "activeForm": "testing", "status": "pending"}]}),
+        )];
+
+        let result = execute_tools(&tool_service, &calls, &mut tool_calls, &token, &tx).await;
+
+        assert!(!result.cancelled);
+        assert_eq!(result.results.len(), 1);
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0], "todo_write");
+
+        // Check events
+        let event1 = rx.recv().await.unwrap();
+        match event1 {
+            AgentEvent::ToolExecuting(calls) => {
+                assert_eq!(calls.len(), 1);
+                assert_eq!(calls[0].name, "todo_write");
+            }
+            _ => panic!("Expected ToolExecuting event"),
+        }
+
+        let event2 = rx.recv().await.unwrap();
+        match event2 {
+            AgentEvent::ToolResult(res) => {
+                assert_eq!(res.name, "todo_write");
+                assert!(res.result.get("success").is_some());
+            }
+            _ => panic!("Expected ToolResult event"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_execute_tools_cancellation() {
+        let temp = tempfile::tempdir().unwrap();
+        let tool_service = Arc::new(CleminiToolService::new(
+            temp.path().to_path_buf(),
+            30,
+            false,
+            vec![temp.path().to_path_buf()],
+            "fake-key".to_string(),
+        ));
+        let (tx, _rx) = mpsc::channel(10);
+        let token = CancellationToken::new();
+        let mut tool_calls = Vec::new();
+
+        token.cancel();
+
+        let calls = vec![(
+            Some("call-1".to_string()),
+            "todo_write".to_string(),
+            serde_json::json!({"todos": []}),
+        )];
+
+        let result = execute_tools(&tool_service, &calls, &mut tool_calls, &token, &tx).await;
+
+        assert!(result.cancelled);
+        assert_eq!(result.results.len(), 0);
+        assert_eq!(tool_calls.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_execute_tools_multiple() {
+        let temp = tempfile::tempdir().unwrap();
+        let tool_service = Arc::new(CleminiToolService::new(
+            temp.path().to_path_buf(),
+            30,
+            false,
+            vec![temp.path().to_path_buf()],
+            "fake-key".to_string(),
+        ));
+        let (tx, mut rx) = mpsc::channel(10);
+        let token = CancellationToken::new();
+        let mut tool_calls = Vec::new();
+
+        let calls = vec![
+            (
+                Some("call-1".to_string()),
+                "todo_write".to_string(),
+                serde_json::json!({"todos": [{"content": "task 1", "activeForm": "doing 1", "status": "pending"}]}),
+            ),
+            (
+                Some("call-2".to_string()),
+                "todo_write".to_string(),
+                serde_json::json!({"todos": [{"content": "task 2", "activeForm": "doing 2", "status": "pending"}]}),
+            ),
+        ];
+
+        let result = execute_tools(&tool_service, &calls, &mut tool_calls, &token, &tx).await;
+
+        assert!(!result.cancelled);
+        assert_eq!(result.results.len(), 2);
+        assert_eq!(tool_calls.len(), 2);
+        assert_eq!(tool_calls[0], "todo_write");
+        assert_eq!(tool_calls[1], "todo_write");
+
+        // ToolExecuting should contain both calls
+        let event = rx.recv().await.unwrap();
+        match event {
+            AgentEvent::ToolExecuting(calls) => {
+                assert_eq!(calls.len(), 2);
+                assert_eq!(calls[0].id, Some("call-1".to_string()));
+                assert_eq!(calls[1].id, Some("call-2".to_string()));
+            }
+            _ => panic!("Expected ToolExecuting event"),
+        }
+
+        // Two ToolResult events
+        let _ = rx.recv().await.unwrap();
+        let _ = rx.recv().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_execute_tools_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let tool_service = Arc::new(CleminiToolService::new(
+            temp.path().to_path_buf(),
+            30,
+            false,
+            vec![temp.path().to_path_buf()],
+            "fake-key".to_string(),
+        ));
+        let (tx, mut rx) = mpsc::channel(10);
+        let token = CancellationToken::new();
+        let mut tool_calls = Vec::new();
+
+        let calls = vec![(
+            Some("call-1".to_string()),
+            "non_existent_tool".to_string(),
+            serde_json::json!({}),
+        )];
+
+        let result = execute_tools(&tool_service, &calls, &mut tool_calls, &token, &tx).await;
+
+        assert!(!result.cancelled);
+        assert_eq!(result.results.len(), 1);
+
+        // The error should be captured as JSON in the tool result
+        let _ = rx.recv().await.unwrap(); // ToolExecuting
+        let event = rx.recv().await.unwrap(); // ToolResult
+        match event {
+            AgentEvent::ToolResult(res) => {
+                assert_eq!(res.name, "non_existent_tool");
+                assert!(res.result.get("error").is_some());
+                assert!(res.result["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Tool not found"));
+            }
+            _ => panic!("Expected ToolResult event"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_process_interaction_stream_error() {
+        use genai_rs::StreamEvent;
+
+        let (tx, _rx) = mpsc::channel(10);
+        let token = CancellationToken::new();
+        let mut full_response = String::new();
+
+        let chunks: Vec<Result<StreamEvent, genai_rs::GenaiError>> =
+            vec![Err(genai_rs::GenaiError::Internal("API Error".to_string()))];
+        let stream = futures_util::stream::iter(chunks);
+
+        let result = process_interaction_stream(stream, &tx, &token, &mut full_response).await;
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("API Error"));
     }
 }
