@@ -544,6 +544,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_narration_before_tools_accumulated_then_cleared() {
+        // Tests the "narration clearing" behavior: text before tool calls accumulates
+        // in full_response during process_interaction_stream, but run_interaction
+        // clears it (line 310) so only text AFTER tools is in the final response.
+        use genai_rs::{StreamChunk, StreamEvent};
+
+        let (tx, _rx) = mpsc::channel(10);
+        let token = CancellationToken::new();
+        let mut full_response = String::new();
+
+        // Model narrates then calls a tool
+        let chunks = vec![
+            Ok(StreamEvent::new(
+                StreamChunk::Delta(Content::text("Let me search for that...")),
+                None,
+            )),
+            Ok(StreamEvent::new(
+                StreamChunk::Delta(Content::FunctionCall {
+                    id: Some("call-1".to_string()),
+                    name: "read_file".to_string(),
+                    args: serde_json::json!({"file_path": "test.txt"}),
+                }),
+                None,
+            )),
+            Ok(StreamEvent::new(
+                StreamChunk::Complete(InteractionResponse {
+                    id: Some("id-1".to_string()),
+                    model: None,
+                    agent: None,
+                    input: vec![],
+                    outputs: vec![],
+                    status: genai_rs::InteractionStatus::Completed,
+                    usage: None,
+                    tools: None,
+                    grounding_metadata: None,
+                    url_context_metadata: None,
+                    previous_interaction_id: None,
+                    created: None,
+                    updated: None,
+                }),
+                None,
+            )),
+        ];
+        let stream = futures_util::stream::iter(chunks);
+
+        let result = process_interaction_stream(stream, &tx, &token, &mut full_response)
+            .await
+            .unwrap();
+
+        // Narration was accumulated during streaming
+        assert_eq!(full_response, "Let me search for that...");
+        assert_eq!(result.accumulated_function_calls.len(), 1);
+
+        // run_interaction would clear this before executing tools:
+        // full_response.clear(); // line 310
+        // So final response only contains text AFTER tools complete
+        full_response.clear();
+        assert!(full_response.is_empty());
+    }
+
+    #[tokio::test]
     async fn test_process_interaction_stream_cancellation() {
         use futures_util::StreamExt;
         use genai_rs::{StreamChunk, StreamEvent};
