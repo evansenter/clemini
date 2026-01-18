@@ -79,7 +79,7 @@ impl logging::OutputSink for TestSink {
 /// Initialize logging with a no-op sink for tests.
 #[allow(dead_code)]
 pub fn init_test_logging() {
-    let _ = logging::set_output_sink(Arc::new(TestSink));
+    logging::set_output_sink(Arc::new(TestSink));
 }
 
 // =============================================================================
@@ -144,19 +144,19 @@ pub async fn validate_response_semantically(
         .await?;
 
     // Parse structured output
-    if let Some(text) = validation.as_text() {
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(text) {
-            let is_valid = json
-                .get("is_valid")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(true); // Default to valid if parse fails
+    if let Some(text) = validation.as_text()
+        && let Ok(json) = serde_json::from_str::<serde_json::Value>(text)
+    {
+        let is_valid = json
+            .get("is_valid")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true); // Default to valid if parse fails
 
-            if let Some(reason) = json.get("reason").and_then(|v| v.as_str()) {
-                println!("Semantic validation reason: {}", reason);
-            }
-
-            return Ok(is_valid);
+        if let Some(reason) = json.get("reason").and_then(|v| v.as_str()) {
+            println!("Semantic validation reason: {}", reason);
         }
+
+        return Ok(is_valid);
     }
 
     // If we can't parse, default to valid to avoid blocking tests
