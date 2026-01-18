@@ -440,23 +440,32 @@ mod tests {
 
         // Create a mock stream
         let chunks = vec![
-            Ok(StreamEvent::new(StreamChunk::Delta(Content::text("Hello ")), None)),
-            Ok(StreamEvent::new(StreamChunk::Delta(Content::text("world!")), None)),
-            Ok(StreamEvent::new(StreamChunk::Complete(InteractionResponse {
-                id: Some("id-1".to_string()),
-                model: None,
-                agent: None,
-                input: vec![],
-                outputs: vec![],
-                status: genai_rs::InteractionStatus::Completed,
-                usage: None,
-                tools: None,
-                grounding_metadata: None,
-                url_context_metadata: None,
-                previous_interaction_id: None,
-                created: None,
-                updated: None,
-            }), None)),
+            Ok(StreamEvent::new(
+                StreamChunk::Delta(Content::text("Hello ")),
+                None,
+            )),
+            Ok(StreamEvent::new(
+                StreamChunk::Delta(Content::text("world!")),
+                None,
+            )),
+            Ok(StreamEvent::new(
+                StreamChunk::Complete(InteractionResponse {
+                    id: Some("id-1".to_string()),
+                    model: None,
+                    agent: None,
+                    input: vec![],
+                    outputs: vec![],
+                    status: genai_rs::InteractionStatus::Completed,
+                    usage: None,
+                    tools: None,
+                    grounding_metadata: None,
+                    url_context_metadata: None,
+                    previous_interaction_id: None,
+                    created: None,
+                    updated: None,
+                }),
+                None,
+            )),
         ];
         let stream = futures_util::stream::iter(chunks);
 
@@ -496,26 +505,32 @@ mod tests {
         let mut full_response = String::new();
 
         let chunks = vec![
-            Ok(StreamEvent::new(StreamChunk::Delta(Content::FunctionCall {
-                id: Some("call-1".to_string()),
-                name: "read_file".to_string(),
-                args: serde_json::json!({"file_path": "test.txt"}),
-            }), None)),
-            Ok(StreamEvent::new(StreamChunk::Complete(InteractionResponse {
-                id: Some("id-1".to_string()),
-                model: None,
-                agent: None,
-                input: vec![],
-                outputs: vec![],
-                status: genai_rs::InteractionStatus::Completed,
-                usage: None,
-                tools: None,
-                grounding_metadata: None,
-                url_context_metadata: None,
-                previous_interaction_id: None,
-                created: None,
-                updated: None,
-            }), None)),
+            Ok(StreamEvent::new(
+                StreamChunk::Delta(Content::FunctionCall {
+                    id: Some("call-1".to_string()),
+                    name: "read_file".to_string(),
+                    args: serde_json::json!({"file_path": "test.txt"}),
+                }),
+                None,
+            )),
+            Ok(StreamEvent::new(
+                StreamChunk::Complete(InteractionResponse {
+                    id: Some("id-1".to_string()),
+                    model: None,
+                    agent: None,
+                    input: vec![],
+                    outputs: vec![],
+                    status: genai_rs::InteractionStatus::Completed,
+                    usage: None,
+                    tools: None,
+                    grounding_metadata: None,
+                    url_context_metadata: None,
+                    previous_interaction_id: None,
+                    created: None,
+                    updated: None,
+                }),
+                None,
+            )),
         ];
         let stream = futures_util::stream::iter(chunks);
 
@@ -530,9 +545,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_process_interaction_stream_cancellation() {
+        use futures_util::StreamExt;
         use genai_rs::{StreamChunk, StreamEvent};
         use std::time::Duration;
-        use futures_util::StreamExt;
 
         let (tx, _rx) = mpsc::channel(10);
         let token = CancellationToken::new();
@@ -722,10 +737,12 @@ mod tests {
             AgentEvent::ToolResult(res) => {
                 assert_eq!(res.name, "non_existent_tool");
                 assert!(res.result.get("error").is_some());
-                assert!(res.result["error"]
-                    .as_str()
-                    .unwrap()
-                    .contains("Tool not found"));
+                assert!(
+                    res.result["error"]
+                        .as_str()
+                        .unwrap()
+                        .contains("Tool not found")
+                );
             }
             _ => panic!("Expected ToolResult event"),
         }

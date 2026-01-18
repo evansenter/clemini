@@ -558,6 +558,9 @@ impl McpServer {
         // Spawn task to send progress notifications and log tool events
         let tx_clone = tx.clone();
         tokio::spawn(async move {
+            // Buffer for streaming text - only log complete lines (avoids mid-word splits)
+            let mut text_buffer = String::new();
+
             while let Some(event) = events_rx.recv().await {
                 let notification = match &event {
                     AgentEvent::ToolExecuting(calls) => {
@@ -601,9 +604,12 @@ impl McpServer {
                         )
                     }
                     AgentEvent::TextDelta(text) => {
-                        // Log streaming text (narration) to human-readable log
-                        // Use special prefix to show it's streaming model output
-                        for line in text.lines() {
+                        // Buffer streaming text and only log complete lines
+                        text_buffer.push_str(text);
+
+                        // Log any complete lines (split on newlines)
+                        while let Some(newline_pos) = text_buffer.find('\n') {
+                            let line = text_buffer[..newline_pos].trim();
                             if !line.is_empty() {
                                 crate::log_event(&format!(
                                     "{} {}",
@@ -611,6 +617,7 @@ impl McpServer {
                                     line
                                 ));
                             }
+                            text_buffer = text_buffer[newline_pos + 1..].to_string();
                         }
                         continue;
                     }
@@ -619,6 +626,12 @@ impl McpServer {
                 if let Ok(s) = serde_json::to_string(&notification) {
                     let _ = tx_clone.send(format!("{}\n", s));
                 }
+            }
+
+            // Flush any remaining buffered text
+            let remaining = text_buffer.trim();
+            if !remaining.is_empty() {
+                crate::log_event(&format!("{} {}", "▐".bright_black().bold(), remaining));
             }
         });
 
@@ -884,14 +897,43 @@ mod tests {
     }
 
     #[test]
-    fn test_text_delta_multiline_handling() {
-        // TextDelta may contain multiple lines - each non-empty line gets logged
-        let text = "Line 1\n\nLine 2\nLine 3";
-        let lines: Vec<&str> = text.lines().filter(|l| !l.is_empty()).collect();
+    fn test_text_delta_line_buffering() {
+        // TextDelta chunks may split mid-word; we buffer and only log complete lines
+        // Simulates the buffering logic used in clemini_chat
 
-        assert_eq!(lines.len(), 3);
-        assert_eq!(lines[0], "Line 1");
-        assert_eq!(lines[1], "Line 2");
-        assert_eq!(lines[2], "Line 3");
+        let mut buffer = String::new();
+        let mut logged_lines: Vec<String> = Vec::new();
+
+        // Simulate receiving chunks that split mid-sentence
+        let chunks = [
+            "In the main function (lines 116-120",
+            ")\nThe following defaults are set:\n",
+            "- parallel: 2",
+        ];
+
+        for chunk in chunks {
+            buffer.push_str(chunk);
+
+            // Log complete lines (ending with \n)
+            while let Some(newline_pos) = buffer.find('\n') {
+                let line = buffer[..newline_pos].trim().to_string();
+                if !line.is_empty() {
+                    logged_lines.push(line);
+                }
+                buffer = buffer[newline_pos + 1..].to_string();
+            }
+        }
+
+        // Flush remaining
+        let remaining = buffer.trim();
+        if !remaining.is_empty() {
+            logged_lines.push(remaining.to_string());
+        }
+
+        // Lines should be complete, not split mid-word
+        assert_eq!(logged_lines.len(), 3);
+        assert_eq!(logged_lines[0], "In the main function (lines 116-120)");
+        assert_eq!(logged_lines[1], "The following defaults are set:");
+        assert_eq!(logged_lines[2], "- parallel: 2");
     }
 }
