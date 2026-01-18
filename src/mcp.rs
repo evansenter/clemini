@@ -620,11 +620,19 @@ impl McpServer {
         )
         .await?;
 
+        // Include interaction_id in the content text so it's visible to the LLM
+        // (MCP protocol only guarantees content array is surfaced, not extra fields)
+        let response_text = if let Some(ref id) = result.id {
+            format!("{}\n\ninteraction_id: {}", result.response, id)
+        } else {
+            result.response
+        };
+
         Ok(json!({
             "content": [
                 {
                     "type": "text",
-                    "text": result.response
+                    "text": response_text
                 }
             ],
             "tool_calls": result.tool_calls,
