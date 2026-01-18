@@ -49,7 +49,8 @@ pub fn set_test_logging_enabled(enabled: bool) {
 
 pub(crate) fn is_logging_enabled() -> bool {
     if cfg!(test) {
-        TEST_LOGGING_ENABLED.load(Ordering::SeqCst) || std::env::var("CLEMINI_ALLOW_TEST_LOGS").is_ok()
+        TEST_LOGGING_ENABLED.load(Ordering::SeqCst)
+            || std::env::var("CLEMINI_ALLOW_TEST_LOGS").is_ok()
     } else {
         true
     }
@@ -225,7 +226,6 @@ fn write_to_log_file(path: impl Into<PathBuf>, rendered: &str) -> std::io::Resul
     Ok(())
 }
 
-
 const SYSTEM_PROMPT: &str = r#"You are clemini, a coding assistant. Be concise. Get things done.
 
 ## Workflow
@@ -400,7 +400,7 @@ mod tests {
     fn test_logging_disabled_by_default() {
         let original_env = std::env::var("CLEMINI_ALLOW_TEST_LOGS");
         unsafe { std::env::remove_var("CLEMINI_ALLOW_TEST_LOGS") };
-        
+
         set_test_logging_enabled(false);
         assert!(!is_logging_enabled());
 
@@ -413,10 +413,10 @@ mod tests {
     fn test_set_test_logging_enabled() {
         let original_env = std::env::var("CLEMINI_ALLOW_TEST_LOGS");
         unsafe { std::env::remove_var("CLEMINI_ALLOW_TEST_LOGS") };
-        
+
         set_test_logging_enabled(true);
         assert!(is_logging_enabled());
-        
+
         set_test_logging_enabled(false);
         assert!(!is_logging_enabled());
 
@@ -428,11 +428,11 @@ mod tests {
     #[test]
     fn test_env_var_enables_logging() {
         let original_env = std::env::var("CLEMINI_ALLOW_TEST_LOGS");
-        
+
         set_test_logging_enabled(false);
         unsafe { std::env::set_var("CLEMINI_ALLOW_TEST_LOGS", "1") };
         assert!(is_logging_enabled());
-        
+
         unsafe { std::env::remove_var("CLEMINI_ALLOW_TEST_LOGS") };
         assert!(!is_logging_enabled());
 

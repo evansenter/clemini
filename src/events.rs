@@ -879,4 +879,49 @@ mod tests {
         assert_eq!(complete, "line1\nline2\n");
         assert_eq!(remaining, "");
     }
+
+    #[test]
+    fn test_streaming_buffer_basic() {
+        // Clear buffer before test
+        STREAMING_BUFFER.lock().unwrap().clear();
+
+        // No newline: should buffer and return None
+        let out1 = render_streaming_chunk("Hello ");
+        assert!(out1.is_none());
+        assert_eq!(*STREAMING_BUFFER.lock().unwrap(), "Hello ");
+
+        // Newline: should render up to the newline
+        let out2 = render_streaming_chunk("world!\nNext line");
+        let rendered = out2.unwrap();
+        assert!(rendered.contains("Hello world!"));
+        assert!(rendered.ends_with('\n'));
+        assert_eq!(*STREAMING_BUFFER.lock().unwrap(), "Next line");
+
+        // Flush: should render remaining
+        let out3 = flush_streaming_buffer();
+        let flushed = out3.unwrap();
+        assert!(flushed.contains("Next line"));
+        assert!(STREAMING_BUFFER.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_streaming_multiple_lines() {
+        STREAMING_BUFFER.lock().unwrap().clear();
+
+        let out = render_streaming_chunk("Line 1\nLine 2\nPartial");
+        let rendered = out.unwrap();
+        assert!(rendered.contains("Line 1"));
+        assert!(rendered.contains("Line 2"));
+        assert_eq!(*STREAMING_BUFFER.lock().unwrap(), "Partial");
+
+        let out2 = flush_streaming_buffer();
+        assert!(out2.unwrap().contains("Partial"));
+    }
+
+    #[test]
+    fn test_flush_empty_buffer() {
+        STREAMING_BUFFER.lock().unwrap().clear();
+        let out = flush_streaming_buffer();
+        assert!(out.is_none());
+    }
 }
