@@ -739,7 +739,13 @@ mod tests {
     fn create_test_server() -> McpServer {
         let client = Client::new("dummy-key".to_string());
         let cwd = std::env::current_dir().unwrap();
-        let tool_service = Arc::new(CleminiToolService::new(cwd.clone(), 30, true, vec![cwd]));
+        let tool_service = Arc::new(CleminiToolService::new(
+            cwd.clone(),
+            30,
+            true,
+            vec![cwd],
+            "dummy-key".to_string(),
+        ));
         McpServer::new(
             client,
             tool_service,

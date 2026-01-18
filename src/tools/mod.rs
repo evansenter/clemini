@@ -3,6 +3,7 @@ mod bash;
 mod edit;
 mod glob;
 mod grep;
+mod kill_shell;
 mod read;
 mod todo_write;
 mod web_fetch;
@@ -20,6 +21,7 @@ pub use bash::BashTool;
 pub use edit::EditTool;
 pub use glob::GlobTool;
 pub use grep::GrepTool;
+pub use kill_shell::KillShellTool;
 pub use read::ReadTool;
 pub use todo_write::TodoWriteTool;
 pub use web_fetch::WebFetchTool;
@@ -34,6 +36,7 @@ pub struct CleminiToolService {
     bash_timeout: u64,
     is_mcp_mode: bool,
     allowed_paths: Vec<PathBuf>,
+    api_key: String,
 }
 
 impl CleminiToolService {
@@ -42,12 +45,14 @@ impl CleminiToolService {
         bash_timeout: u64,
         is_mcp_mode: bool,
         allowed_paths: Vec<PathBuf>,
+        api_key: String,
     ) -> Self {
         Self {
             cwd,
             bash_timeout,
             is_mcp_mode,
             allowed_paths,
+            api_key,
         }
     }
 
@@ -88,7 +93,8 @@ impl ToolService for CleminiToolService {
             )),
             Arc::new(GlobTool::new(self.cwd.clone(), self.allowed_paths.clone())),
             Arc::new(GrepTool::new(self.cwd.clone(), self.allowed_paths.clone())),
-            Arc::new(WebFetchTool::new()),
+            Arc::new(KillShellTool::new()),
+            Arc::new(WebFetchTool::new(self.api_key.clone())),
             Arc::new(WebSearchTool::new()),
             Arc::new(AskUserTool::new()),
             Arc::new(TodoWriteTool::new()),

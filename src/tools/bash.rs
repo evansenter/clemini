@@ -4,13 +4,20 @@ use colored::Colorize;
 use genai_rs::{CallableFunction, FunctionDeclaration, FunctionError, FunctionParameters};
 use regex::Regex;
 use serde_json::{Value, json};
+use std::collections::HashMap;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::LazyLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{LazyLock, Mutex};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tracing::instrument;
+
+pub(crate) static BACKGROUND_TASKS: LazyLock<Mutex<HashMap<String, tokio::process::Child>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+static NEXT_TASK_ID: AtomicUsize = AtomicUsize::new(1);
 
 /// Blocked command patterns that are always rejected.
 static BLOCKED_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
@@ -164,6 +171,10 @@ impl CallableFunction for BashTool {
                     "working_directory": {
                         "type": "string",
                         "description": "Directory to run the command in (must be within allowed paths)"
+                    },
+                    "run_in_background": {
+                        "type": "boolean",
+                        "description": "If true, run the command in the background and return a task_id immediately"
                     }
                 }),
                 vec!["command".to_string()],
@@ -187,6 +198,11 @@ impl CallableFunction for BashTool {
 
         let confirmed = args
             .get("confirmed")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+
+        let run_in_background = args
+            .get("run_in_background")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false);
 
@@ -262,6 +278,36 @@ impl CallableFunction for BashTool {
                 format!("[bash] running: \"{}\"", command)
             };
             crate::log_event_raw(&log_msg.dimmed().italic().to_string());
+        }
+
+        if run_in_background {
+            let task_id = NEXT_TASK_ID.fetch_add(1, Ordering::SeqCst).to_string();
+            let child = Command::new("bash")
+                .arg("-c")
+                .arg(command)
+                .current_dir(&working_dir)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .map_err(|e| {
+                    FunctionError::ExecutionError(format!("Failed to spawn process: {}", e).into())
+                })?;
+
+            BACKGROUND_TASKS
+                .lock()
+                .unwrap()
+                .insert(task_id.clone(), child);
+
+            let mut response = json!({
+                "command": command,
+                "task_id": task_id,
+                "status": "running"
+            });
+            if let Some(desc) = description {
+                response["description"] = json!(desc);
+            }
+            return Ok(response);
         }
 
         let mut child = Command::new("bash")
@@ -579,6 +625,78 @@ mod tests {
                 .contains("outside allowed paths")
         );
         assert_eq!(result["error_code"], error_codes::ACCESS_DENIED);
+    }
+
+    #[tokio::test]
+    async fn test_bash_tool_background() {
+        let dir = tempdir().unwrap();
+        let tool = BashTool::new(
+            dir.path().to_path_buf(),
+            vec![dir.path().to_path_buf()],
+            5,
+            false,
+        );
+        let args = json!({
+            "command": "sleep 10",
+            "run_in_background": true
+        });
+
+        let result = tool.call(args).await.unwrap();
+        assert_eq!(result["status"], "running");
+        assert!(result["task_id"].is_string());
+
+        let task_id = result["task_id"].as_str().unwrap().to_string();
+
+        // Check if it's in the BACKGROUND_TASKS map
+        {
+            let tasks = BACKGROUND_TASKS.lock().unwrap();
+            assert!(tasks.contains_key(&task_id));
+        }
+
+        // Cleanup: kill the background process
+        {
+            let mut tasks = BACKGROUND_TASKS.lock().unwrap();
+            if let Some(mut child) = tasks.remove(&task_id) {
+                let _ = child.kill().await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_bash_tool_background_unique_ids() {
+        let dir = tempdir().unwrap();
+        let tool = BashTool::new(
+            dir.path().to_path_buf(),
+            vec![dir.path().to_path_buf()],
+            5,
+            false,
+        );
+
+        let args1 = json!({
+            "command": "sleep 10",
+            "run_in_background": true
+        });
+        let args2 = json!({
+            "command": "sleep 10",
+            "run_in_background": true
+        });
+
+        let result1 = tool.call(args1).await.unwrap();
+        let result2 = tool.call(args2).await.unwrap();
+
+        let id1 = result1["task_id"].as_str().unwrap();
+        let id2 = result2["task_id"].as_str().unwrap();
+
+        assert_ne!(id1, id2);
+
+        // Cleanup
+        let mut tasks = BACKGROUND_TASKS.lock().unwrap();
+        if let Some(mut child) = tasks.remove(id1) {
+            let _ = child.kill().await;
+        }
+        if let Some(mut child) = tasks.remove(id2) {
+            let _ = child.kill().await;
+        }
     }
 
     #[test]

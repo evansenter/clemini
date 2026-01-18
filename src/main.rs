@@ -423,7 +423,7 @@ async fn main() -> Result<()> {
 
     let api_key = env::var("GEMINI_API_KEY")
         .map_err(|e| anyhow::anyhow!("GEMINI_API_KEY environment variable not set: {}", e))?;
-    let client = Client::new(api_key);
+    let client = Client::new(api_key.clone());
 
     let cwd = std::fs::canonicalize(&args.cwd)?;
 
@@ -445,6 +445,7 @@ async fn main() -> Result<()> {
         bash_timeout,
         args.mcp_server,
         allowed_paths,
+        api_key.clone(),
     ));
 
     let mut system_prompt = SYSTEM_PROMPT.to_string();
