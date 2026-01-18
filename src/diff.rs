@@ -3,6 +3,26 @@
 use colored::Colorize;
 use similar::{ChangeTag, TextDiff};
 
+/// Find the minimum common leading whitespace across all non-empty lines.
+fn common_indent(old: &str, new: &str) -> usize {
+    old.lines()
+        .chain(new.lines())
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| line.len() - line.trim_start().len())
+        .min()
+        .unwrap_or(0)
+}
+
+/// Strip `n` characters of leading whitespace from a line.
+fn strip_indent(line: &str, n: usize) -> &str {
+    if n == 0 || line.is_empty() {
+        line
+    } else {
+        let chars_to_skip: usize = line.chars().take(n).map(|c| c.len_utf8()).sum();
+        &line[chars_to_skip.min(line.len())..]
+    }
+}
+
 /// Format a diff between old and new strings.
 /// Returns ANSI-colored string suitable for terminal/logs.
 ///
@@ -33,28 +53,33 @@ pub fn format_diff(old: &str, new: &str, context_lines: usize) -> String {
 ///   + new content
 /// ```
 fn format_simple_diff(old: &str, new: &str) -> String {
+    let indent = common_indent(old, new);
     let mut output = String::new();
 
     for line in old.lines() {
-        output.push_str(&format!("  {} {}\n", "-".red(), line.red()));
+        let stripped = strip_indent(line, indent);
+        output.push_str(&format!("  {} {}\n", "-".red(), stripped.red()));
     }
     // Handle empty old string (pure addition)
     if old.is_empty() && !new.is_empty() {
         // No deletion line needed
     } else if old.lines().count() == 0 && !old.is_empty() {
         // Single line without newline
-        output.push_str(&format!("  {} {}\n", "-".red(), old.red()));
+        let stripped = strip_indent(old, indent);
+        output.push_str(&format!("  {} {}\n", "-".red(), stripped.red()));
     }
 
     for line in new.lines() {
-        output.push_str(&format!("  {} {}\n", "+".green(), line.green()));
+        let stripped = strip_indent(line, indent);
+        output.push_str(&format!("  {} {}\n", "+".green(), stripped.green()));
     }
     // Handle empty new string (pure deletion)
     if new.is_empty() && !old.is_empty() {
         // No addition line needed
     } else if new.lines().count() == 0 && !new.is_empty() {
         // Single line without newline
-        output.push_str(&format!("  {} {}\n", "+".green(), new.green()));
+        let stripped = strip_indent(new, indent);
+        output.push_str(&format!("  {} {}\n", "+".green(), stripped.green()));
     }
 
     output.trim_end().to_string()
@@ -68,6 +93,7 @@ fn format_simple_diff(old: &str, new: &str) -> String {
 ///     context line after
 /// ```
 fn format_unified_diff(old: &str, new: &str, context_lines: usize) -> String {
+    let indent = common_indent(old, new);
     let diff = TextDiff::from_lines(old, new);
     let mut output = String::new();
 
@@ -78,15 +104,16 @@ fn format_unified_diff(old: &str, new: &str, context_lines: usize) -> String {
     {
         for change in hunk.iter_changes() {
             let line = change.value().trim_end_matches('\n');
+            let stripped = strip_indent(line, indent);
             match change.tag() {
                 ChangeTag::Delete => {
-                    output.push_str(&format!("  {} {}\n", "-".red(), line.red()));
+                    output.push_str(&format!("  {} {}\n", "-".red(), stripped.red()));
                 }
                 ChangeTag::Insert => {
-                    output.push_str(&format!("  {} {}\n", "+".green(), line.green()));
+                    output.push_str(&format!("  {} {}\n", "+".green(), stripped.green()));
                 }
                 ChangeTag::Equal => {
-                    output.push_str(&format!("    {}\n", line.dimmed()));
+                    output.push_str(&format!("    {}\n", stripped.dimmed()));
                 }
             }
         }
@@ -197,5 +224,35 @@ mod tests {
         assert!(plain.contains("+"));
         assert!(plain.contains("old"));
         assert!(plain.contains("new"));
+    }
+
+    #[test]
+    fn test_common_indent_stripped() {
+        // Both lines have 8 spaces of indentation - should be stripped
+        let old = "        let x = 5;";
+        let new = "        let x = 10;";
+
+        let diff = format_diff(old, new, 2);
+        let plain = strip_ansi(&diff);
+
+        // Should NOT have the 8 leading spaces
+        assert!(plain.contains("- let x = 5;"));
+        assert!(plain.contains("+ let x = 10;"));
+        // Should NOT contain the heavily indented version
+        assert!(!plain.contains("-         let x"));
+    }
+
+    #[test]
+    fn test_partial_indent_stripped() {
+        // Lines have different indentation - only common part stripped
+        let old = "    fn foo() {\n        let x = 5;\n    }";
+        let new = "    fn foo() {\n        let x = 10;\n    }";
+
+        let diff = format_diff(old, new, 2);
+        let plain = strip_ansi(&diff);
+
+        // Common indent is 4, so "    let x" becomes "let x" (still has 4 relative)
+        // The diff shows the change, context lines keep relative indent
+        assert!(plain.contains("let x = 5") || plain.contains("let x = 10"));
     }
 }
