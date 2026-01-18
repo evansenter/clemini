@@ -64,7 +64,6 @@ make test                # Run tests
 make clippy              # Lint with warnings as errors
 make fmt                 # Format code
 make logs                # Tail human-readable logs
-make json-logs           # Tail JSON logs with jq formatting
 ```
 
 ### Environment Variables

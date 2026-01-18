@@ -30,7 +30,7 @@ The trait also includes `emit_streaming()` for real-time streaming output:
 ### Log Files
 
 - Location: `~/.clemini/logs/`
-- Naming: `clemini.log.YYYY-MM-DD` (human-readable), `clemini.json.YYYY-MM-DD` (structured)
+- Naming: `clemini.log.YYYY-MM-DD`
 - ANSI colors are preserved in human-readable logs
 
 ## Color Palette

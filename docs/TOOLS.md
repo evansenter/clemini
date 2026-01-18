@@ -26,7 +26,7 @@ Error codes are defined in `src/tools/mod.rs`:
 - `NOT_UNIQUE` - String matches multiple locations (edit tool)
 - `BINARY_FILE` - Attempted to read binary as text
 - `BLOCKED` - Command blocked for safety (bash tool)
-- `NEEDS_CONFIRMATION` - Destructive command needs user approval
+- `TIMEOUT` - Command exceeded time limit (bash tool)
 
 ### Actionable Errors
 Error messages should tell the user what to do next. Instead of "File not found", say "File not found: foo.txt. Check that the file exists or use glob to search." Include context like file paths, line numbers, and suggestions.
