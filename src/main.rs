@@ -36,7 +36,9 @@ pub fn init_logging() {
     let _ = std::fs::create_dir_all(&log_dir);
 }
 
-// Re-export logging module for crate:: access from mcp.rs
+// Re-export logging module to enable `crate::logging::` imports in mcp.rs.
+// This wrapper is needed because mcp.rs uses `crate::logging::log_event` paths,
+// and we can't use `clemini::logging` directly as `crate::` in the binary crate.
 pub(crate) mod logging {
     pub use clemini::logging::*;
 }

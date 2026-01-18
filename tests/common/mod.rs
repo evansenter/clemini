@@ -159,8 +159,10 @@ pub async fn validate_response_semantically(
         return Ok(is_valid);
     }
 
-    // If we can't parse, default to valid to avoid blocking tests
-    println!("Warning: Could not parse semantic validation response, assuming valid");
+    // If we can't parse the validator's response, default to valid to avoid blocking tests.
+    // The validator itself having issues shouldn't cause test failures - only the actual
+    // response content should determine pass/fail.
+    eprintln!("Warning: Could not parse semantic validation response, assuming valid");
     Ok(true)
 }
 

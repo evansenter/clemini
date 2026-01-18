@@ -74,6 +74,10 @@ mod tests {
     use super::*;
     use serial_test::serial;
 
+    // Note: std::env::set_var/remove_var require `unsafe` in Rust 2024 edition due to
+    // thread-safety concerns (environment mutations are not thread-safe). These tests
+    // use #[serial] to ensure single-threaded execution, making the unsafe sound.
+
     #[test]
     #[serial]
     fn test_logging_disabled_by_default() {
