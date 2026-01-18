@@ -59,8 +59,9 @@ impl OutputSink for FileSink {
     fn emit(&self, message: &str, render_markdown: bool) {
         log_event_to_file(message, render_markdown);
     }
-    fn emit_streaming(&self, _text: &str) {
-        // No terminal to stream to
+    fn emit_streaming(&self, text: &str) {
+        // No terminal to stream to, but still log for tail -f
+        log_streaming(text);
     }
 }
 
@@ -80,6 +81,8 @@ impl OutputSink for TerminalSink {
     fn emit_streaming(&self, text: &str) {
         print!("{text}");
         let _ = io::stdout().flush();
+        // Also log for tail -f
+        log_streaming(text);
     }
 }
 
@@ -117,6 +120,8 @@ impl OutputSink for TuiSink {
         if let Some(tx) = TUI_OUTPUT_TX.get() {
             let _ = tx.send(TuiMessage::Streaming(text.to_string()));
         }
+        // Also log for tail -f
+        log_streaming(text);
     }
 }
 
@@ -183,12 +188,6 @@ fn log_event_to_file(message: &str, render_markdown: bool) {
     }
 }
 
-/// Format a log line with timestamp, ensuring ANSI codes don't bleed between lines.
-fn format_log_line(timestamp: &str, content: &str) -> String {
-    // Reset before and after timestamp to prevent ANSI code bleed between lines
-    format!("\x1b[0m{}\x1b[0m {}", timestamp.cyan(), content)
-}
-
 fn write_to_log_file(path: impl Into<PathBuf>, rendered: &str) -> std::io::Result<()> {
     let mut file = std::fs::OpenOptions::new()
         .create(true)
@@ -200,11 +199,42 @@ fn write_to_log_file(path: impl Into<PathBuf>, rendered: &str) -> std::io::Resul
         writeln!(file)?;
     } else {
         for line in rendered.lines() {
-            let timestamp = format!("[{}]", chrono::Local::now().format("%H:%M:%S%.3f"));
-            writeln!(file, "{}", format_log_line(&timestamp, line))?;
+            writeln!(file, "{}", line)?;
         }
     }
     Ok(())
+}
+
+/// Write streaming text to log file without adding newlines.
+/// The text is written directly, preserving any newlines it contains.
+/// Used by `log_streaming()` for streaming model responses to logs.
+fn write_streaming_to_log_file(path: impl Into<PathBuf>, text: &str) -> std::io::Result<()> {
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path.into())?;
+    write!(file, "{}", text)?;
+    Ok(())
+}
+
+/// Log streaming text to file only (no extra newlines added).
+/// Use this for streaming model responses so `tail -f` works naturally.
+pub fn log_streaming(text: &str) {
+    // Write to the stable log location: clemini.log.YYYY-MM-DD
+    let log_dir = dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".clemini/logs");
+    let _ = std::fs::create_dir_all(&log_dir);
+
+    let today = chrono::Local::now().format("%Y-%m-%d");
+    let log_path = log_dir.join(format!("clemini.log.{}", today));
+
+    let _ = write_streaming_to_log_file(&log_path, text);
+
+    // Also write to CLEMINI_LOG if set (backwards compat)
+    if let Ok(path) = std::env::var("CLEMINI_LOG") {
+        let _ = write_streaming_to_log_file(PathBuf::from(path), text);
+    }
 }
 
 const SYSTEM_PROMPT: &str = r#"You are clemini, a coding assistant. Be concise. Get things done.
@@ -619,20 +649,10 @@ fn format_tool_duration(duration_ms: u64) -> String {
     }
 }
 
-/// Format context warning message based on severity.
-fn format_context_warning(percentage: f64) -> String {
-    if percentage > 95.0 {
-        format!(
-            "WARNING: Context window at {:.1}%. Use /clear to reset.",
-            percentage
-        )
-    } else {
-        format!("WARNING: Context window at {:.1}%.", percentage)
-    }
-}
-
 /// Convert AgentEvent to AppEvents for the TUI.
 /// Returns a Vec because ToolExecuting can produce multiple AppEvents.
+/// Note: This function is only used in tests; actual conversion happens in TuiEventHandler.
+#[cfg(test)]
 fn convert_agent_event_to_app_events(event: &AgentEvent) -> Vec<AppEvent> {
     match event {
         AgentEvent::TextDelta(text) => vec![AppEvent::StreamChunk(text.clone())],
@@ -649,12 +669,74 @@ fn convert_agent_event_to_app_events(event: &AgentEvent) -> Vec<AppEvent> {
             tokens: events::estimate_tokens(&result.args) + events::estimate_tokens(&result.result),
         }],
         AgentEvent::ContextWarning { percentage, .. } => {
-            vec![AppEvent::ContextWarning(format_context_warning(
+            vec![AppEvent::ContextWarning(events::format_context_warning(
                 *percentage,
             ))]
         }
         // Complete and Cancelled are handled differently (via join handle result)
         AgentEvent::Complete { .. } | AgentEvent::Cancelled => vec![],
+    }
+}
+
+/// TUI-specific event handler that sends AppEvents via channel.
+/// Also logs events to file for `make logs` visibility.
+struct TuiEventHandler {
+    app_tx: mpsc::Sender<AppEvent>,
+}
+
+impl TuiEventHandler {
+    fn new(app_tx: mpsc::Sender<AppEvent>) -> Self {
+        Self { app_tx }
+    }
+}
+
+impl events::EventHandler for TuiEventHandler {
+    fn on_text_delta(&mut self, text: &str) {
+        let _ = self
+            .app_tx
+            .try_send(AppEvent::StreamChunk(text.to_string()));
+        log_streaming(text);
+    }
+
+    fn on_tool_executing(&mut self, name: &str, args: &serde_json::Value) {
+        let _ = self.app_tx.try_send(AppEvent::ToolExecuting {
+            name: name.to_string(),
+            args: args.clone(),
+        });
+        let args_str = events::format_tool_args(name, args);
+        log_event(&format!(
+            "{} {} {}",
+            "🔧".dimmed(),
+            name.cyan(),
+            args_str.dimmed()
+        ));
+    }
+
+    fn on_tool_result(
+        &mut self,
+        name: &str,
+        duration: std::time::Duration,
+        tokens: u32,
+        has_error: bool,
+        error_message: Option<&str>,
+    ) {
+        let _ = self.app_tx.try_send(AppEvent::ToolCompleted {
+            name: name.to_string(),
+            duration_ms: duration.as_millis() as u64,
+            tokens,
+        });
+        log_event(&events::format_tool_result(
+            name, duration, tokens, has_error,
+        ));
+        if let Some(err_msg) = error_message {
+            log_event(&format!("  └─ error: {}", err_msg.dimmed()));
+        }
+    }
+
+    fn on_context_warning(&mut self, percentage: f64) {
+        let msg = events::format_context_warning(percentage);
+        let _ = self.app_tx.try_send(AppEvent::ContextWarning(msg.clone()));
+        log_event(&msg);
     }
 }
 
@@ -973,13 +1055,12 @@ async fn run_tui_event_loop(
                                 // Create channel for agent events
                                 let (events_tx, mut events_rx) = mpsc::channel::<AgentEvent>(100);
 
-                                // Spawn task to convert AgentEvents to AppEvents
+                                // Spawn task to handle AgentEvents via TuiEventHandler
                                 let app_tx = tx.clone();
                                 tokio::spawn(async move {
+                                    let mut handler = TuiEventHandler::new(app_tx);
                                     while let Some(event) = events_rx.recv().await {
-                                        for app_event in convert_agent_event_to_app_events(&event) {
-                                            let _ = app_tx.try_send(app_event);
-                                        }
+                                        events::dispatch_event(&mut handler, &event);
                                     }
                                 });
 
@@ -1241,6 +1322,7 @@ fn run_shell_command_capture(command: &str) -> String {
 #[cfg(test)]
 mod event_handling_tests {
     use super::*;
+    use crate::events::EventHandler;
     use serde_json::json;
     use std::time::Duration;
 
@@ -1268,7 +1350,7 @@ mod event_handling_tests {
         let formatted =
             events::format_tool_result("read_file", Duration::from_millis(25), 150, false);
 
-        assert!(formatted.contains("[read_file]"));
+        assert!(formatted.contains("└─ read_file"));
         assert!(formatted.contains("0.02s") || formatted.contains("0.03s")); // timing can vary
         assert!(formatted.contains("~150 tok"));
 
@@ -1283,7 +1365,7 @@ mod event_handling_tests {
         let formatted =
             events::format_tool_result("write_file", Duration::from_millis(10), 50, true);
 
-        assert!(formatted.contains("[write_file]"));
+        assert!(formatted.contains("└─ write_file"));
         assert!(formatted.contains("ERROR"));
 
         colored::control::unset_override();
@@ -1431,14 +1513,14 @@ mod event_handling_tests {
 
     #[test]
     fn test_format_context_warning_normal() {
-        let msg = format_context_warning(85.0);
+        let msg = events::format_context_warning(85.0);
         assert!(msg.contains("85.0%"));
         assert!(!msg.contains("/clear"));
     }
 
     #[test]
     fn test_format_context_warning_critical() {
-        let msg = format_context_warning(96.0);
+        let msg = events::format_context_warning(96.0);
         assert!(msg.contains("96.0%"));
         assert!(msg.contains("/clear"));
     }
@@ -1446,11 +1528,11 @@ mod event_handling_tests {
     #[test]
     fn test_format_context_warning_boundary() {
         // Exactly 95% - not critical
-        let msg = format_context_warning(95.0);
+        let msg = events::format_context_warning(95.0);
         assert!(!msg.contains("/clear"));
 
         // Just over 95% - critical
-        let msg = format_context_warning(95.1);
+        let msg = events::format_context_warning(95.1);
         assert!(msg.contains("/clear"));
     }
 
@@ -1612,47 +1694,75 @@ mod event_handling_tests {
     }
 
     // =========================================
-    // Log formatting tests
+    // TuiEventHandler tests
     // =========================================
 
-    #[test]
-    fn test_format_log_line_has_reset_before_timestamp() {
-        let line = format_log_line("[12:34:56.789]", "some content");
-        // Should start with ANSI reset to prevent color bleed from previous lines
-        assert!(line.starts_with("\x1b[0m"), "Should start with ANSI reset");
+    #[tokio::test]
+    async fn test_tui_handler_text_delta_sends_stream_chunk() {
+        let (tx, mut rx) = mpsc::channel::<AppEvent>(10);
+        let mut handler = TuiEventHandler::new(tx);
+
+        handler.on_text_delta("Hello");
+
+        let event = rx.try_recv().unwrap();
+        match event {
+            AppEvent::StreamChunk(text) => assert_eq!(text, "Hello"),
+            _ => panic!("Expected StreamChunk"),
+        }
     }
 
-    #[test]
-    fn test_format_log_line_has_reset_after_timestamp() {
-        let line = format_log_line("[12:34:56.789]", "some content");
-        // Should have reset after timestamp (before content) to isolate timestamp color
-        // The cyan codes wrap the timestamp, then reset, then content
-        assert!(
-            line.contains("\x1b[0m \x1b[0m") || line.contains("\x1b[0m some"),
-            "Should have reset before content"
-        );
+    #[tokio::test]
+    async fn test_tui_handler_tool_executing_sends_app_event() {
+        let (tx, mut rx) = mpsc::channel::<AppEvent>(10);
+        let mut handler = TuiEventHandler::new(tx);
+
+        handler.on_tool_executing("read_file", &json!({"file_path": "test.rs"}));
+
+        let event = rx.try_recv().unwrap();
+        match event {
+            AppEvent::ToolExecuting { name, args } => {
+                assert_eq!(name, "read_file");
+                assert_eq!(args["file_path"], "test.rs");
+            }
+            _ => panic!("Expected ToolExecuting"),
+        }
     }
 
-    #[test]
-    fn test_format_log_line_with_ansi_content() {
-        // Simulate dimmed content like bash output
-        let dimmed_content = "\x1b[2msome dimmed text\x1b[0m";
-        let line = format_log_line("[12:34:56.789]", dimmed_content);
+    #[tokio::test]
+    async fn test_tui_handler_tool_result_sends_app_event() {
+        let (tx, mut rx) = mpsc::channel::<AppEvent>(10);
+        let mut handler = TuiEventHandler::new(tx);
 
-        // The line should start with reset (protecting from previous line bleed)
-        assert!(line.starts_with("\x1b[0m"));
-        // And contain the content
-        assert!(line.contains("some dimmed text"));
+        handler.on_tool_result("bash", Duration::from_millis(150), 100, false, None);
+
+        let event = rx.try_recv().unwrap();
+        match event {
+            AppEvent::ToolCompleted {
+                name,
+                duration_ms,
+                tokens,
+            } => {
+                assert_eq!(name, "bash");
+                assert_eq!(duration_ms, 150);
+                assert_eq!(tokens, 100);
+            }
+            _ => panic!("Expected ToolCompleted"),
+        }
     }
 
-    #[test]
-    fn test_format_log_line_timestamp_gets_cyan() {
-        colored::control::set_override(true);
-        let line = format_log_line("[12:34:56.789]", "content");
-        colored::control::unset_override();
+    #[tokio::test]
+    async fn test_tui_handler_context_warning_sends_app_event() {
+        let (tx, mut rx) = mpsc::channel::<AppEvent>(10);
+        let mut handler = TuiEventHandler::new(tx);
 
-        // Cyan ANSI code is \x1b[36m
-        assert!(line.contains("\x1b[36m"), "Timestamp should be cyan");
-        assert!(line.contains("[12:34:56.789]"));
+        handler.on_context_warning(85.5);
+
+        let event = rx.try_recv().unwrap();
+        match event {
+            AppEvent::ContextWarning(msg) => {
+                assert!(msg.contains("85.5%"));
+            }
+            _ => panic!("Expected ContextWarning"),
+        }
     }
 }

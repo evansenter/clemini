@@ -24,7 +24,7 @@ use std::time::Duration;
 use colored::Colorize;
 use serde_json::Value;
 
-use crate::log_event;
+use crate::{log_event, log_streaming};
 
 // ============================================================================
 // Formatting helpers (UI concerns, used by EventHandler implementations)
@@ -93,12 +93,24 @@ pub fn format_tool_result(
     };
 
     format!(
-        "[{}] {}, ~{} tok{}",
+        "└─ {} {} ~{} tok{}",
         name.cyan(),
         duration_str.yellow(),
         estimated_tokens,
         error_suffix
     )
+}
+
+/// Format context warning message.
+pub fn format_context_warning(percentage: f64) -> String {
+    if percentage > 95.0 {
+        format!(
+            "WARNING: Context window at {:.1}%. Use /clear to reset.",
+            percentage
+        )
+    } else {
+        format!("WARNING: Context window at {:.1}%.", percentage)
+    }
 }
 
 /// Handler for agent events. UI modes implement this to process events.
@@ -146,6 +158,8 @@ impl EventHandler for TerminalEventHandler {
             print!("{}", text);
             let _ = io::stdout().flush();
         }
+        // Always log streaming text (even if terminal streaming disabled)
+        log_streaming(text);
     }
 
     fn on_tool_executing(&mut self, name: &str, args: &Value) {
@@ -173,14 +187,7 @@ impl EventHandler for TerminalEventHandler {
     }
 
     fn on_context_warning(&mut self, percentage: f64) {
-        let msg = if percentage > 95.0 {
-            format!(
-                "WARNING: Context window at {:.1}%. Use /clear to reset.",
-                percentage
-            )
-        } else {
-            format!("WARNING: Context window at {:.1}%.", percentage)
-        };
+        let msg = format_context_warning(percentage);
         eprintln!("{}", msg.bright_red().bold());
     }
 }
@@ -601,31 +608,31 @@ mod tests {
         // < 1ms (100us) -> 3 decimals
         assert_eq!(
             format_tool_result("test", Duration::from_micros(100), 10, false),
-            "[test] 0.000s, ~10 tok"
+            "└─ test 0.000s ~10 tok"
         );
 
         // < 1ms (900us) -> 3 decimals
         assert_eq!(
             format_tool_result("test", Duration::from_micros(900), 10, false),
-            "[test] 0.001s, ~10 tok"
+            "└─ test 0.001s ~10 tok"
         );
 
         // >= 1ms (1.1ms) -> 2 decimals (shows 0.00s due to threshold)
         assert_eq!(
             format_tool_result("test", Duration::from_micros(1100), 10, false),
-            "[test] 0.00s, ~10 tok"
+            "└─ test 0.00s ~10 tok"
         );
 
         // >= 1ms (20ms) -> 2 decimals
         assert_eq!(
             format_tool_result("test", Duration::from_millis(20), 10, false),
-            "[test] 0.02s, ~10 tok"
+            "└─ test 0.02s ~10 tok"
         );
 
         // >= 1ms (1450ms) -> 2 decimals
         assert_eq!(
             format_tool_result("test", Duration::from_millis(1450), 10, false),
-            "[test] 1.45s, ~10 tok"
+            "└─ test 1.45s ~10 tok"
         );
 
         colored::control::unset_override();
@@ -636,11 +643,36 @@ mod tests {
         colored::control::set_override(false);
 
         let res = format_tool_result("test", Duration::from_millis(10), 25, true);
-        assert_eq!(res, "[test] 0.01s, ~25 tok ERROR");
+        assert_eq!(res, "└─ test 0.01s ~25 tok ERROR");
 
         let res = format_tool_result("test", Duration::from_millis(10), 25, false);
-        assert_eq!(res, "[test] 0.01s, ~25 tok");
+        assert_eq!(res, "└─ test 0.01s ~25 tok");
 
         colored::control::unset_override();
+    }
+
+    #[test]
+    fn test_format_context_warning_normal() {
+        let msg = format_context_warning(85.0);
+        assert!(msg.contains("85.0%"));
+        assert!(!msg.contains("/clear"));
+    }
+
+    #[test]
+    fn test_format_context_warning_critical() {
+        let msg = format_context_warning(96.0);
+        assert!(msg.contains("96.0%"));
+        assert!(msg.contains("/clear"));
+    }
+
+    #[test]
+    fn test_format_context_warning_boundary() {
+        // Exactly 95% - not critical
+        let msg = format_context_warning(95.0);
+        assert!(!msg.contains("/clear"));
+
+        // Just over 95% - critical
+        let msg = format_context_warning(95.1);
+        assert!(msg.contains("/clear"));
     }
 }

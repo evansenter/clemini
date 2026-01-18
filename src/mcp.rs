@@ -21,7 +21,8 @@ use tracing::instrument;
 // Note: info! macro goes to JSON logs only. For human-readable logs, use crate::log_event()
 
 use crate::agent::{AgentEvent, run_interaction};
-use crate::events::{estimate_tokens, format_tool_args, format_tool_result};
+use crate::events::{EventHandler, format_context_warning, format_tool_args, format_tool_result};
+use crate::log_streaming;
 use crate::tools::CleminiToolService;
 
 #[derive(Debug, Deserialize, Clone)]
@@ -110,6 +111,68 @@ fn create_tool_result_notification(name: &str, duration_ms: u64) -> Value {
             "duration_ms": duration_ms
         }
     })
+}
+
+/// MCP-specific event handler that logs events and sends MCP progress notifications.
+struct McpEventHandler {
+    notification_tx: mpsc::UnboundedSender<String>,
+}
+
+impl McpEventHandler {
+    fn new(notification_tx: mpsc::UnboundedSender<String>) -> Self {
+        Self { notification_tx }
+    }
+
+    fn send_notification(&self, notification: Value) {
+        if let Ok(s) = serde_json::to_string(&notification) {
+            let _ = self.notification_tx.send(format!("{}\n", s));
+        }
+    }
+}
+
+impl EventHandler for McpEventHandler {
+    fn on_text_delta(&mut self, text: &str) {
+        // Log streaming text directly (no buffering, works with tail -f)
+        log_streaming(text);
+    }
+
+    fn on_tool_executing(&mut self, name: &str, args: &Value) {
+        // Log to human-readable log
+        let args_str = format_tool_args(name, args);
+        crate::log_event(&format!(
+            "{} {} {}",
+            "🔧".dimmed(),
+            name.cyan(),
+            args_str.dimmed()
+        ));
+        // Send MCP notification
+        self.send_notification(create_tool_executing_notification(name, args));
+    }
+
+    fn on_tool_result(
+        &mut self,
+        name: &str,
+        duration: std::time::Duration,
+        tokens: u32,
+        has_error: bool,
+        error_message: Option<&str>,
+    ) {
+        // Log to human-readable log
+        crate::log_event(&format_tool_result(name, duration, tokens, has_error));
+        if let Some(err_msg) = error_message {
+            crate::log_event(&format!("  └─ error: {}", err_msg.dimmed()));
+        }
+        // Send MCP notification
+        self.send_notification(create_tool_result_notification(
+            name,
+            duration.as_millis() as u64,
+        ));
+    }
+
+    fn on_context_warning(&mut self, percentage: f64) {
+        let msg = format_context_warning(percentage);
+        crate::log_event(&msg);
+    }
 }
 
 #[instrument(skip(server, request))]
@@ -555,83 +618,12 @@ impl McpServer {
         // Create channel for agent events
         let (events_tx, mut events_rx) = mpsc::channel::<AgentEvent>(100);
 
-        // Spawn task to send progress notifications and log tool events
+        // Spawn task to handle AgentEvents via McpEventHandler
         let tx_clone = tx.clone();
         tokio::spawn(async move {
-            // Buffer for streaming text - only log complete lines (avoids mid-word splits)
-            let mut text_buffer = String::new();
-
+            let mut handler = McpEventHandler::new(tx_clone);
             while let Some(event) = events_rx.recv().await {
-                let notification = match &event {
-                    AgentEvent::ToolExecuting(calls) => {
-                        for call in calls {
-                            // Log to human-readable log
-                            let args_str = format_tool_args(&call.name, &call.args);
-                            crate::log_event(&format!(
-                                "{} {} {}",
-                                "🔧".dimmed(),
-                                call.name.cyan(),
-                                args_str.dimmed()
-                            ));
-
-                            // Send MCP notification
-                            let notif = create_tool_executing_notification(&call.name, &call.args);
-                            if let Ok(s) = serde_json::to_string(&notif) {
-                                let _ = tx_clone.send(format!("{}\n", s));
-                            }
-                        }
-                        continue;
-                    }
-                    AgentEvent::ToolResult(result) => {
-                        // Log to human-readable log (include both args and result for full context impact)
-                        let tokens =
-                            estimate_tokens(&result.args) + estimate_tokens(&result.result);
-                        let has_error = result.is_error();
-                        crate::log_event(&format_tool_result(
-                            &result.name,
-                            result.duration,
-                            tokens,
-                            has_error,
-                        ));
-                        if let Some(err_msg) = result.error_message() {
-                            crate::log_event(&format!("  └─ error: {}", err_msg.dimmed()));
-                        }
-
-                        // Send MCP notification
-                        create_tool_result_notification(
-                            &result.name,
-                            result.duration.as_millis() as u64,
-                        )
-                    }
-                    AgentEvent::TextDelta(text) => {
-                        // Buffer streaming text and only log complete lines
-                        text_buffer.push_str(text);
-
-                        // Log any complete lines (split on newlines)
-                        while let Some(newline_pos) = text_buffer.find('\n') {
-                            let line = text_buffer[..newline_pos].trim();
-                            if !line.is_empty() {
-                                crate::log_event(&format!(
-                                    "{} {}",
-                                    "▐".bright_black().bold(),
-                                    line
-                                ));
-                            }
-                            text_buffer = text_buffer[newline_pos + 1..].to_string();
-                        }
-                        continue;
-                    }
-                    _ => continue,
-                };
-                if let Ok(s) = serde_json::to_string(&notification) {
-                    let _ = tx_clone.send(format!("{}\n", s));
-                }
-            }
-
-            // Flush any remaining buffered text
-            let remaining = text_buffer.trim();
-            if !remaining.is_empty() {
-                crate::log_event(&format!("{} {}", "▐".bright_black().bold(), remaining));
+                crate::events::dispatch_event(&mut handler, &event);
             }
         });
 
@@ -884,56 +876,68 @@ mod tests {
         assert_eq!(notif["params"]["duration_ms"], 0);
     }
 
-    #[test]
-    fn test_text_delta_formatting() {
-        // Test the format used for TextDelta logging in MCP mode
-        // TextDelta events are logged with the ▐ prefix
-        let text = "Let me search for the function...";
-        let formatted = format!("{} {}", "▐".bright_black().bold(), text);
+    // =========================================
+    // McpEventHandler tests
+    // =========================================
 
-        // Should contain the prefix and text
-        assert!(formatted.contains("▐"));
-        assert!(formatted.contains("Let me search"));
+    #[test]
+    fn test_mcp_handler_tool_executing_sends_notification() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let mut handler = McpEventHandler::new(tx);
+
+        handler.on_tool_executing("read_file", &json!({"file_path": "test.rs"}));
+
+        let notification = rx.try_recv().unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&notification).unwrap();
+
+        assert_eq!(parsed["method"], "notifications/progress");
+        assert_eq!(parsed["params"]["tool"], "read_file");
+        assert_eq!(parsed["params"]["status"], "executing");
     }
 
     #[test]
-    fn test_text_delta_line_buffering() {
-        // TextDelta chunks may split mid-word; we buffer and only log complete lines
-        // Simulates the buffering logic used in clemini_chat
+    fn test_mcp_handler_tool_result_sends_notification() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let mut handler = McpEventHandler::new(tx);
 
-        let mut buffer = String::new();
-        let mut logged_lines: Vec<String> = Vec::new();
+        handler.on_tool_result(
+            "bash",
+            std::time::Duration::from_millis(150),
+            100,
+            false,
+            None,
+        );
 
-        // Simulate receiving chunks that split mid-sentence
-        let chunks = [
-            "In the main function (lines 116-120",
-            ")\nThe following defaults are set:\n",
-            "- parallel: 2",
-        ];
+        let notification = rx.try_recv().unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&notification).unwrap();
 
-        for chunk in chunks {
-            buffer.push_str(chunk);
+        assert_eq!(parsed["method"], "notifications/progress");
+        assert_eq!(parsed["params"]["tool"], "bash");
+        assert_eq!(parsed["params"]["status"], "completed");
+        assert_eq!(parsed["params"]["duration_ms"], 150);
+    }
 
-            // Log complete lines (ending with \n)
-            while let Some(newline_pos) = buffer.find('\n') {
-                let line = buffer[..newline_pos].trim().to_string();
-                if !line.is_empty() {
-                    logged_lines.push(line);
-                }
-                buffer = buffer[newline_pos + 1..].to_string();
-            }
-        }
+    #[test]
+    fn test_mcp_handler_text_delta_no_notification() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let mut handler = McpEventHandler::new(tx);
 
-        // Flush remaining
-        let remaining = buffer.trim();
-        if !remaining.is_empty() {
-            logged_lines.push(remaining.to_string());
-        }
+        // TextDelta should only log, not send notification
+        handler.on_text_delta("Hello world");
 
-        // Lines should be complete, not split mid-word
-        assert_eq!(logged_lines.len(), 3);
-        assert_eq!(logged_lines[0], "In the main function (lines 116-120)");
-        assert_eq!(logged_lines[1], "The following defaults are set:");
-        assert_eq!(logged_lines[2], "- parallel: 2");
+        // No notification should be sent for text deltas
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn test_mcp_handler_context_warning_no_notification() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let mut handler = McpEventHandler::new(tx);
+
+        // Context warning should only log, not send notification
+        handler.on_context_warning(85.5);
+
+        // No notification should be sent for context warnings
+        assert!(rx.try_recv().is_err());
     }
 }
