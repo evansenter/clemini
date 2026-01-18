@@ -166,7 +166,7 @@ impl CallableFunction for BashTool {
                     },
                     "confirmed": {
                         "type": "boolean",
-                        "description": "Set to true to skip confirmation for potentially destructive commands (rm, sudo, git push --force, etc.). (default: false)"
+                        "description": "Set to true only after user explicitly approves the command in conversation. First call should always omit this or use false. Destructive commands return needs_confirmation until approved. (default: false)"
                     },
                     "working_directory": {
                         "type": "string",

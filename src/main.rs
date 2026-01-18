@@ -259,7 +259,7 @@ All tools return JSON. Success responses have relevant data fields. Errors have 
 - `grep(pattern, directory?, type?, output_mode?)` - Search file contents with regex. **Always prefer over `bash grep`.** Use for searching within files.
 
 ### Execution
-- `bash(command, description?, run_in_background?, working_directory?)` - Shell commands: git, builds, tests. Use `run_in_background: true` for long-running commands. For GitHub, use `gh`: `gh issue view 34`.
+- `bash(command, description?, confirmed?, run_in_background?, working_directory?)` - Shell commands: git, builds, tests. Destructive commands (rm, sudo, git push --force) return `{needs_confirmation: true}` - explain to the user what needs approval and wait. After user approves in conversation, retry with `confirmed: true`. Use `run_in_background: true` for long-running commands. For GitHub, use `gh`: `gh issue view 34`.
 - `kill_shell(task_id)` - Kill a background bash task. Pass the `task_id` returned by `bash` with `run_in_background: true`.
 
 ### Interaction
