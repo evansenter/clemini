@@ -72,8 +72,9 @@ run_interaction()                    UI Layer
 - `McpEventHandler` (`mcp.rs`) - MCP server mode
 
 All handlers use shared formatting functions:
-- `format_tool_args()` - Format tool arguments as key=value pairs
+- `format_tool_executing()` - Format tool executing line (`🔧 name args`)
 - `format_tool_result()` - Format tool completion line (`└─ name duration ~tokens tok`)
+- `format_tool_args()` - Format tool arguments as key=value pairs (used by format_tool_executing)
 - `format_context_warning()` - Format context window warnings
 
 ### Core Functions
@@ -144,11 +145,45 @@ Don't skip tests. If a test is flaky or legitimately broken by your change, fix 
 
 | Change | Location |
 |--------|----------|
+| Tool executing format (`🔧 name...`) | `format_tool_executing()` in `events.rs` |
 | Tool result format (`└─ name...`) | `format_tool_result()` in `events.rs` |
+| Tool error detail (`└─ error:...`) | `format_error_detail()` in `events.rs` |
 | Tool args format (`key=value`) | `format_tool_args()` in `events.rs` |
 | Context warnings | `format_context_warning()` in `events.rs` |
-| Streaming text logging | `log_streaming()` in `main.rs` |
+| Streaming text (markdown) | `render_streaming_chunk()` + `flush_streaming_buffer()` in `events.rs` |
 
 All three EventHandler implementations (`TerminalEventHandler`, `TuiEventHandler`, `McpEventHandler`) use these shared functions, so changes apply everywhere automatically.
 
 Test visual changes by running clemini in each mode and verifying the output looks correct.
+
+## Design Principles
+
+### Core Principles
+
+| Principle | Meaning |
+|-----------|---------|
+| **Explicit over implicit** | No magical defaults. Clear code beats hidden behavior. If spacing/formatting varies by mode, that's a bug. |
+| **Formatting owns visual output** | Format functions return complete visual blocks including spacing. Output layer just emits—no newline decisions. |
+| **Graceful unknowns** | Unknown/unexpected data is logged and handled, not crashed on. Tool errors return JSON so the model can retry. |
+| **Breaking changes over shims** | Clean breaks preferred. No deprecated wrappers, re-exports for compatibility, or `// legacy` code paths. |
+
+### Architecture Principles
+
+**Agent isolation** - The agent (`agent.rs`) emits structured events via channel. No formatting, colors, or UI logic. This keeps the agent testable and UI implementations independent.
+
+**Unified implementations** - UI logic appearing in multiple modes (Terminal, TUI, MCP) belongs in shared functions, not duplicated per-handler. Examples: `format_tool_executing()`, `render_streaming_chunk()`.
+
+**Handlers near dependencies** - EventHandler implementations live where their protocol-specific types are:
+- `TerminalEventHandler` in `events.rs` (generic)
+- `TuiEventHandler` in `main.rs` (needs `AppEvent`)
+- `McpEventHandler` in `mcp.rs` (needs MCP notification channel)
+
+### Module Responsibilities
+
+| Module | Responsibility |
+|--------|----------------|
+| `agent.rs` | Core interaction logic, `AgentEvent` enum, `run_interaction()` |
+| `events.rs` | `EventHandler` trait, formatting functions, streaming text rendering |
+| `main.rs` | CLI entry, UI loops, OutputSink implementations, `TuiEventHandler` |
+| `mcp.rs` | MCP server protocol, `McpEventHandler` |
+| `tui/` | TUI components, ratatui widgets, `AppEvent` |

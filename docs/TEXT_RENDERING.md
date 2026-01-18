@@ -33,6 +33,21 @@ The trait also includes `emit_streaming()` for real-time streaming output:
 - Naming: `clemini.log.YYYY-MM-DD`
 - ANSI colors are preserved in human-readable logs
 
+### EventHandler Trait
+
+All three UI modes (Terminal, TUI, MCP) implement the `EventHandler` trait in `events.rs`. Handlers use shared formatting functions to ensure consistent output:
+
+| Function | Output |
+|----------|--------|
+| `format_tool_executing()` | `🔧 tool_name args...` |
+| `format_tool_result()` | `└─ tool_name 0.02s ~18 tok` |
+| `format_error_detail()` | `  └─ error: message` |
+| `format_tool_args()` | `key=value key2=value2` |
+| `format_context_warning()` | Context window warnings |
+| `render_streaming_chunk()` | Streaming text with markdown |
+
+See [CLAUDE.md](../CLAUDE.md) for the full architecture.
+
 ## Color Palette
 
 Uses the `colored` crate for ANSI terminal colors:
@@ -240,10 +255,10 @@ Response text from the model is rendered using `termimad`:
 
 ### Logging
 
-Response text is logged via `log_streaming()` which:
+Response text is logged via `events::render_streaming_chunk()` which:
 - Buffers text until complete lines are available
 - Renders complete lines with termimad markdown styling
-- Flushes remaining text when streaming completes
+- Flushes remaining text when streaming completes via `events::flush_streaming_buffer()`
 
 This ensures `tail -f` shows streaming text naturally while still applying markdown formatting.
 

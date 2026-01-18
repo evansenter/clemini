@@ -64,19 +64,32 @@ tokio::select! {
 }
 ```
 
-### Output Channel
+### Event Channels
 
-`TuiSink` sends output through an unbounded channel with tagged message types:
+The TUI uses two event channels:
 
+**TuiMessage** - Output sink for formatted text:
 ```rust
 enum TuiMessage {
     Line(String),      // Complete line (uses append_to_chat)
     Streaming(String), // Partial chunk (uses append_streaming)
 }
 ```
+- `Line`: Formatted output from tool calls, errors, etc.
+- `Streaming`: Model response chunks during streaming
 
-- `Line`: Used by `log_event()` for tool calls, errors, etc.
-- `Streaming`: Used by `emit_streaming()` for model response chunks
+**AppEvent** - Agent events from `TuiEventHandler`:
+```rust
+enum AppEvent {
+    StreamChunk(String),
+    ToolExecuting { name, args },
+    ToolCompleted { name, duration_ms, tokens, has_error },
+    InteractionComplete(Result<InteractionResult>),
+    ContextWarning(String),
+}
+```
+- Converts `AgentEvent` to TUI-specific events
+- Updates activity indicator, handles completion
 
 ### Text Accumulation
 
@@ -140,7 +153,7 @@ Uses `tui-textarea` widget with:
 |------|---------|
 | `src/tui/mod.rs` | `App` struct, `Activity` enum, state management |
 | `src/tui/ui.rs` | Layout and rendering functions |
-| `src/main.rs` | `TuiSink`, `TuiMessage`, event loop |
+| `src/main.rs` | `TuiSink`, `TuiMessage`, `AppEvent`, `TuiEventHandler`, event loop |
 
 ## Future Enhancements
 

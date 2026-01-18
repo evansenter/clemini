@@ -10,7 +10,7 @@ use serde_json::Value;
 use std::env;
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::PathBuf;
-use std::sync::{Arc, LazyLock, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 use termimad::MadSkin;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -38,16 +38,22 @@ pub fn init_logging() {
     let _ = std::fs::create_dir_all(&log_dir);
 }
 
-static SKIN: LazyLock<MadSkin> = LazyLock::new(|| {
-    let mut skin = MadSkin::default();
-    for h in &mut skin.headers {
-        h.align = termimad::Alignment::Left;
-    }
-    skin
-});
+use std::sync::atomic::{AtomicBool, Ordering};
 
-/// Buffer for streaming text - accumulates until newlines, then renders with markdown
-static STREAMING_BUFFER: LazyLock<Mutex<String>> = LazyLock::new(|| Mutex::new(String::new()));
+static TEST_LOGGING_ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// Enable or disable logging to files during tests.
+pub fn set_test_logging_enabled(enabled: bool) {
+    TEST_LOGGING_ENABLED.store(enabled, Ordering::SeqCst);
+}
+
+pub(crate) fn is_logging_enabled() -> bool {
+    if cfg!(test) {
+        TEST_LOGGING_ENABLED.load(Ordering::SeqCst) || std::env::var("CLEMINI_ALLOW_TEST_LOGS").is_ok()
+    } else {
+        true
+    }
+}
 
 pub trait OutputSink: Send + Sync {
     fn emit(&self, message: &str, render_markdown: bool);
@@ -64,7 +70,9 @@ impl OutputSink for FileSink {
     }
     fn emit_streaming(&self, text: &str) {
         // No terminal to stream to, but still log for tail -f
-        log_streaming(text);
+        if let Some(rendered) = events::render_streaming_chunk(text) {
+            events::write_to_streaming_log(&rendered);
+        }
     }
 }
 
@@ -75,7 +83,7 @@ impl OutputSink for TerminalSink {
     fn emit(&self, message: &str, render_markdown: bool) {
         if render_markdown {
             // term_text includes trailing newline, use eprint to avoid doubling
-            eprint!("{}", SKIN.term_text(message));
+            eprint!("{}", events::SKIN.term_text(message));
         } else {
             eprintln!("{}", message);
         }
@@ -85,7 +93,9 @@ impl OutputSink for TerminalSink {
         print!("{text}");
         let _ = io::stdout().flush();
         // Also log for tail -f
-        log_streaming(text);
+        if let Some(rendered) = events::render_streaming_chunk(text) {
+            events::write_to_streaming_log(&rendered);
+        }
     }
 }
 
@@ -124,7 +134,9 @@ impl OutputSink for TuiSink {
             let _ = tx.send(TuiMessage::Streaming(text.to_string()));
         }
         // Also log for tail -f
-        log_streaming(text);
+        if let Some(rendered) = events::render_streaming_chunk(text) {
+            events::write_to_streaming_log(&rendered);
+        }
     }
 }
 
@@ -165,11 +177,16 @@ pub fn emit_streaming(text: &str) {
 }
 
 fn log_event_to_file(message: &str, render_markdown: bool) {
+    // Skip logging during tests unless explicitly enabled
+    if !is_logging_enabled() {
+        return;
+    }
+
     colored::control::set_override(true);
 
     // Optionally render markdown (can wrap long lines)
     let rendered = if render_markdown {
-        SKIN.term_text(message).to_string()
+        events::SKIN.term_text(message).to_string()
     } else {
         message.to_string()
     };
@@ -208,96 +225,6 @@ fn write_to_log_file(path: impl Into<PathBuf>, rendered: &str) -> std::io::Resul
     Ok(())
 }
 
-/// Write streaming text to log file without adding newlines.
-/// The text is written directly, preserving any newlines it contains.
-/// Used by `log_streaming()` for streaming model responses to logs.
-fn write_streaming_to_log_file(path: impl Into<PathBuf>, text: &str) -> std::io::Result<()> {
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path.into())?;
-    write!(file, "{}", text)?;
-    Ok(())
-}
-
-/// Split text at the last newline, returning (complete_lines, remainder).
-/// Returns None if there's no newline in the text.
-fn split_at_last_newline(text: &str) -> Option<(&str, &str)> {
-    text.rfind('\n').map(|pos| {
-        let complete = &text[..=pos];
-        let remaining = &text[pos + 1..];
-        (complete, remaining)
-    })
-}
-
-/// Log streaming text with markdown rendering.
-/// Buffers text until complete lines are available, then renders with termimad.
-/// Call `flush_streaming_log()` when streaming is complete to flush any remaining text.
-pub fn log_streaming(text: &str) {
-    let Ok(mut buffer) = STREAMING_BUFFER.lock() else {
-        return;
-    };
-
-    buffer.push_str(text);
-
-    // Find the last newline - everything before it can be rendered
-    let Some((complete, remaining)) = split_at_last_newline(&buffer) else {
-        return;
-    };
-    let complete = complete.to_string();
-    let remaining = remaining.to_string();
-    *buffer = remaining;
-
-    // Render complete lines with markdown
-    colored::control::set_override(true);
-    let rendered = SKIN.term_text(&complete).to_string();
-
-    // Write to log files
-    let log_dir = dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".clemini/logs");
-    let _ = std::fs::create_dir_all(&log_dir);
-    let today = chrono::Local::now().format("%Y-%m-%d");
-    let log_path = log_dir.join(format!("clemini.log.{}", today));
-
-    let _ = write_streaming_to_log_file(&log_path, &rendered);
-
-    if let Ok(path) = std::env::var("CLEMINI_LOG") {
-        let _ = write_streaming_to_log_file(PathBuf::from(path), &rendered);
-    }
-}
-
-/// Flush any remaining buffered streaming text.
-/// Call this when streaming is complete (e.g., in on_complete handler).
-pub fn flush_streaming_log() {
-    let Ok(mut buffer) = STREAMING_BUFFER.lock() else {
-        return;
-    };
-
-    if buffer.is_empty() {
-        return;
-    }
-
-    let text = std::mem::take(&mut *buffer);
-
-    // Render with markdown
-    colored::control::set_override(true);
-    let rendered = SKIN.term_text(&text).to_string();
-
-    // Write to log files
-    let log_dir = dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".clemini/logs");
-    let _ = std::fs::create_dir_all(&log_dir);
-    let today = chrono::Local::now().format("%Y-%m-%d");
-    let log_path = log_dir.join(format!("clemini.log.{}", today));
-
-    let _ = write_streaming_to_log_file(&log_path, &rendered);
-
-    if let Ok(path) = std::env::var("CLEMINI_LOG") {
-        let _ = write_streaming_to_log_file(PathBuf::from(path), &rendered);
-    }
-}
 
 const SYSTEM_PROMPT: &str = r#"You are clemini, a coding assistant. Be concise. Get things done.
 
@@ -366,6 +293,8 @@ After changes, verify they work:
 - Scope creep (adding unrequested features)
 - Long explanations when action is needed
 - Declaring success without functional verification
+- Over-reaching: If asked to "remove unused X" and X IS used, report back—don't decide to remove the usage too
+- Changing behavior beyond what was requested (removing a constant ≠ removing its functionality)
 
 ## Self-Improvement
 When you discover patterns that would help future tasks:
@@ -465,6 +394,51 @@ mod tests {
         "#;
         let config: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(config.allowed_paths, vec!["/etc", "/var"]);
+    }
+
+    #[test]
+    fn test_logging_disabled_by_default() {
+        let original_env = std::env::var("CLEMINI_ALLOW_TEST_LOGS");
+        unsafe { std::env::remove_var("CLEMINI_ALLOW_TEST_LOGS") };
+        
+        set_test_logging_enabled(false);
+        assert!(!is_logging_enabled());
+
+        if let Ok(val) = original_env {
+            unsafe { std::env::set_var("CLEMINI_ALLOW_TEST_LOGS", val) };
+        }
+    }
+
+    #[test]
+    fn test_set_test_logging_enabled() {
+        let original_env = std::env::var("CLEMINI_ALLOW_TEST_LOGS");
+        unsafe { std::env::remove_var("CLEMINI_ALLOW_TEST_LOGS") };
+        
+        set_test_logging_enabled(true);
+        assert!(is_logging_enabled());
+        
+        set_test_logging_enabled(false);
+        assert!(!is_logging_enabled());
+
+        if let Ok(val) = original_env {
+            unsafe { std::env::set_var("CLEMINI_ALLOW_TEST_LOGS", val) };
+        }
+    }
+
+    #[test]
+    fn test_env_var_enables_logging() {
+        let original_env = std::env::var("CLEMINI_ALLOW_TEST_LOGS");
+        
+        set_test_logging_enabled(false);
+        unsafe { std::env::set_var("CLEMINI_ALLOW_TEST_LOGS", "1") };
+        assert!(is_logging_enabled());
+        
+        unsafe { std::env::remove_var("CLEMINI_ALLOW_TEST_LOGS") };
+        assert!(!is_logging_enabled());
+
+        if let Ok(val) = original_env {
+            unsafe { std::env::set_var("CLEMINI_ALLOW_TEST_LOGS", val) };
+        }
     }
 }
 
@@ -747,10 +721,13 @@ impl TuiEventHandler {
 
 impl events::EventHandler for TuiEventHandler {
     fn on_text_delta(&mut self, text: &str) {
-        let _ = self
-            .app_tx
-            .try_send(AppEvent::StreamChunk(text.to_string()));
-        log_streaming(text);
+        // Use unified streaming: buffer, render markdown, then display + log
+        if let Some(rendered) = events::render_streaming_chunk(text) {
+            let _ = self
+                .app_tx
+                .try_send(AppEvent::StreamChunk(rendered.clone()));
+            events::write_to_streaming_log(&rendered);
+        }
     }
 
     fn on_tool_executing(&mut self, name: &str, args: &serde_json::Value) {
@@ -758,13 +735,7 @@ impl events::EventHandler for TuiEventHandler {
             name: name.to_string(),
             args: args.clone(),
         });
-        let args_str = events::format_tool_args(name, args);
-        log_event(&format!(
-            "{} {} {}",
-            "🔧".dimmed(),
-            name.cyan(),
-            args_str.dimmed()
-        ));
+        log_event(&events::format_tool_executing(name, args));
     }
 
     fn on_tool_result(
@@ -785,7 +756,7 @@ impl events::EventHandler for TuiEventHandler {
             name, duration, tokens, has_error,
         ));
         if let Some(err_msg) = error_message {
-            log_event(&format!("  └─ error: {}", err_msg.dimmed()));
+            log_event(&events::format_error_detail(err_msg));
         }
     }
 
@@ -796,7 +767,13 @@ impl events::EventHandler for TuiEventHandler {
     }
 
     fn on_complete(&mut self) {
-        flush_streaming_log();
+        // Flush any remaining buffered text with unified streaming
+        if let Some(rendered) = events::flush_streaming_buffer() {
+            let _ = self
+                .app_tx
+                .try_send(AppEvent::StreamChunk(rendered.clone()));
+            events::write_to_streaming_log(&rendered);
+        }
     }
 }
 
@@ -1196,15 +1173,8 @@ async fn run_tui_event_loop(
                     }
                     AppEvent::ToolExecuting { name, args } => {
                         app.set_activity(tui::Activity::Executing(name.clone()));
-                        // Display tool call in chat
-                        let args_str = events::format_tool_args(&name, &args);
-                        let msg = format!(
-                            "{} {} {}",
-                            "🔧".dimmed(),
-                            name.cyan(),
-                            args_str.dimmed()
-                        );
-                        app.append_to_chat(&msg);
+                        // Display tool call in chat - use same format as log output
+                        app.append_to_chat(&events::format_tool_executing(&name, &args));
                     }
                     AppEvent::ToolCompleted { name, duration_ms, tokens, has_error } => {
                         // Tool completed - use same format as log output
@@ -1535,35 +1505,6 @@ mod event_handling_tests {
     }
 
     // =========================================
-    // Context warning formatting tests
-    // =========================================
-
-    #[test]
-    fn test_format_context_warning_normal() {
-        let msg = events::format_context_warning(85.0);
-        assert!(msg.contains("85.0%"));
-        assert!(!msg.contains("/clear"));
-    }
-
-    #[test]
-    fn test_format_context_warning_critical() {
-        let msg = events::format_context_warning(96.0);
-        assert!(msg.contains("96.0%"));
-        assert!(msg.contains("/clear"));
-    }
-
-    #[test]
-    fn test_format_context_warning_boundary() {
-        // Exactly 95% - not critical
-        let msg = events::format_context_warning(95.0);
-        assert!(!msg.contains("/clear"));
-
-        // Just over 95% - critical
-        let msg = events::format_context_warning(95.1);
-        assert!(msg.contains("/clear"));
-    }
-
-    // =========================================
     // AgentEvent to AppEvent conversion tests
     // =========================================
 
@@ -1731,11 +1672,12 @@ mod event_handling_tests {
         let (tx, mut rx) = mpsc::channel::<AppEvent>(10);
         let mut handler = TuiEventHandler::new(tx);
 
-        handler.on_text_delta("Hello");
+        // Text is buffered until newlines, then rendered with markdown
+        handler.on_text_delta("Hello\n");
 
         let event = rx.try_recv().unwrap();
         match event {
-            AppEvent::StreamChunk(text) => assert_eq!(text, "Hello"),
+            AppEvent::StreamChunk(text) => assert!(text.contains("Hello")),
             _ => panic!("Expected StreamChunk"),
         }
     }
@@ -1795,42 +1737,5 @@ mod event_handling_tests {
             }
             _ => panic!("Expected ContextWarning"),
         }
-    }
-
-    // =========================================
-    // Line buffering tests for streaming log
-    // =========================================
-
-    #[test]
-    fn test_split_at_last_newline_no_newline() {
-        assert!(split_at_last_newline("hello world").is_none());
-    }
-
-    #[test]
-    fn test_split_at_last_newline_single_newline() {
-        let (complete, remaining) = split_at_last_newline("hello\n").unwrap();
-        assert_eq!(complete, "hello\n");
-        assert_eq!(remaining, "");
-    }
-
-    #[test]
-    fn test_split_at_last_newline_with_remainder() {
-        let (complete, remaining) = split_at_last_newline("hello\nworld").unwrap();
-        assert_eq!(complete, "hello\n");
-        assert_eq!(remaining, "world");
-    }
-
-    #[test]
-    fn test_split_at_last_newline_multiple_lines() {
-        let (complete, remaining) = split_at_last_newline("line1\nline2\npartial").unwrap();
-        assert_eq!(complete, "line1\nline2\n");
-        assert_eq!(remaining, "partial");
-    }
-
-    #[test]
-    fn test_split_at_last_newline_ends_with_newline() {
-        let (complete, remaining) = split_at_last_newline("line1\nline2\n").unwrap();
-        assert_eq!(complete, "line1\nline2\n");
-        assert_eq!(remaining, "");
     }
 }

@@ -1,8 +1,9 @@
-//! Event handling for UI layers.
+//! Event handling and formatting for UI layers.
 //!
-//! This module provides the `EventHandler` trait that UI implementations use to
-//! handle `AgentEvent`s. This decouples the agent from UI concerns and makes
-//! event handling testable.
+//! This module is the canonical location for:
+//! - `EventHandler` trait - UI implementations handle `AgentEvent`s
+//! - Formatting functions - `format_tool_*`, `format_error_detail`, `format_context_warning`
+//! - Streaming text rendering - `render_streaming_chunk`, `flush_streaming_buffer`
 //!
 //! # Design
 //!
@@ -12,6 +13,8 @@
 //! - `TerminalEventHandler`: For plain REPL and non-interactive modes
 //! - TUI mode: Uses `AppEvent` internally (handled separately)
 //!
+//! All handlers use the shared formatting functions to ensure consistent output.
+//!
 //! # Future (#59)
 //!
 //! When we move to streaming-first architecture, the handler will consume
@@ -19,12 +22,131 @@
 //! methods remain the same.
 
 use std::io::{self, Write};
+use std::path::PathBuf;
+use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
 use colored::Colorize;
 use serde_json::Value;
+use termimad::MadSkin;
 
-use crate::{log_event, log_streaming};
+use crate::log_event;
+
+// ============================================================================
+// Markdown Rendering Infrastructure
+// ============================================================================
+
+/// Termimad skin for markdown rendering. Left-aligns headers.
+/// Used by streaming functions and exported for main.rs TerminalSink.
+pub static SKIN: LazyLock<MadSkin> = LazyLock::new(|| {
+    let mut skin = MadSkin::default();
+    for h in &mut skin.headers {
+        h.align = termimad::Alignment::Left;
+    }
+    skin
+});
+
+/// Buffer for streaming text - accumulates until newlines, then renders with markdown
+static STREAMING_BUFFER: LazyLock<Mutex<String>> = LazyLock::new(|| Mutex::new(String::new()));
+
+// ============================================================================
+// Unified Streaming Text Rendering
+// ============================================================================
+//
+// These functions provide a unified approach to streaming text rendering.
+// All UI modes (Terminal, TUI, MCP) use these to ensure consistent behavior:
+//
+// 1. render_streaming_chunk() - Buffer text, render complete lines with markdown
+// 2. flush_streaming_buffer() - Flush remaining text at end of stream
+// 3. write_to_streaming_log() - Write rendered text to log files
+//
+// Usage pattern in EventHandler.on_text_delta():
+//   if let Some(rendered) = render_streaming_chunk(text) {
+//       // Display rendered text (mode-specific: print, channel, etc.)
+//       write_to_streaming_log(&rendered);
+//   }
+
+/// Split text at the last newline, returning (complete_lines, remainder).
+/// Returns None if there's no newline in the text.
+fn split_at_last_newline(text: &str) -> Option<(&str, &str)> {
+    text.rfind('\n').map(|pos| {
+        let complete = &text[..=pos];
+        let remaining = &text[pos + 1..];
+        (complete, remaining)
+    })
+}
+
+/// Write streaming text directly to a log file (no newline added).
+fn write_streaming_to_log_file(path: impl Into<PathBuf>, text: &str) -> std::io::Result<()> {
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path.into())?;
+    write!(file, "{}", text)?;
+    Ok(())
+}
+
+/// Buffer streaming text and render complete lines with markdown.
+/// Returns rendered text for complete lines, or None if still buffering.
+/// Call `flush_streaming_buffer()` when streaming completes.
+pub fn render_streaming_chunk(text: &str) -> Option<String> {
+    let Ok(mut buffer) = STREAMING_BUFFER.lock() else {
+        return None;
+    };
+
+    buffer.push_str(text);
+
+    // Find the last newline - everything before it can be rendered
+    let (complete, remaining) = split_at_last_newline(&buffer)?;
+    let complete = complete.to_string();
+    let remaining = remaining.to_string();
+    *buffer = remaining;
+
+    // Render complete lines with markdown
+    colored::control::set_override(true);
+    Some(SKIN.term_text(&complete).to_string())
+}
+
+/// Flush any remaining buffered streaming text with markdown rendering.
+/// Returns rendered text, or None if buffer was empty.
+/// Call this when streaming is complete (e.g., in on_complete handler).
+pub fn flush_streaming_buffer() -> Option<String> {
+    let Ok(mut buffer) = STREAMING_BUFFER.lock() else {
+        return None;
+    };
+
+    if buffer.is_empty() {
+        return None;
+    }
+
+    let text = std::mem::take(&mut *buffer);
+
+    // Render with markdown
+    colored::control::set_override(true);
+    Some(SKIN.term_text(&text).to_string())
+}
+
+/// Write rendered streaming text to log files.
+/// Used by EventHandlers after rendering with `render_streaming_chunk()`.
+pub fn write_to_streaming_log(rendered: &str) {
+    // Skip logging during tests unless explicitly enabled
+    if !crate::is_logging_enabled() {
+        return;
+    }
+
+    let log_dir = dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".clemini/logs");
+    let _ = std::fs::create_dir_all(&log_dir);
+    let today = chrono::Local::now().format("%Y-%m-%d");
+    let log_path = log_dir.join(format!("clemini.log.{}", today));
+
+    let _ = write_streaming_to_log_file(&log_path, rendered);
+
+    if let Ok(path) = std::env::var("CLEMINI_LOG") {
+        let _ = write_streaming_to_log_file(PathBuf::from(path), rendered);
+    }
+}
 
 // ============================================================================
 // Formatting helpers (UI concerns, used by EventHandler implementations)
@@ -65,6 +187,12 @@ pub fn format_tool_args(tool_name: &str, args: &Value) -> String {
     } else {
         format!("{} ", parts.join(" "))
     }
+}
+
+/// Format tool executing line for display.
+pub fn format_tool_executing(name: &str, args: &Value) -> String {
+    let args_str = format_tool_args(name, args);
+    format!("{} {} {}", "🔧".dimmed(), name.cyan(), args_str.dimmed())
 }
 
 /// Rough token estimate: ~4 chars per token.
@@ -113,6 +241,11 @@ pub fn format_context_warning(percentage: f64) -> String {
     }
 }
 
+/// Format error detail line for display (shown below tool result on error).
+pub fn format_error_detail(error_message: &str) -> String {
+    format!("  └─ error: {}", error_message.dimmed())
+}
+
 /// Handler for agent events. UI modes implement this to process events.
 pub trait EventHandler {
     /// Handle streaming text (should append to current line, not create new line).
@@ -154,22 +287,18 @@ impl TerminalEventHandler {
 
 impl EventHandler for TerminalEventHandler {
     fn on_text_delta(&mut self, text: &str) {
-        if self.stream_enabled {
-            print!("{}", text);
-            let _ = io::stdout().flush();
+        // Use unified streaming: buffer, render markdown, then display + log
+        if let Some(rendered) = render_streaming_chunk(text) {
+            if self.stream_enabled {
+                print!("{}", rendered);
+                let _ = io::stdout().flush();
+            }
+            write_to_streaming_log(&rendered);
         }
-        // Always log streaming text (even if terminal streaming disabled)
-        log_streaming(text);
     }
 
     fn on_tool_executing(&mut self, name: &str, args: &Value) {
-        let args_str = format_tool_args(name, args);
-        log_event(&format!(
-            "{} {} {}",
-            "🔧".dimmed(),
-            name.cyan(),
-            args_str.dimmed()
-        ));
+        log_event(&format_tool_executing(name, args));
     }
 
     fn on_tool_result(
@@ -182,7 +311,7 @@ impl EventHandler for TerminalEventHandler {
     ) {
         log_event(&format_tool_result(name, duration, tokens, has_error));
         if let Some(err_msg) = error_message {
-            log_event(&format!("  └─ error: {}", err_msg.dimmed()));
+            log_event(&format_error_detail(err_msg));
         }
     }
 
@@ -192,7 +321,14 @@ impl EventHandler for TerminalEventHandler {
     }
 
     fn on_complete(&mut self) {
-        crate::flush_streaming_log();
+        // Flush any remaining buffered text with unified streaming
+        if let Some(rendered) = flush_streaming_buffer() {
+            if self.stream_enabled {
+                print!("{}", rendered);
+                let _ = io::stdout().flush();
+            }
+            write_to_streaming_log(&rendered);
+        }
     }
 }
 
@@ -574,6 +710,25 @@ mod tests {
     }
 
     #[test]
+    fn test_format_tool_executing_basic() {
+        // Disable colors for predictable test output
+        colored::control::set_override(false);
+        let args = serde_json::json!({"file_path": "test.rs"});
+        let formatted = format_tool_executing("read_file", &args);
+        assert!(formatted.contains("🔧"));
+        assert!(formatted.contains("read_file"));
+        assert!(formatted.contains("file_path=\"test.rs\""));
+    }
+
+    #[test]
+    fn test_format_tool_executing_empty_args() {
+        colored::control::set_override(false);
+        let formatted = format_tool_executing("list_files", &serde_json::json!({}));
+        assert!(formatted.contains("🔧"));
+        assert!(formatted.contains("list_files"));
+    }
+
+    #[test]
     fn test_dispatch_tool_result_includes_args_and_result_tokens() {
         use crate::agent::AgentEvent;
         use genai_rs::FunctionExecutionResult;
@@ -678,5 +833,50 @@ mod tests {
         // Just over 95% - critical
         let msg = format_context_warning(95.1);
         assert!(msg.contains("/clear"));
+    }
+
+    #[test]
+    fn test_format_error_detail() {
+        colored::control::set_override(false);
+        let detail = format_error_detail("permission denied");
+        assert_eq!(detail, "  └─ error: permission denied");
+        colored::control::unset_override();
+    }
+
+    // =========================================
+    // Line buffering tests for streaming log
+    // =========================================
+
+    #[test]
+    fn test_split_at_last_newline_no_newline() {
+        assert!(split_at_last_newline("hello world").is_none());
+    }
+
+    #[test]
+    fn test_split_at_last_newline_single_newline() {
+        let (complete, remaining) = split_at_last_newline("hello\n").unwrap();
+        assert_eq!(complete, "hello\n");
+        assert_eq!(remaining, "");
+    }
+
+    #[test]
+    fn test_split_at_last_newline_with_remainder() {
+        let (complete, remaining) = split_at_last_newline("hello\nworld").unwrap();
+        assert_eq!(complete, "hello\n");
+        assert_eq!(remaining, "world");
+    }
+
+    #[test]
+    fn test_split_at_last_newline_multiple_lines() {
+        let (complete, remaining) = split_at_last_newline("line1\nline2\npartial").unwrap();
+        assert_eq!(complete, "line1\nline2\n");
+        assert_eq!(remaining, "partial");
+    }
+
+    #[test]
+    fn test_split_at_last_newline_ends_with_newline() {
+        let (complete, remaining) = split_at_last_newline("line1\nline2\n").unwrap();
+        assert_eq!(complete, "line1\nline2\n");
+        assert_eq!(remaining, "");
     }
 }

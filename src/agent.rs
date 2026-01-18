@@ -125,6 +125,7 @@ async fn execute_tools(
         let result: Value = match tool_service.execute(call_name, call_args.clone()).await {
             Ok(v) => v,
             Err(e) => {
+                tracing::warn!("Tool {} failed: {}", call_name, e);
                 // Return error as JSON so Gemini can see it and retry
                 serde_json::json!({"error": e.to_string()})
             }

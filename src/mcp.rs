@@ -21,8 +21,10 @@ use tracing::instrument;
 // Note: info! macro goes to JSON logs only. For human-readable logs, use crate::log_event()
 
 use crate::agent::{AgentEvent, run_interaction};
-use crate::events::{EventHandler, format_context_warning, format_tool_args, format_tool_result};
-use crate::log_streaming;
+use crate::events::{
+    EventHandler, flush_streaming_buffer, format_context_warning, format_error_detail,
+    format_tool_executing, format_tool_result, render_streaming_chunk, write_to_streaming_log,
+};
 use crate::tools::CleminiToolService;
 
 #[derive(Debug, Deserialize, Clone)]
@@ -132,19 +134,16 @@ impl McpEventHandler {
 
 impl EventHandler for McpEventHandler {
     fn on_text_delta(&mut self, text: &str) {
-        // Log streaming text (buffered by line for markdown rendering)
-        log_streaming(text);
+        // Use unified streaming: buffer, render markdown, write to logs
+        // (MCP mode has no display output, only logging)
+        if let Some(rendered) = render_streaming_chunk(text) {
+            write_to_streaming_log(&rendered);
+        }
     }
 
     fn on_tool_executing(&mut self, name: &str, args: &Value) {
         // Log to human-readable log
-        let args_str = format_tool_args(name, args);
-        crate::log_event(&format!(
-            "{} {} {}",
-            "🔧".dimmed(),
-            name.cyan(),
-            args_str.dimmed()
-        ));
+        crate::log_event(&format_tool_executing(name, args));
         // Send MCP notification
         self.send_notification(create_tool_executing_notification(name, args));
     }
@@ -160,7 +159,7 @@ impl EventHandler for McpEventHandler {
         // Log to human-readable log
         crate::log_event(&format_tool_result(name, duration, tokens, has_error));
         if let Some(err_msg) = error_message {
-            crate::log_event(&format!("  └─ error: {}", err_msg.dimmed()));
+            crate::log_event(&format_error_detail(err_msg));
         }
         // Send MCP notification
         self.send_notification(create_tool_result_notification(
@@ -175,7 +174,10 @@ impl EventHandler for McpEventHandler {
     }
 
     fn on_complete(&mut self) {
-        crate::flush_streaming_log();
+        // Flush any remaining buffered text with unified streaming
+        if let Some(rendered) = flush_streaming_buffer() {
+            write_to_streaming_log(&rendered);
+        }
     }
 }
 
@@ -195,7 +197,6 @@ async fn handle_post(
     if !msg_body.is_empty() {
         crate::log_event("");
         crate::log_event(msg_body.trim());
-        crate::log_event("");
     }
 
     // For HTTP, we use the server's broadcast channel for notifications
@@ -329,7 +330,6 @@ impl McpServer {
                     if !msg_body.is_empty() {
                         crate::log_event("");
                         crate::log_event(msg_body.trim());
-                        crate::log_event("");
                     }
                     req
                 }
@@ -418,7 +418,6 @@ impl McpServer {
                         if !resp_body.is_empty() {
                             crate::log_event("");
                             crate::log_event(resp_body.trim());
-                            crate::log_event("");
                         }
                         let _ = tx_clone.send(format!("{}\n", resp_str));
                     }
