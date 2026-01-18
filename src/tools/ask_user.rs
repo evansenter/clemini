@@ -4,6 +4,7 @@ use serde_json::{Value, json};
 use std::io::{self, Write};
 use tracing::instrument;
 
+#[derive(Default)]
 pub struct AskUserTool;
 
 impl AskUserTool {
@@ -56,11 +57,11 @@ impl CallableFunction for AskUserTool {
     async fn call(&self, args: Value) -> Result<Value, FunctionError> {
         let (question, options) = self.parse_args(args)?;
 
-        crate::log_event(&format!("\n{}", question));
+        crate::logging::log_event(&format!("\n{}", question));
 
         if let Some(opts) = options {
             for (i, opt) in opts.iter().enumerate() {
-                crate::log_event(&format!("{}. {}", i + 1, opt));
+                crate::logging::log_event(&format!("{}. {}", i + 1, opt));
             }
         }
         eprint!("> "); // Keep prompt on same line as input

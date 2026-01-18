@@ -797,7 +797,7 @@ mod tests {
         app.append_streaming("Let me search");
 
         // Tool call (append_to_chat creates NEW line)
-        app.append_to_chat("🔧 grep pattern=\"fn run_interaction\"");
+        app.append_to_chat("┌─ grep pattern=\"fn run_interaction\"");
 
         // More streaming (appends to last line since it's non-empty)
         app.append_streaming("Found it!");
@@ -807,7 +807,7 @@ mod tests {
         // Note: append_streaming appends to the tool line since it's non-empty
         assert_eq!(
             app.chat_lines[1],
-            "🔧 grep pattern=\"fn run_interaction\"Found it!"
+            "┌─ grep pattern=\"fn run_interaction\"Found it!"
         );
     }
 
@@ -822,7 +822,7 @@ mod tests {
         app.append_streaming("function.\n\n"); // Model ends with newlines
 
         // Tool call (append_to_chat creates new lines)
-        app.append_to_chat("🔧 grep pattern=\"fn run_interaction\"");
+        app.append_to_chat("┌─ grep pattern=\"fn run_interaction\"");
         app.append_to_chat("  └─ 20ms");
         app.append_to_chat(""); // blank line after tool completes
 
@@ -834,7 +834,7 @@ mod tests {
         assert_eq!(app.chat_lines[0], "I'll search for the function.");
         assert_eq!(app.chat_lines[1], ""); // from first \n in streaming
         assert_eq!(app.chat_lines[2], ""); // from second \n in streaming
-        assert_eq!(app.chat_lines[3], "🔧 grep pattern=\"fn run_interaction\"");
+        assert_eq!(app.chat_lines[3], "┌─ grep pattern=\"fn run_interaction\"");
         assert_eq!(app.chat_lines[4], "  └─ 20ms");
         assert_eq!(app.chat_lines[5], ""); // blank after tool
         assert_eq!(app.chat_lines[6], "Found it in src/agent.rs");
@@ -848,12 +848,12 @@ mod tests {
         app.append_streaming("I'll read both files.\n\n");
 
         // First tool
-        app.append_to_chat("🔧 read_file file_path=\"src/main.rs\"");
+        app.append_to_chat("┌─ read_file file_path=\"src/main.rs\"");
         app.append_to_chat("  └─ 5ms");
         app.append_to_chat("");
 
         // Second tool
-        app.append_to_chat("🔧 read_file file_path=\"src/agent.rs\"");
+        app.append_to_chat("┌─ read_file file_path=\"src/agent.rs\"");
         app.append_to_chat("  └─ 3ms");
         app.append_to_chat("");
 
@@ -863,10 +863,10 @@ mod tests {
         assert_eq!(app.chat_lines[0], "I'll read both files.");
         assert_eq!(app.chat_lines[1], ""); // first \n
         assert_eq!(app.chat_lines[2], ""); // second \n
-        assert_eq!(app.chat_lines[3], "🔧 read_file file_path=\"src/main.rs\"");
+        assert_eq!(app.chat_lines[3], "┌─ read_file file_path=\"src/main.rs\"");
         assert_eq!(app.chat_lines[4], "  └─ 5ms");
         assert_eq!(app.chat_lines[5], "");
-        assert_eq!(app.chat_lines[6], "🔧 read_file file_path=\"src/agent.rs\"");
+        assert_eq!(app.chat_lines[6], "┌─ read_file file_path=\"src/agent.rs\"");
         assert_eq!(app.chat_lines[7], "  └─ 3ms");
         assert_eq!(app.chat_lines[8], "");
         assert_eq!(app.chat_lines[9], "Both files loaded.");

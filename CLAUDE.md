@@ -72,7 +72,7 @@ run_interaction()                    UI Layer
 - `McpEventHandler` (`mcp.rs`) - MCP server mode
 
 All handlers use shared formatting functions:
-- `format_tool_executing()` - Format tool executing line (`🔧 name args`)
+- `format_tool_executing()` - Format tool executing line (`┌─ name args`)
 - `format_tool_result()` - Format tool completion line (`└─ name duration ~tokens tok`)
 - `format_tool_args()` - Format tool arguments as key=value pairs (used by format_tool_executing)
 - `format_context_warning()` - Format context window warnings
@@ -145,7 +145,7 @@ Don't skip tests. If a test is flaky or legitimately broken by your change, fix 
 
 | Change | Location |
 |--------|----------|
-| Tool executing format (`🔧 name...`) | `format_tool_executing()` in `events.rs` |
+| Tool executing format (`┌─ name...`) | `format_tool_executing()` in `events.rs` |
 | Tool result format (`└─ name...`) | `format_tool_result()` in `events.rs` |
 | Tool error detail (`└─ error:...`) | `format_error_detail()` in `events.rs` |
 | Tool args format (`key=value`) | `format_tool_args()` in `events.rs` |

@@ -128,7 +128,7 @@ impl BashTool {
             command.bold()
         );
         eprintln!("{}", msg);
-        crate::log_event(&msg);
+        crate::logging::log_event(&msg);
 
         eprint!("Proceed? [y/N] ");
         let _ = io::stderr().flush();
@@ -227,7 +227,7 @@ impl CallableFunction for BashTool {
         // Safety check
         if let Some(pattern) = Self::is_blocked(command) {
             let msg = format!("[bash BLOCKED: {command}] (matches pattern: {pattern})");
-            crate::log_event(&msg);
+            crate::logging::log_event(&msg);
             return Ok(error_response(
                 &format!("Command blocked: matches pattern '{}'", pattern),
                 error_codes::BLOCKED,
@@ -242,7 +242,7 @@ impl CallableFunction for BashTool {
             if self.is_mcp_mode {
                 if !confirmed {
                     let msg = format!("[bash CAUTION: {command}] (requesting MCP confirmation)");
-                    crate::log_event(&msg);
+                    crate::logging::log_event(&msg);
                     let mut resp = json!({
                         "needs_confirmation": true,
                         "command": command,
@@ -255,7 +255,7 @@ impl CallableFunction for BashTool {
                 }
             } else if !confirmed && !self.confirm_execution(command) {
                 let msg = format!("[bash CANCELLED: {command}]");
-                crate::log_event(&msg);
+                crate::logging::log_event(&msg);
                 return Ok(error_response(
                     "Command cancelled by user",
                     error_codes::BLOCKED,
@@ -270,14 +270,14 @@ impl CallableFunction for BashTool {
             } else {
                 format!("[bash CAUTION: {}] (user confirmed)", command)
             };
-            crate::log_event(&msg);
+            crate::logging::log_event(&msg);
         } else {
             let log_msg = if let Some(desc) = description {
                 format!("[bash] {}: \"{}\"", desc, command)
             } else {
                 format!("[bash] running: \"{}\"", command)
             };
-            crate::log_event_raw(&log_msg.dimmed().italic().to_string());
+            crate::logging::log_event_raw(&log_msg.dimmed().italic().to_string());
         }
 
         if run_in_background {
@@ -353,10 +353,10 @@ impl CallableFunction for BashTool {
                         match line {
                             Ok(Some(line)) => {
                                 if logged_stdout_lines < MAX_LOG_LINES {
-                                    crate::log_event_raw(&line.dimmed().italic().to_string());
+                                    crate::logging::log_event_raw(&line.dimmed().italic().to_string());
                                     logged_stdout_lines += 1;
                                 } else if logged_stdout_lines == MAX_LOG_LINES {
-                                    crate::log_event_raw(&"[...more stdout...]".dimmed().italic().to_string());
+                                    crate::logging::log_event_raw(&"[...more stdout...]".dimmed().italic().to_string());
                                     logged_stdout_lines += 1;
                                 }
                                 captured_stdout.push_str(&line);
@@ -371,10 +371,10 @@ impl CallableFunction for BashTool {
                         match line {
                             Ok(Some(line)) => {
                                 if logged_stderr_lines < MAX_LOG_LINES {
-                                    crate::log_event_raw(&line.dimmed().italic().to_string());
+                                    crate::logging::log_event_raw(&line.dimmed().italic().to_string());
                                     logged_stderr_lines += 1;
                                 } else if logged_stderr_lines == MAX_LOG_LINES {
-                                    crate::log_event_raw(&"[...more stderr...]".dimmed().italic().to_string());
+                                    crate::logging::log_event_raw(&"[...more stderr...]".dimmed().italic().to_string());
                                     logged_stderr_lines += 1;
                                 }
                                 captured_stderr.push_str(&line);
@@ -654,11 +654,12 @@ mod tests {
         }
 
         // Cleanup: kill the background process
-        {
+        let child = {
             let mut tasks = BACKGROUND_TASKS.lock().unwrap();
-            if let Some(mut child) = tasks.remove(&task_id) {
-                let _ = child.kill().await;
-            }
+            tasks.remove(&task_id)
+        };
+        if let Some(mut child) = child {
+            let _ = child.kill().await;
         }
     }
 
@@ -689,12 +690,15 @@ mod tests {
 
         assert_ne!(id1, id2);
 
-        // Cleanup
-        let mut tasks = BACKGROUND_TASKS.lock().unwrap();
-        if let Some(mut child) = tasks.remove(id1) {
+        // Cleanup - extract children before dropping lock to avoid holding across await
+        let (child1, child2) = {
+            let mut tasks = BACKGROUND_TASKS.lock().unwrap();
+            (tasks.remove(id1), tasks.remove(id2))
+        };
+        if let Some(mut child) = child1 {
             let _ = child.kill().await;
         }
-        if let Some(mut child) = tasks.remove(id2) {
+        if let Some(mut child) = child2 {
             let _ = child.kill().await;
         }
     }

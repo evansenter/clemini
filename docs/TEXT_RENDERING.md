@@ -39,7 +39,7 @@ All three UI modes (Terminal, TUI, MCP) implement the `EventHandler` trait in `e
 
 | Function | Output |
 |----------|--------|
-| `format_tool_executing()` | `🔧 tool_name args...` |
+| `format_tool_executing()` | `┌─ tool_name args...` |
 | `format_tool_result()` | `└─ tool_name 0.02s ~18 tok` |
 | `format_error_detail()` | `  └─ error: message` |
 | `format_tool_args()` | `key=value key2=value2` |
@@ -57,7 +57,7 @@ Uses the `colored` crate for ANSI terminal colors:
 | Tool names | Cyan | `.cyan()` |
 | Duration | Yellow | `.yellow()` |
 | Error labels | Bright red + bold | `.bright_red().bold()` |
-| Tool emoji (🔧) | Dimmed grey | `.dimmed()` |
+| Tool bracket (┌─) | Dimmed grey | `.dimmed()` |
 | Tool arguments | Dimmed grey | `.dimmed()` |
 | Bash command/output | Dimmed grey + italic | `.dimmed().italic()` |
 | Diff deletions | Red | `.red()` |
@@ -72,16 +72,16 @@ Uses the `colored` crate for ANSI terminal colors:
 ### Executing Line (Before Execution)
 
 ```
-🔧 <tool_name> <formatted_args>
+┌─ <tool_name> <formatted_args>
 ```
 
-- `🔧`: Dimmed
+- `┌─`: Dimmed
 - `<tool_name>`: Cyan
 - `<formatted_args>`: Dimmed grey, key=value pairs
 
 Example:
 ```
-🔧 read_file file_path="/src/main.rs"
+┌─ read_file file_path="/src/main.rs"
 ```
 
 ### Result Line (After Execution)

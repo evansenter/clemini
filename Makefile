@@ -12,8 +12,12 @@ build:
 release:
 	cargo build --release
 
+# Run tests separately for clearer output when one type fails.
+# Integration tests (confirmation_tests) are ignored by default; use --include-ignored for live API tests.
 test:
-	cargo test
+	cargo test --lib
+	cargo test --bin clemini
+	cargo test --test confirmation_tests
 
 clippy:
 	cargo clippy -- -D warnings
