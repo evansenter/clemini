@@ -192,7 +192,7 @@ pub fn format_tool_args(tool_name: &str, args: &Value) -> String {
 /// Format tool executing line for display.
 pub fn format_tool_executing(name: &str, args: &Value) -> String {
     let args_str = format_tool_args(name, args);
-    format!("{} {} {}", "🔧".dimmed(), name.cyan(), args_str.dimmed())
+    format!("{} {} {}", "┌─".dimmed(), name.cyan(), args_str.dimmed())
 }
 
 /// Rough token estimate: ~4 chars per token.
@@ -715,7 +715,7 @@ mod tests {
         colored::control::set_override(false);
         let args = serde_json::json!({"file_path": "test.rs"});
         let formatted = format_tool_executing("read_file", &args);
-        assert!(formatted.contains("🔧"));
+        assert!(formatted.contains("┌─"));
         assert!(formatted.contains("read_file"));
         assert!(formatted.contains("file_path=\"test.rs\""));
     }
@@ -724,7 +724,7 @@ mod tests {
     fn test_format_tool_executing_empty_args() {
         colored::control::set_override(false);
         let formatted = format_tool_executing("list_files", &serde_json::json!({}));
-        assert!(formatted.contains("🔧"));
+        assert!(formatted.contains("┌─"));
         assert!(formatted.contains("list_files"));
     }
 

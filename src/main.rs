@@ -1262,7 +1262,7 @@ mod event_handling_tests {
     // These verify the formatting used across all UI modes
     // =========================================
 
-    /// ToolExecuting events should format as: 🔧 <tool_name> <args>
+    /// ToolExecuting events should format as: ┌─ <tool_name> <args>
     #[test]
     fn test_tool_executing_format() {
         let args = json!({"file_path": "src/main.rs", "limit": 100});
@@ -1355,7 +1355,7 @@ mod event_handling_tests {
         let mut app = tui::App::new("test");
 
         app.append_streaming("Let me search.\n"); // Creates 2 lines: "Let me search." and ""
-        app.append_to_chat("🔧 grep pattern=\"test\""); // Line-based, adds new line
+        app.append_to_chat("┌─ grep pattern=\"test\""); // Line-based, adds new line
 
         assert_eq!(app.chat_lines().len(), 3);
         assert_eq!(app.chat_lines()[0], "Let me search.");
@@ -1368,7 +1368,7 @@ mod event_handling_tests {
     fn test_tool_result_requires_line_output() {
         let mut app = tui::App::new("test");
 
-        app.append_to_chat("🔧 read_file path=\"test.rs\"");
+        app.append_to_chat("┌─ read_file path=\"test.rs\"");
         app.append_to_chat("[read_file] 0.02s, ~100 tok");
 
         assert_eq!(app.chat_lines().len(), 2);
@@ -1390,7 +1390,7 @@ mod event_handling_tests {
         app.append_streaming("the function.\n\n");
 
         // Tool executes (line-based)
-        app.append_to_chat("🔧 grep pattern=\"fn main\"");
+        app.append_to_chat("┌─ grep pattern=\"fn main\"");
 
         // Tool result (line-based)
         app.append_to_chat("[grep] 0.01s, ~50 tok");
@@ -1405,7 +1405,7 @@ mod event_handling_tests {
         assert_eq!(app.chat_lines()[0], "I'll search for the function.");
         assert_eq!(app.chat_lines()[1], ""); // from \n\n
         assert_eq!(app.chat_lines()[2], ""); // from \n\n
-        assert_eq!(app.chat_lines()[3], "🔧 grep pattern=\"fn main\"");
+        assert_eq!(app.chat_lines()[3], "┌─ grep pattern=\"fn main\"");
         assert_eq!(app.chat_lines()[4], "[grep] 0.01s, ~50 tok");
         assert_eq!(app.chat_lines()[5], "");
         assert_eq!(app.chat_lines()[6], "Found it in src/main.rs");
