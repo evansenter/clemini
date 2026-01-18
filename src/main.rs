@@ -220,6 +220,16 @@ fn write_streaming_to_log_file(path: impl Into<PathBuf>, text: &str) -> std::io:
     Ok(())
 }
 
+/// Split text at the last newline, returning (complete_lines, remainder).
+/// Returns None if there's no newline in the text.
+fn split_at_last_newline(text: &str) -> Option<(&str, &str)> {
+    text.rfind('\n').map(|pos| {
+        let complete = &text[..=pos];
+        let remaining = &text[pos + 1..];
+        (complete, remaining)
+    })
+}
+
 /// Log streaming text with markdown rendering.
 /// Buffers text until complete lines are available, then renders with termimad.
 /// Call `flush_streaming_log()` when streaming is complete to flush any remaining text.
@@ -231,28 +241,29 @@ pub fn log_streaming(text: &str) {
     buffer.push_str(text);
 
     // Find the last newline - everything before it can be rendered
-    if let Some(last_newline) = buffer.rfind('\n') {
-        let complete = buffer[..=last_newline].to_string();
-        let remaining = buffer[last_newline + 1..].to_string();
-        *buffer = remaining;
+    let Some((complete, remaining)) = split_at_last_newline(&buffer) else {
+        return;
+    };
+    let complete = complete.to_string();
+    let remaining = remaining.to_string();
+    *buffer = remaining;
 
-        // Render complete lines with markdown
-        colored::control::set_override(true);
-        let rendered = SKIN.term_text(&complete).to_string();
+    // Render complete lines with markdown
+    colored::control::set_override(true);
+    let rendered = SKIN.term_text(&complete).to_string();
 
-        // Write to log files
-        let log_dir = dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(".clemini/logs");
-        let _ = std::fs::create_dir_all(&log_dir);
-        let today = chrono::Local::now().format("%Y-%m-%d");
-        let log_path = log_dir.join(format!("clemini.log.{}", today));
+    // Write to log files
+    let log_dir = dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".clemini/logs");
+    let _ = std::fs::create_dir_all(&log_dir);
+    let today = chrono::Local::now().format("%Y-%m-%d");
+    let log_path = log_dir.join(format!("clemini.log.{}", today));
 
-        let _ = write_streaming_to_log_file(&log_path, &rendered);
+    let _ = write_streaming_to_log_file(&log_path, &rendered);
 
-        if let Ok(path) = std::env::var("CLEMINI_LOG") {
-            let _ = write_streaming_to_log_file(PathBuf::from(path), &rendered);
-        }
+    if let Ok(path) = std::env::var("CLEMINI_LOG") {
+        let _ = write_streaming_to_log_file(PathBuf::from(path), &rendered);
     }
 }
 
@@ -686,18 +697,10 @@ enum AppEvent {
         name: String,
         duration_ms: u64,
         tokens: u32,
+        has_error: bool,
     },
     InteractionComplete(Result<InteractionResult>),
     ContextWarning(String),
-}
-
-/// Format the tool completion duration for display.
-fn format_tool_duration(duration_ms: u64) -> String {
-    if duration_ms < 1000 {
-        format!("{}ms", duration_ms)
-    } else {
-        format!("{:.1}s", duration_ms as f64 / 1000.0)
-    }
 }
 
 /// Convert AgentEvent to AppEvents for the TUI.
@@ -718,6 +721,7 @@ fn convert_agent_event_to_app_events(event: &AgentEvent) -> Vec<AppEvent> {
             name: result.name.clone(),
             duration_ms: result.duration.as_millis() as u64,
             tokens: events::estimate_tokens(&result.args) + events::estimate_tokens(&result.result),
+            has_error: result.is_error(),
         }],
         AgentEvent::ContextWarning { percentage, .. } => {
             vec![AppEvent::ContextWarning(events::format_context_warning(
@@ -775,6 +779,7 @@ impl events::EventHandler for TuiEventHandler {
             name: name.to_string(),
             duration_ms: duration.as_millis() as u64,
             tokens,
+            has_error,
         });
         log_event(&events::format_tool_result(
             name, duration, tokens, has_error,
@@ -1201,16 +1206,10 @@ async fn run_tui_event_loop(
                         );
                         app.append_to_chat(&msg);
                     }
-                    AppEvent::ToolCompleted { name, duration_ms, tokens } => {
-                        // Tool completed - show duration and token estimate
-                        let duration_str = format_tool_duration(duration_ms);
-                        let msg = format!(
-                            "  {} {} {} ~{} tok",
-                            "└─".dimmed(),
-                            name.dimmed(),
-                            duration_str.dimmed(),
-                            tokens
-                        );
+                    AppEvent::ToolCompleted { name, duration_ms, tokens, has_error } => {
+                        // Tool completed - use same format as log output
+                        let duration = std::time::Duration::from_millis(duration_ms);
+                        let msg = events::format_tool_result(&name, duration, tokens, has_error);
                         app.append_to_chat(&msg);
                         app.append_to_chat(""); // Single blank line after tool completes
                     }
@@ -1536,33 +1535,6 @@ mod event_handling_tests {
     }
 
     // =========================================
-    // Duration formatting tests
-    // =========================================
-
-    #[test]
-    fn test_format_tool_duration_milliseconds() {
-        assert_eq!(format_tool_duration(0), "0ms");
-        assert_eq!(format_tool_duration(50), "50ms");
-        assert_eq!(format_tool_duration(999), "999ms");
-    }
-
-    #[test]
-    fn test_format_tool_duration_seconds() {
-        assert_eq!(format_tool_duration(1000), "1.0s");
-        assert_eq!(format_tool_duration(1500), "1.5s");
-        assert_eq!(format_tool_duration(2500), "2.5s");
-        assert_eq!(format_tool_duration(10000), "10.0s");
-    }
-
-    #[test]
-    fn test_format_tool_duration_boundary() {
-        // Just under 1 second
-        assert_eq!(format_tool_duration(999), "999ms");
-        // Exactly 1 second
-        assert_eq!(format_tool_duration(1000), "1.0s");
-    }
-
-    // =========================================
     // Context warning formatting tests
     // =========================================
 
@@ -1679,10 +1651,12 @@ mod event_handling_tests {
                 name,
                 duration_ms,
                 tokens,
+                has_error,
             } => {
                 assert_eq!(name, "bash");
                 assert_eq!(*duration_ms, 150);
                 assert!(*tokens > 0); // Should have some token estimate
+                assert!(!has_error); // Successful result
             }
             _ => panic!("Expected ToolCompleted"),
         }
@@ -1796,10 +1770,12 @@ mod event_handling_tests {
                 name,
                 duration_ms,
                 tokens,
+                has_error,
             } => {
                 assert_eq!(name, "bash");
                 assert_eq!(duration_ms, 150);
                 assert_eq!(tokens, 100);
+                assert!(!has_error);
             }
             _ => panic!("Expected ToolCompleted"),
         }
@@ -1819,5 +1795,42 @@ mod event_handling_tests {
             }
             _ => panic!("Expected ContextWarning"),
         }
+    }
+
+    // =========================================
+    // Line buffering tests for streaming log
+    // =========================================
+
+    #[test]
+    fn test_split_at_last_newline_no_newline() {
+        assert!(split_at_last_newline("hello world").is_none());
+    }
+
+    #[test]
+    fn test_split_at_last_newline_single_newline() {
+        let (complete, remaining) = split_at_last_newline("hello\n").unwrap();
+        assert_eq!(complete, "hello\n");
+        assert_eq!(remaining, "");
+    }
+
+    #[test]
+    fn test_split_at_last_newline_with_remainder() {
+        let (complete, remaining) = split_at_last_newline("hello\nworld").unwrap();
+        assert_eq!(complete, "hello\n");
+        assert_eq!(remaining, "world");
+    }
+
+    #[test]
+    fn test_split_at_last_newline_multiple_lines() {
+        let (complete, remaining) = split_at_last_newline("line1\nline2\npartial").unwrap();
+        assert_eq!(complete, "line1\nline2\n");
+        assert_eq!(remaining, "partial");
+    }
+
+    #[test]
+    fn test_split_at_last_newline_ends_with_newline() {
+        let (complete, remaining) = split_at_last_newline("line1\nline2\n").unwrap();
+        assert_eq!(complete, "line1\nline2\n");
+        assert_eq!(remaining, "");
     }
 }

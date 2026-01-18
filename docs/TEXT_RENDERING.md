@@ -39,13 +39,11 @@ Uses the `colored` crate for ANSI terminal colors:
 
 | Element | Color | Method |
 |---------|-------|--------|
-| **Timestamps** | **Cyan** | `.cyan()` |
 | Tool names | Cyan | `.cyan()` |
 | Duration | Yellow | `.yellow()` |
 | Error labels | Bright red + bold | `.bright_red().bold()` |
-| CALL label | Magenta + bold | `.magenta().bold()` |
-| CALL tool name | Purple | `.purple()` |
-| CALL arguments | Dimmed grey | `.dimmed()` |
+| Tool emoji (🔧) | Dimmed grey | `.dimmed()` |
+| Tool arguments | Dimmed grey | `.dimmed()` |
 | Bash command/output | Dimmed grey + italic | `.dimmed().italic()` |
 | Diff deletions | Red | `.red()` |
 | Diff additions | Green | `.green()` |
@@ -54,40 +52,38 @@ Uses the `colored` crate for ANSI terminal colors:
 | In-progress todos | Yellow icon | `.yellow()` |
 | Completed todos | Green icon | `.green()` |
 
-**Important:** Timestamps should NEVER be grey/dimmed. They must always be cyan for consistency.
-
 ## Tool Call Format
 
-### CALL Line (Before Execution)
+### Executing Line (Before Execution)
 
 ```
-CALL <tool_name> <formatted_args>
+🔧 <tool_name> <formatted_args>
 ```
 
-- `CALL`: Magenta, bold
-- `<tool_name>`: Purple
+- `🔧`: Dimmed
+- `<tool_name>`: Cyan
 - `<formatted_args>`: Dimmed grey, key=value pairs
 
 Example:
 ```
-CALL read_file path="/src/main.rs"
+🔧 read_file file_path="/src/main.rs"
 ```
 
 ### Result Line (After Execution)
 
 ```
-[<tool_name>] <duration>, ~<tokens> tok<error_suffix>
+└─ <tool_name> <duration> ~<tokens> tok<error_suffix>
 ```
 
-- Brackets and tool name: Cyan
-- Duration: Yellow, format varies by elapsed time
+- `└─` and tool name: Cyan
+- Duration: Yellow, always in seconds (e.g., `0.02s`)
 - Token estimate: Rough estimate (~4 chars per token of result JSON)
 - Error suffix: ` ERROR` in bright red bold (only if error occurred)
 
 Examples:
 ```
-[read_file] 0.02s, ~18 tok
-[bash] 1.45s, ~256 tok ERROR
+└─ read_file 0.02s ~18 tok
+└─ bash 1.45s ~256 tok ERROR
 ```
 
 ### Error Detail Line
@@ -98,15 +94,17 @@ When a tool returns an error, show details:
 ```
 
 - Prefix: Two spaces + tree character
-- `error`: Red
+- `error:` label
 - Message: Dimmed grey
 
 ## Duration Formatting
 
+All durations are displayed in seconds with 2-3 decimal places:
+
 | Elapsed Time | Format | Example |
 |--------------|--------|---------|
-| < 1ms | `{:.3}s` | `0.001s` |
-| ≥ 1ms | `{:.2}s` | `0.02s`, `1.45s` |
+| < 1ms | 3 decimal places | `0.001s` |
+| ≥ 1ms | 2 decimal places | `0.02s`, `1.45s` |
 
 ## Argument Display
 
@@ -242,15 +240,17 @@ Response text from the model is rendered using `termimad`:
 
 ### Logging
 
-Response text is logged to file only (not duplicated to terminal since it's already streamed):
-```rust
-log_to_file(&format!("> {}", response_text.trim()));
-```
+Response text is logged via `log_streaming()` which:
+- Buffers text until complete lines are available
+- Renders complete lines with termimad markdown styling
+- Flushes remaining text when streaming completes
+
+This ensures `tail -f` shows streaming text naturally while still applying markdown formatting.
 
 ## Spacing Guidelines
 
-1. **Before CALL**: No extra blank line
-2. **After tool result**: Standard line break
+1. **Before tool execution**: No extra blank line
+2. **After tool result**: Single blank line
 3. **Between response and tools**: Natural flow (no forced spacing)
 4. **Todo list**: Leading newline before list, no trailing newline
 

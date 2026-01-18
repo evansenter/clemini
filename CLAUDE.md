@@ -66,9 +66,15 @@ run_interaction()                    UI Layer
 - `ContextWarning { used, limit, percentage }` - Context window >80%
 - `Cancelled` - User cancelled
 
-**`EventHandler` trait** (`src/events.rs`): UI modes implement this to handle events.
-- `TerminalEventHandler` - For plain REPL and non-interactive modes
-- TUI mode handles events directly via `AppEvent` enum
+**`EventHandler` trait** (`src/events.rs`): All UI modes implement this trait:
+- `TerminalEventHandler` (`events.rs`) - Plain REPL and non-interactive modes
+- `TuiEventHandler` (`main.rs`) - TUI mode, sends AppEvents via channel
+- `McpEventHandler` (`mcp.rs`) - MCP server mode
+
+All handlers use shared formatting functions:
+- `format_tool_args()` - Format tool arguments as key=value pairs
+- `format_tool_result()` - Format tool completion line (`└─ name duration ~tokens tok`)
+- `format_context_warning()` - Format context window warnings
 
 ### Core Functions
 
@@ -121,7 +127,7 @@ Debugging: `LOUD_WIRE=1` logs all HTTP requests/responses.
 
 **Always verify compilation** - After making changes, run `cargo check` or `cargo clippy -- -D warnings` before reporting completion. Never leave code in a non-compiling state.
 
-**Always rebuild before testing** - After making ANY changes to clemini code, run `clemini_rebuild`, wait 5 seconds, then use `clemini_chat`. The rebuild replaces the running process, so calling `clemini_chat` too early will fail with AbortError.
+**Always rebuild before testing** - After making ANY changes to clemini code, run `clemini_rebuild` and wait for completion BEFORE using `clemini_chat`. The rebuild replaces the running process, so calling `clemini_chat` too early will fail with AbortError.
 
 **Minimal scope** - Only implement what was asked. Don't add "nice to have" features beyond the request. For example, if asked for a stdio server, don't also add HTTP support.
 
@@ -134,9 +140,15 @@ Debugging: `LOUD_WIRE=1` logs all HTTP requests/responses.
 
 Don't skip tests. If a test is flaky or legitimately broken by your change, fix the test as part of the PR.
 
-**Visual output changes** - When modifying how output is displayed (formatting, colors, log messages), ensure changes are applied consistently across all three output modes:
-- **MCP mode** (`src/mcp.rs`) - Logs via `log_event()`, used when clemini runs as MCP server
-- **Plain REPL** (`--no-tui`) - Uses `TerminalEventHandler` in `src/events.rs`
-- **TUI mode** (default) - Uses `AppEvent` handling in `src/main.rs`
+**Visual output changes** - Tool output formatting is centralized in `src/events.rs`:
+
+| Change | Location |
+|--------|----------|
+| Tool result format (`└─ name...`) | `format_tool_result()` in `events.rs` |
+| Tool args format (`key=value`) | `format_tool_args()` in `events.rs` |
+| Context warnings | `format_context_warning()` in `events.rs` |
+| Streaming text logging | `log_streaming()` in `main.rs` |
+
+All three EventHandler implementations (`TerminalEventHandler`, `TuiEventHandler`, `McpEventHandler`) use these shared functions, so changes apply everywhere automatically.
 
 Test visual changes by running clemini in each mode and verifying the output looks correct.
