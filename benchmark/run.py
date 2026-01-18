@@ -4,6 +4,7 @@ import sys
 import argparse
 import time
 import random
+import shutil
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -21,9 +22,47 @@ def run_clemini(prompt, cwd):
     stdout, stderr = process.communicate()
     return stdout, stderr, process.returncode
 
-def run_tests(exercise_path, test_file):
-    """Run pytest on the test file and return success status and output."""
-    cmd = [sys.executable, "-m", "pytest", "-v", str(test_file)]
+def run_tests(exercise_path, lang):
+    """Run tests for the given language and return success status and output."""
+    cmd = []
+    if lang == "python":
+        cmd = [sys.executable, "-m", "pytest", "--no-header", "-v"]
+    elif lang == "rust":
+        cmd = ["cargo", "test", "--offline"]
+    elif lang == "go":
+        cmd = ["go", "test", "-v", "."]
+    elif lang == "javascript":
+        if (exercise_path / "package.json").exists():
+            cmd = ["npm", "test"]
+        else:
+            # Fallback to finding .spec.js or .test.js
+            test_files = list(exercise_path.glob("*.spec.js")) + list(exercise_path.glob("*.test.js"))
+            if test_files:
+                cmd = ["node", str(test_files[0])]
+    elif lang == "java":
+        if (exercise_path / "gradlew").exists():
+            cmd = ["./gradlew", "test"]
+        else:
+            cmd = ["gradle", "test"]
+    elif lang == "cpp":
+        # C++ exercises usually require cmake build
+        build_dir = exercise_path / "build"
+        build_dir.mkdir(exist_ok=True)
+        try:
+            subprocess.run(["cmake", ".."], cwd=build_dir, check=True, capture_output=True)
+            subprocess.run(["make"], cwd=build_dir, check=True, capture_output=True)
+            # Run the test executable (usually matches exercise name or 'tests')
+            test_exe = next(build_dir.glob("*test*"), None)
+            if test_exe:
+                cmd = [str(test_exe)]
+            else:
+                return False, "Could not find test executable in build directory"
+        except subprocess.CalledProcessError as e:
+            return False, f"Build failed:\n{e.stdout.decode() if e.stdout else ''}\n{e.stderr.decode() if e.stderr else ''}"
+
+    if not cmd:
+        return False, f"No test runner configured for {lang}"
+
     process = subprocess.Popen(cmd, cwd=exercise_path, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     stdout, stderr = process.communicate()
     output = stdout + stderr
@@ -34,22 +73,12 @@ def run_exercise(ex, base_dir):
     start_time = time.time()
     ex_dir = base_dir / ex
     
-    # Discovery of code and test files
-    # Usually they match the directory name with underscores
-    code_file_name = ex.replace("-", "_") + ".py"
-    test_file_name = ex.replace("-", "_") + "_test.py"
+    lang_file = ex_dir / ".lang"
+    if not lang_file.exists():
+        return ex, {"status": "SKIPPED", "error": ".lang file not found", "duration": 0, "attempts": 0}
     
-    # Fallback: find any .py and _test.py if the above don't exist
-    if not (ex_dir / code_file_name).exists():
-        py_files = list(ex_dir.glob("*.py"))
-        py_files = [f for f in py_files if not f.name.endswith("_test.py")]
-        if py_files:
-            code_file_name = py_files[0].name
-            
-    if not (ex_dir / test_file_name).exists():
-        test_files = list(ex_dir.glob("*_test.py"))
-        if test_files:
-            test_file_name = test_files[0].name
+    with open(lang_file, "r") as f:
+        lang = f.read().strip()
 
     instr_file = ex_dir / "instructions.md"
     if not instr_file.exists():
@@ -59,23 +88,23 @@ def run_exercise(ex, base_dir):
     with open(instr_file, "r") as f:
         instructions = f.read()
         
-    prompt = f"Implement the code in {code_file_name} to pass the tests in {test_file_name}. Here are the instructions: {instructions}"
+    prompt = f"Implement the solution in the appropriate source files to pass the tests. Here are the instructions: {instructions}"
     
     # Initial attempt
     attempts = 1
     run_clemini(prompt, ex_dir)
-    passed, output = run_tests(ex_dir, test_file_name)
+    passed, output = run_tests(ex_dir, lang)
     
     if not passed:
         # Retry once
         attempts = 2
-        retry_prompt = f"The tests failed with the following output:\n\n{output}\n\nPlease fix the implementation in {code_file_name} to pass the tests."
+        retry_prompt = f"The tests failed with the following output:\n\n{output}\n\nPlease fix the implementation to pass the tests."
         run_clemini(retry_prompt, ex_dir)
-        passed, output = run_tests(ex_dir, test_file_name)
+        passed, output = run_tests(ex_dir, lang)
         
     duration = time.time() - start_time
     status = "PASSED" if passed else "FAILED"
-    return ex, {"status": status, "duration": duration, "attempts": attempts if passed else 0}
+    return ex, {"status": status, "duration": duration, "attempts": attempts if passed else 0, "lang": lang}
 
 def format_duration(seconds):
     mins = int(seconds // 60)
@@ -86,8 +115,8 @@ def format_duration(seconds):
 
 def main():
     parser = argparse.ArgumentParser(description="Run clemini benchmark on exercises.")
-    parser.add_argument("--parallel", type=int, default=1, help="Number of exercises to run in parallel.")
-    parser.add_argument("--time-limit", type=int, help="Time limit in minutes.")
+    parser.add_argument("--parallel", type=int, default=2, help="Number of exercises to run in parallel.")
+    parser.add_argument("--time-limit", type=int, default=5, help="Time limit in minutes.")
     args = parser.parse_args()
 
     repo_root = Path(__file__).parent.parent.absolute()
@@ -102,8 +131,8 @@ def main():
     random.shuffle(exercises)
     
     limit_str = f" ({args.time_limit}m limit)" if args.time_limit else ""
-    print(f"Clemini Benchmark{limit_str}")
-    print("=" * (17 + len(limit_str)))
+    print(f"Clemini Polyglot Benchmark{limit_str}")
+    print("=" * (26 + len(limit_str)))
     
     results = {}
     start_time = time.time()
@@ -112,7 +141,6 @@ def main():
     total_to_run = len(exercises)
     
     # Default buffer: don't start new exercise if less than 2 minutes left
-    # (assuming average exercise takes ~1-2 mins)
     time_buffer = 120 
     
     with ThreadPoolExecutor(max_workers=args.parallel) as executor:
@@ -120,7 +148,7 @@ def main():
         
         # Initial submission
         ex_iter = iter(exercises)
-        for _ in range(args.parallel):
+        while len(futures) < args.parallel:
             try:
                 ex = next(ex_iter)
                 futures[executor.submit(run_exercise, ex, base_dir)] = ex
@@ -130,7 +158,6 @@ def main():
         from concurrent.futures import wait, FIRST_COMPLETED
         
         while futures:
-            # Wait for at least one to complete or timeout to check time limit
             done, not_done = wait(futures.keys(), timeout=1.0, return_when=FIRST_COMPLETED)
             
             for f in done:
@@ -139,9 +166,10 @@ def main():
                 results[ex_name] = res
                 completed_count += 1
                 
-                status = res["status"]
-                duration = int(res["duration"])
-                attempts = res["attempts"]
+                status = res.get("status", "ERROR")
+                duration = int(res.get("duration", 0))
+                attempts = res.get("attempts", 0)
+                lang = res.get("lang", "???")
                 
                 if status == "PASSED":
                     mark = "\033[92m✓ pass\033[0m"
@@ -155,41 +183,30 @@ def main():
                     attempt_info = "     "
                 
                 ex_display = f"{ex_name}:"
-                print(f"[{completed_count}/{total_to_run}]  {ex_display:20} {mark} {attempt_info} [{duration}s]")
+                print(f"[{completed_count}/{total_to_run}] {lang:10} {ex_display:30} {mark} {attempt_info} [{duration}s]")
 
-            if args.time_limit:
-                elapsed = time.time() - start_time
-                if elapsed > (args.time_limit * 60):
-                    time_limit_reached = True
-                    for f in futures.keys():
-                        f.cancel()
+            elapsed = time.time() - start_time
+            if args.time_limit and elapsed > (args.time_limit * 60):
+                time_limit_reached = True
+                for f in not_done:
+                    f.cancel()
+                break
+            
+            # Submit more if capacity available and not approaching limit
+            while len(futures) < args.parallel:
+                if args.time_limit and elapsed > (args.time_limit * 60) - time_buffer:
                     break
-                
-                if elapsed > (args.time_limit * 60) - time_buffer:
-                    # Don't start new ones
-                    pass
-                else:
-                    # Submit more if capacity available
-                    while len(futures) < args.parallel:
-                        try:
-                            ex = next(ex_iter)
-                            futures[executor.submit(run_exercise, ex, base_dir)] = ex
-                        except StopIteration:
-                            break
-            else:
-                # No time limit, just keep submitting
-                while len(futures) < args.parallel:
-                    try:
-                        ex = next(ex_iter)
-                        futures[executor.submit(run_exercise, ex, base_dir)] = ex
-                    except StopIteration:
-                        break
+                try:
+                    ex = next(ex_iter)
+                    futures[executor.submit(run_exercise, ex, base_dir)] = ex
+                except StopIteration:
+                    break
 
     if time_limit_reached:
         print("\n[TIME LIMIT REACHED]")
 
     total_duration = time.time() - start_time
-    passed_count = sum(1 for res in results.values() if res["status"] == "PASSED")
+    passed_count = sum(1 for res in results.values() if res.get("status") == "PASSED")
     
     print(f"\nResults: {passed_count}/{completed_count} passed ({int(passed_count/completed_count*100) if completed_count > 0 else 0}%)")
     print(f"Time: {format_duration(total_duration)}")
