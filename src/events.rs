@@ -190,6 +190,10 @@ impl EventHandler for TerminalEventHandler {
         let msg = format_context_warning(percentage);
         eprintln!("{}", msg.bright_red().bold());
     }
+
+    fn on_complete(&mut self) {
+        crate::flush_streaming_log();
+    }
 }
 
 /// Dispatch an AgentEvent to the appropriate handler method.

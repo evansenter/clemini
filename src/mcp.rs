@@ -132,7 +132,7 @@ impl McpEventHandler {
 
 impl EventHandler for McpEventHandler {
     fn on_text_delta(&mut self, text: &str) {
-        // Log streaming text directly (no buffering, works with tail -f)
+        // Log streaming text (buffered by line for markdown rendering)
         log_streaming(text);
     }
 
@@ -172,6 +172,10 @@ impl EventHandler for McpEventHandler {
     fn on_context_warning(&mut self, percentage: f64) {
         let msg = format_context_warning(percentage);
         crate::log_event(&msg);
+    }
+
+    fn on_complete(&mut self) {
+        crate::flush_streaming_log();
     }
 }
 

@@ -10,7 +10,7 @@ use serde_json::Value;
 use std::env;
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::PathBuf;
-use std::sync::{Arc, LazyLock, OnceLock};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use termimad::MadSkin;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -45,6 +45,9 @@ static SKIN: LazyLock<MadSkin> = LazyLock::new(|| {
     }
     skin
 });
+
+/// Buffer for streaming text - accumulates until newlines, then renders with markdown
+static STREAMING_BUFFER: LazyLock<Mutex<String>> = LazyLock::new(|| Mutex::new(String::new()));
 
 pub trait OutputSink: Send + Sync {
     fn emit(&self, message: &str, render_markdown: bool);
@@ -217,23 +220,71 @@ fn write_streaming_to_log_file(path: impl Into<PathBuf>, text: &str) -> std::io:
     Ok(())
 }
 
-/// Log streaming text to file only (no extra newlines added).
-/// Use this for streaming model responses so `tail -f` works naturally.
+/// Log streaming text with markdown rendering.
+/// Buffers text until complete lines are available, then renders with termimad.
+/// Call `flush_streaming_log()` when streaming is complete to flush any remaining text.
 pub fn log_streaming(text: &str) {
-    // Write to the stable log location: clemini.log.YYYY-MM-DD
+    let Ok(mut buffer) = STREAMING_BUFFER.lock() else {
+        return;
+    };
+
+    buffer.push_str(text);
+
+    // Find the last newline - everything before it can be rendered
+    if let Some(last_newline) = buffer.rfind('\n') {
+        let complete = buffer[..=last_newline].to_string();
+        let remaining = buffer[last_newline + 1..].to_string();
+        *buffer = remaining;
+
+        // Render complete lines with markdown
+        colored::control::set_override(true);
+        let rendered = SKIN.term_text(&complete).to_string();
+
+        // Write to log files
+        let log_dir = dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".clemini/logs");
+        let _ = std::fs::create_dir_all(&log_dir);
+        let today = chrono::Local::now().format("%Y-%m-%d");
+        let log_path = log_dir.join(format!("clemini.log.{}", today));
+
+        let _ = write_streaming_to_log_file(&log_path, &rendered);
+
+        if let Ok(path) = std::env::var("CLEMINI_LOG") {
+            let _ = write_streaming_to_log_file(PathBuf::from(path), &rendered);
+        }
+    }
+}
+
+/// Flush any remaining buffered streaming text.
+/// Call this when streaming is complete (e.g., in on_complete handler).
+pub fn flush_streaming_log() {
+    let Ok(mut buffer) = STREAMING_BUFFER.lock() else {
+        return;
+    };
+
+    if buffer.is_empty() {
+        return;
+    }
+
+    let text = std::mem::take(&mut *buffer);
+
+    // Render with markdown
+    colored::control::set_override(true);
+    let rendered = SKIN.term_text(&text).to_string();
+
+    // Write to log files
     let log_dir = dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".clemini/logs");
     let _ = std::fs::create_dir_all(&log_dir);
-
     let today = chrono::Local::now().format("%Y-%m-%d");
     let log_path = log_dir.join(format!("clemini.log.{}", today));
 
-    let _ = write_streaming_to_log_file(&log_path, text);
+    let _ = write_streaming_to_log_file(&log_path, &rendered);
 
-    // Also write to CLEMINI_LOG if set (backwards compat)
     if let Ok(path) = std::env::var("CLEMINI_LOG") {
-        let _ = write_streaming_to_log_file(PathBuf::from(path), text);
+        let _ = write_streaming_to_log_file(PathBuf::from(path), &rendered);
     }
 }
 
@@ -737,6 +788,10 @@ impl events::EventHandler for TuiEventHandler {
         let msg = events::format_context_warning(percentage);
         let _ = self.app_tx.try_send(AppEvent::ContextWarning(msg.clone()));
         log_event(&msg);
+    }
+
+    fn on_complete(&mut self) {
+        flush_streaming_log();
     }
 }
 
