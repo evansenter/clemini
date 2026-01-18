@@ -14,7 +14,6 @@ use std::sync::{Arc, LazyLock, OnceLock};
 use termimad::MadSkin;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 use tui_textarea::{Input, TextArea};
 
 mod agent;
@@ -29,26 +28,14 @@ use tools::CleminiToolService;
 
 const DEFAULT_MODEL: &str = "gemini-3-flash-preview";
 
-/// Initialize tracing for structured JSON logs only.
-/// Human-readable logs go through log_event() instead.
+/// Initialize logging by ensuring the log directory exists.
+/// Human-readable logs go through log_event().
 pub fn init_logging() {
     let log_dir = dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".clemini/logs");
 
     let _ = std::fs::create_dir_all(&log_dir);
-
-    // JSON layer: clemini.json.YYYY-MM-DD
-    let json_file = tracing_appender::rolling::daily(&log_dir, "clemini.json");
-    let (json_writer, json_guard) = tracing_appender::non_blocking(json_file);
-    let json_layer = fmt::layer().json().with_writer(json_writer);
-
-    Box::leak(Box::new(json_guard));
-
-    tracing_subscriber::registry()
-        .with(json_layer)
-        .with(EnvFilter::from_default_env().add_directive(tracing::Level::INFO.into()))
-        .init();
 }
 
 static SKIN: LazyLock<MadSkin> = LazyLock::new(|| {
