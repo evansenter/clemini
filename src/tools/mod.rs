@@ -82,6 +82,7 @@ impl ToolService for CleminiToolService {
             Arc::new(EditTool::new(self.cwd.clone(), self.allowed_paths.clone())),
             Arc::new(BashTool::new(
                 self.cwd.clone(),
+                self.allowed_paths.clone(),
                 self.bash_timeout,
                 self.is_mcp_mode,
             )),

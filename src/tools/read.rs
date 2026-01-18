@@ -23,21 +23,21 @@ impl CallableFunction for ReadTool {
     fn declaration(&self) -> FunctionDeclaration {
         FunctionDeclaration::new(
             "read_file".to_string(),
-            "Read the contents of a file. Returns the file contents as text with line numbers. Supports pagination via offset and limit.".to_string(),
+            "Read the contents of a file. Returns the file contents as text with line numbers. Use this to examine source code, configuration files, or other text documents. For large files, use offset and limit to read in chunks. By default, it reads the first 2000 lines.".to_string(),
             FunctionParameters::new(
                 "object".to_string(),
                 json!({
                     "file_path": {
                         "type": "string",
-                        "description": "The path to the file to read (absolute or relative to cwd)"
+                        "description": "The path to the file to read (absolute or relative to current directory)."
                     },
                     "offset": {
                         "type": "integer",
-                        "description": "1-indexed line number to start from (default: 1)"
+                        "description": "The 1-indexed line number to start reading from. For example, to start from the beginning of the file, use 1. If the offset is beyond the end of the file, an error is returned. Defaults to 1."
                     },
                     "limit": {
                         "type": "integer",
-                        "description": "Max lines to read (default: 500)"
+                        "description": "The maximum number of lines to read. If not specified, defaults to 2000 lines. Use this to avoid hitting context limits with very large files. If set to 0, no lines will be returned (only metadata like total_lines)."
                     }
                 }),
                 vec!["file_path".to_string()],
@@ -54,7 +54,7 @@ impl CallableFunction for ReadTool {
 
         let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(1) as usize;
 
-        let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(500) as usize;
+        let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(2000) as usize;
 
         // Resolve and validate path
         let path = match resolve_and_validate_path(file_path, &self.cwd, &self.allowed_paths) {
@@ -271,7 +271,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let cwd = dir.path().to_path_buf();
         let file_path = cwd.join("large.txt");
-        let content = (1..=600)
+        let content = (1..=2100)
             .map(|i| format!("line {i}"))
             .collect::<Vec<_>>()
             .join("\n");
@@ -281,12 +281,37 @@ mod tests {
         let args = json!({ "file_path": "large.txt" });
 
         let result = tool.call(args).await.unwrap();
-        assert_eq!(result["total_lines"], 600);
+        assert_eq!(result["total_lines"], 2100);
         assert!(
             result["truncated"]
                 .as_str()
                 .unwrap()
-                .contains("Showing lines 1-500")
+                .contains("Showing lines 1-2000")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_read_tool_limit_zero() {
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().to_path_buf();
+        let file_path = cwd.join("test.txt");
+        fs::write(&file_path, "line 1\nline 2\nline 3").unwrap();
+
+        let tool = ReadTool::new(cwd.clone(), vec![cwd.clone()]);
+        let args = json!({
+            "file_path": "test.txt",
+            "limit": 0
+        });
+
+        let result = tool.call(args).await.unwrap();
+        assert_eq!(result["total_lines"], 3);
+        assert_eq!(result["contents"], "");
+        assert!(result["truncated"].is_string());
+        assert!(
+            result["truncated"]
+                .as_str()
+                .unwrap()
+                .contains("Showing lines 1-0 of 3")
         );
     }
 

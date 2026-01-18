@@ -22,7 +22,7 @@ impl CallableFunction for WriteTool {
     fn declaration(&self) -> FunctionDeclaration {
         FunctionDeclaration::new(
             "write_file".to_string(),
-            "Write content to a file. Creates the file if it doesn't exist, overwrites if it does. Creates parent directories as needed.".to_string(),
+            "Write content to a file. Creates the file if it doesn't exist, overwrites if it does. Creates parent directories as needed. Optionally creates a backup if the file already exists.".to_string(),
             FunctionParameters::new(
                 "object".to_string(),
                 json!({
@@ -33,6 +33,10 @@ impl CallableFunction for WriteTool {
                     "content": {
                         "type": "string",
                         "description": "The content to write to the file"
+                    },
+                    "backup": {
+                        "type": "boolean",
+                        "description": "Whether to create a backup of the existing file (as {filename}.bak) before overwriting. Defaults to false."
                     }
                 }),
                 vec!["file_path".to_string(), "content".to_string()],
@@ -51,6 +55,11 @@ impl CallableFunction for WriteTool {
             .get("content")
             .and_then(|v| v.as_str())
             .ok_or_else(|| FunctionError::ArgumentMismatch("Missing content".to_string()))?;
+
+        let backup = args
+            .get("backup")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
 
         // Resolve and validate path
         let path = match resolve_and_validate_path(file_path, &self.cwd, &self.allowed_paths) {
@@ -86,6 +95,26 @@ impl CallableFunction for WriteTool {
         let previous_size = metadata.as_ref().map(|m| m.len());
         let exists = metadata.is_some();
 
+        let mut backup_created = false;
+        if backup && exists {
+            let mut backup_path_os = path.clone().into_os_string();
+            backup_path_os.push(".bak");
+            let backup_path = PathBuf::from(backup_path_os);
+
+            if let Err(e) = tokio::fs::copy(&path, &backup_path).await {
+                return Ok(error_response(
+                    &format!(
+                        "Failed to create backup at {}: {}. Overwrite aborted.",
+                        backup_path.display(),
+                        e
+                    ),
+                    error_codes::IO_ERROR,
+                    json!({"path": backup_path.display().to_string()}),
+                ));
+            }
+            backup_created = true;
+        }
+
         match tokio::fs::write(&path, content).await {
             Ok(()) => {
                 let mut response = json!({
@@ -96,6 +125,9 @@ impl CallableFunction for WriteTool {
 
                 if exists {
                     response["overwritten"] = json!(true);
+                    if backup_created {
+                        response["backup_created"] = json!(true);
+                    }
                     if let Some(size) = previous_size {
                         response["previous_size"] = json!(size);
                     }
@@ -183,5 +215,91 @@ mod tests {
         assert!(result["error"].as_str().unwrap().contains("Access denied"));
         assert_eq!(result["error_code"], error_codes::ACCESS_DENIED);
         assert!(result["context"]["path"].is_string());
+    }
+
+    #[tokio::test]
+    async fn test_write_tool_overwrite_with_backup() {
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().to_path_buf();
+        let file_path = cwd.join("test.txt");
+        let old_content = "old content";
+        fs::write(&file_path, old_content).unwrap();
+
+        let tool = WriteTool::new(cwd.clone(), vec![cwd.clone()]);
+        let args = json!({
+            "file_path": "test.txt",
+            "content": "new content",
+            "backup": true
+        });
+
+        let result = tool.call(args).await.unwrap();
+        assert!(result["success"].as_bool().unwrap());
+        assert!(result["overwritten"].as_bool().unwrap());
+        assert!(result["backup_created"].as_bool().unwrap());
+
+        let saved_content = fs::read_to_string(&file_path).unwrap();
+        assert_eq!(saved_content, "new content");
+
+        let backup_path = cwd.join("test.txt.bak");
+        assert!(backup_path.exists());
+        let backup_content = fs::read_to_string(&backup_path).unwrap();
+        assert_eq!(backup_content, old_content);
+    }
+
+    #[tokio::test]
+    async fn test_write_tool_overwrite_no_backup_default() {
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().to_path_buf();
+        let file_path = cwd.join("test.txt");
+        let old_content = "old content";
+        fs::write(&file_path, old_content).unwrap();
+
+        let tool = WriteTool::new(cwd.clone(), vec![cwd.clone()]);
+        let args = json!({
+            "file_path": "test.txt",
+            "content": "new content"
+        });
+
+        let result = tool.call(args).await.unwrap();
+        assert!(result["success"].as_bool().unwrap());
+        assert!(result["overwritten"].as_bool().unwrap());
+        assert!(result["backup_created"].is_null());
+
+        let backup_path = cwd.join("test.txt.bak");
+        assert!(!backup_path.exists());
+    }
+
+    #[tokio::test]
+    async fn test_write_tool_backup_failure() {
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().to_path_buf();
+        let file_path = cwd.join("test.txt");
+        let old_content = "old content";
+        fs::write(&file_path, old_content).unwrap();
+
+        // Create a directory where the backup file should be
+        let backup_path = cwd.join("test.txt.bak");
+        fs::create_dir(&backup_path).unwrap();
+
+        let tool = WriteTool::new(cwd.clone(), vec![cwd.clone()]);
+        let args = json!({
+            "file_path": "test.txt",
+            "content": "new content",
+            "backup": true
+        });
+
+        let result = tool.call(args).await.unwrap();
+        assert!(result["error"].is_string());
+        assert!(
+            result["error"]
+                .as_str()
+                .unwrap()
+                .contains("Failed to create backup")
+        );
+        assert_eq!(result["error_code"], error_codes::IO_ERROR);
+
+        // Ensure original file was NOT overwritten
+        let saved_content = fs::read_to_string(&file_path).unwrap();
+        assert_eq!(saved_content, old_content);
     }
 }

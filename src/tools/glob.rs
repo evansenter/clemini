@@ -37,6 +37,19 @@ impl CallableFunction for GlobTool {
                     "path": {
                         "type": "string",
                         "description": "Directory to search in (relative to cwd or absolute), defaults to cwd"
+                    },
+                    "sort": {
+                        "type": "string",
+                        "description": "How to sort results: 'name' (alphabetical, default), 'modified' (newest first), 'size' (largest first)",
+                        "enum": ["name", "modified", "size"]
+                    },
+                    "head_limit": {
+                        "type": "integer",
+                        "description": "Maximum number of results to return from the final list (applied after sorting)"
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": "Number of results to skip from the beginning of the final list (for pagination)"
                     }
                 }),
                 vec!["pattern".to_string()],
@@ -52,6 +65,9 @@ impl CallableFunction for GlobTool {
             .ok_or_else(|| FunctionError::ArgumentMismatch("Missing pattern".to_string()))?;
 
         let search_path = args.get("path").and_then(|v| v.as_str());
+        let sort_by = args.get("sort").and_then(|v| v.as_str()).unwrap_or("name");
+        let head_limit = args.get("head_limit").and_then(|v| v.as_u64());
+        let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
 
         // Resolve and validate the search path
         let base_dir = if let Some(p) = search_path {
@@ -80,7 +96,7 @@ impl CallableFunction for GlobTool {
 
         match glob(&pattern_str) {
             Ok(paths) => {
-                let mut matches: Vec<String> = Vec::new();
+                let mut matches: Vec<(String, std::time::SystemTime, u64)> = Vec::new();
                 let mut errors: Vec<String> = Vec::new();
 
                 for entry in paths {
@@ -92,8 +108,13 @@ impl CallableFunction for GlobTool {
                                 Err(_) => continue, // Skip files outside allowed paths
                             };
 
+                            let metadata = match path.metadata() {
+                                Ok(m) => m,
+                                Err(_) => continue,
+                            };
+
                             // Only include files, skip directories
-                            if !path.is_file() {
+                            if !metadata.is_file() {
                                 continue;
                             }
 
@@ -110,7 +131,11 @@ impl CallableFunction for GlobTool {
 
                             // Convert to relative path from cwd
                             let relative = make_relative(&path, &self.cwd);
-                            matches.push(relative);
+                            let modified = metadata
+                                .modified()
+                                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                            let size = metadata.len();
+                            matches.push((relative, modified, size));
                         }
                         Err(e) => {
                             errors.push(e.to_string());
@@ -118,7 +143,28 @@ impl CallableFunction for GlobTool {
                     }
                 }
 
-                if matches.is_empty() {
+                match sort_by {
+                    "modified" => matches.sort_by(|a, b| b.1.cmp(&a.1)), // Newest first
+                    "size" => matches.sort_by(|a, b| b.2.cmp(&a.2)),     // Largest first
+                    _ => matches.sort_by(|a, b| a.0.cmp(&b.0)),          // Name alphabetical
+                }
+
+                let mut matches: Vec<String> = matches.into_iter().map(|m| m.0).collect();
+                let total_found = matches.len();
+
+                if offset > 0 {
+                    if offset >= matches.len() {
+                        matches = Vec::new();
+                    } else {
+                        matches.drain(0..offset);
+                    }
+                }
+
+                if let Some(limit) = head_limit {
+                    matches.truncate(limit as usize);
+                }
+
+                if matches.is_empty() && offset == 0 {
                     // Check if the pattern matches a directory
                     let full_path = base_dir.join(pattern);
                     if validate_path(&full_path, &self.allowed_paths).is_ok_and(|p| p.is_dir()) {
@@ -143,6 +189,8 @@ impl CallableFunction for GlobTool {
                     "pattern": pattern,
                     "matches": matches,
                     "count": matches.len(),
+                    "total_found": total_found,
+                    "truncated": head_limit.is_some_and(|l| total_found > offset + l as usize),
                     "errors": if errors.is_empty() { Value::Null } else { json!(errors) }
                 }))
             }
@@ -244,5 +292,114 @@ mod tests {
         let matches = result["matches"].as_array().unwrap();
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].as_str().unwrap(), "root.txt");
+    }
+
+    #[tokio::test]
+    async fn test_glob_tool_sorting() {
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().to_path_buf();
+
+        // Create files with different names, sizes, and modification times
+        fs::write(cwd.join("a.txt"), "small").unwrap(); // 5 bytes
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        fs::write(cwd.join("c.txt"), "medium content").unwrap(); // 14 bytes
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        fs::write(cwd.join("b.txt"), "very large content indeed").unwrap(); // 25 bytes
+
+        let tool = GlobTool::new(cwd.clone(), vec![cwd.clone()]);
+
+        // Sort by name (alphabetical)
+        let args = json!({
+            "pattern": "*.txt",
+            "sort": "name"
+        });
+        let result = tool.call(args).await.unwrap();
+        let matches: Vec<String> = result["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(matches, vec!["a.txt", "b.txt", "c.txt"]);
+
+        // Sort by size (largest first)
+        let args = json!({
+            "pattern": "*.txt",
+            "sort": "size"
+        });
+        let result = tool.call(args).await.unwrap();
+        let matches: Vec<String> = result["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(matches, vec!["b.txt", "c.txt", "a.txt"]);
+
+        // Sort by modified (newest first)
+        let args = json!({
+            "pattern": "*.txt",
+            "sort": "modified"
+        });
+        let result = tool.call(args).await.unwrap();
+        let matches: Vec<String> = result["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        // c.txt was written last (newest), then b.txt, then a.txt
+        // Wait, I wrote a, then c, then b.
+        // So b is newest, then c, then a.
+        assert_eq!(matches, vec!["b.txt", "c.txt", "a.txt"]);
+    }
+
+    #[tokio::test]
+    async fn test_glob_tool_pagination() {
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().to_path_buf();
+
+        fs::write(cwd.join("a.txt"), "").unwrap();
+        fs::write(cwd.join("b.txt"), "").unwrap();
+        fs::write(cwd.join("c.txt"), "").unwrap();
+        fs::write(cwd.join("d.txt"), "").unwrap();
+
+        let tool = GlobTool::new(cwd.clone(), vec![cwd.clone()]);
+
+        // Test offset
+        let args = json!({
+            "pattern": "*.txt",
+            "offset": 2
+        });
+        let result = tool.call(args).await.unwrap();
+        let matches = result["matches"].as_array().unwrap();
+        assert_eq!(matches.len(), 2);
+        assert_eq!(matches[0].as_str().unwrap(), "c.txt");
+        assert_eq!(matches[1].as_str().unwrap(), "d.txt");
+
+        // Test head_limit
+        let args = json!({
+            "pattern": "*.txt",
+            "head_limit": 2
+        });
+        let result = tool.call(args).await.unwrap();
+        let matches = result["matches"].as_array().unwrap();
+        assert_eq!(matches.len(), 2);
+        assert_eq!(matches[0].as_str().unwrap(), "a.txt");
+        assert_eq!(matches[1].as_str().unwrap(), "b.txt");
+        assert!(result["truncated"].as_bool().unwrap());
+
+        // Test offset + head_limit
+        let args = json!({
+            "pattern": "*.txt",
+            "offset": 1,
+            "head_limit": 2
+        });
+        let result = tool.call(args).await.unwrap();
+        let matches = result["matches"].as_array().unwrap();
+        assert_eq!(matches.len(), 2);
+        assert_eq!(matches[0].as_str().unwrap(), "b.txt");
+        assert_eq!(matches[1].as_str().unwrap(), "c.txt");
+        assert!(result["truncated"].as_bool().unwrap());
     }
 }

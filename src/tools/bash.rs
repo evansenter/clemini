@@ -63,14 +63,21 @@ static CAUTION_PATTERNS: LazyLock<Vec<&str>> = LazyLock::new(|| {
 
 pub struct BashTool {
     cwd: PathBuf,
+    allowed_paths: Vec<PathBuf>,
     timeout_secs: u64,
     is_mcp_mode: bool,
 }
 
 impl BashTool {
-    pub fn new(cwd: PathBuf, timeout_secs: u64, is_mcp_mode: bool) -> Self {
+    pub fn new(
+        cwd: PathBuf,
+        allowed_paths: Vec<PathBuf>,
+        timeout_secs: u64,
+        is_mcp_mode: bool,
+    ) -> Self {
         Self {
             cwd,
+            allowed_paths,
             timeout_secs,
             is_mcp_mode,
         }
@@ -153,6 +160,10 @@ impl CallableFunction for BashTool {
                     "confirmed": {
                         "type": "boolean",
                         "description": "Set to true to confirm execution of a destructive command (required for caution commands in MCP mode)"
+                    },
+                    "working_directory": {
+                        "type": "string",
+                        "description": "Directory to run the command in (must be within allowed paths)"
                     }
                 }),
                 vec!["command".to_string()],
@@ -178,6 +189,24 @@ impl CallableFunction for BashTool {
             .get("confirmed")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false);
+
+        let working_dir = if let Some(wd) = args.get("working_directory").and_then(|v| v.as_str()) {
+            match crate::tools::resolve_and_validate_path(wd, &self.cwd, &self.allowed_paths) {
+                Ok(path) => path,
+                Err(e) => {
+                    return Ok(error_response(
+                        &format!("Invalid working_directory: {}", e),
+                        error_codes::ACCESS_DENIED,
+                        json!({
+                            "command": command,
+                            "working_directory": wd
+                        }),
+                    ));
+                }
+            }
+        } else {
+            self.cwd.clone()
+        };
 
         // Safety check
         if let Some(pattern) = Self::is_blocked(command) {
@@ -238,7 +267,7 @@ impl CallableFunction for BashTool {
         let mut child = Command::new("bash")
             .arg("-c")
             .arg(command)
-            .current_dir(&self.cwd)
+            .current_dir(&working_dir)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -372,7 +401,12 @@ mod tests {
     #[tokio::test]
     async fn test_bash_tool_success() {
         let dir = tempdir().unwrap();
-        let tool = BashTool::new(dir.path().to_path_buf(), 5, false);
+        let tool = BashTool::new(
+            dir.path().to_path_buf(),
+            vec![dir.path().to_path_buf()],
+            5,
+            false,
+        );
         let args = json!({ "command": "echo 'hello world'" });
 
         let result = tool.call(args).await.unwrap();
@@ -383,7 +417,12 @@ mod tests {
     #[tokio::test]
     async fn test_bash_tool_description() {
         let dir = tempdir().unwrap();
-        let tool = BashTool::new(dir.path().to_path_buf(), 5, false);
+        let tool = BashTool::new(
+            dir.path().to_path_buf(),
+            vec![dir.path().to_path_buf()],
+            5,
+            false,
+        );
         let args = json!({
             "command": "echo 'test'",
             "description": "testing description"
@@ -400,7 +439,12 @@ mod tests {
     #[tokio::test]
     async fn test_bash_tool_failure() {
         let dir = tempdir().unwrap();
-        let tool = BashTool::new(dir.path().to_path_buf(), 5, false);
+        let tool = BashTool::new(
+            dir.path().to_path_buf(),
+            vec![dir.path().to_path_buf()],
+            5,
+            false,
+        );
         let args = json!({ "command": "exit 1" });
 
         let result = tool.call(args).await.unwrap();
@@ -411,7 +455,12 @@ mod tests {
     #[tokio::test]
     async fn test_bash_tool_timeout() {
         let dir = tempdir().unwrap();
-        let tool = BashTool::new(dir.path().to_path_buf(), 1, false);
+        let tool = BashTool::new(
+            dir.path().to_path_buf(),
+            vec![dir.path().to_path_buf()],
+            1,
+            false,
+        );
         let args = json!({ "command": "sleep 2" });
 
         let result = tool.call(args).await.unwrap();
@@ -446,7 +495,12 @@ mod tests {
     #[tokio::test]
     async fn test_bash_tool_stderr() {
         let dir = tempdir().unwrap();
-        let tool = BashTool::new(dir.path().to_path_buf(), 5, false);
+        let tool = BashTool::new(
+            dir.path().to_path_buf(),
+            vec![dir.path().to_path_buf()],
+            5,
+            false,
+        );
         let args = json!({ "command": "echo 'error message' >&2" });
 
         let result = tool.call(args).await.unwrap();
@@ -457,7 +511,12 @@ mod tests {
     #[tokio::test]
     async fn test_bash_tool_cwd() {
         let dir = tempdir().unwrap();
-        let tool = BashTool::new(dir.path().to_path_buf(), 5, false);
+        let tool = BashTool::new(
+            dir.path().to_path_buf(),
+            vec![dir.path().to_path_buf()],
+            5,
+            false,
+        );
         let args = json!({ "command": "pwd" });
 
         let result = tool.call(args).await.unwrap();
@@ -467,6 +526,59 @@ mod tests {
         let expected = dir.path().canonicalize().unwrap();
         let actual = std::path::Path::new(pwd).canonicalize().unwrap();
         assert_eq!(actual, expected);
+    }
+
+    #[tokio::test]
+    async fn test_bash_tool_working_directory() {
+        let dir = tempdir().unwrap();
+        let subdir = dir.path().join("subdir");
+        std::fs::create_dir(&subdir).unwrap();
+
+        let tool = BashTool::new(
+            dir.path().to_path_buf(),
+            vec![dir.path().to_path_buf()],
+            5,
+            false,
+        );
+
+        // Run pwd in subdir
+        let args = json!({
+            "command": "pwd",
+            "working_directory": "subdir"
+        });
+
+        let result = tool.call(args).await.unwrap();
+        assert!(result["success"].as_bool().unwrap());
+        let pwd = result["stdout"].as_str().unwrap().trim();
+        let expected = subdir.canonicalize().unwrap();
+        let actual = std::path::Path::new(pwd).canonicalize().unwrap();
+        assert_eq!(actual, expected);
+    }
+
+    #[tokio::test]
+    async fn test_bash_tool_invalid_working_directory() {
+        let dir = tempdir().unwrap();
+        let tool = BashTool::new(
+            dir.path().to_path_buf(),
+            vec![dir.path().to_path_buf()],
+            5,
+            false,
+        );
+
+        // Try to run in a directory outside allowed paths
+        let args = json!({
+            "command": "pwd",
+            "working_directory": "/tmp"
+        });
+
+        let result = tool.call(args).await.unwrap();
+        assert!(
+            result["error"]
+                .as_str()
+                .unwrap()
+                .contains("outside allowed paths")
+        );
+        assert_eq!(result["error_code"], error_codes::ACCESS_DENIED);
     }
 
     #[test]

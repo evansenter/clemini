@@ -66,7 +66,7 @@ impl CallableFunction for EditTool {
     fn declaration(&self) -> FunctionDeclaration {
         FunctionDeclaration::new(
             "edit".to_string(),
-            "Replace a specific string in a file with new content. If 'replace_all' is true, all occurrences are replaced. Otherwise, 'old_string' must match exactly and uniquely in the file.".to_string(),
+            "Replace a specific string in a file with new content. If 'replace_all' is true, all occurrences are replaced. Otherwise, 'old_string' must match exactly and uniquely in the file. If 'create_if_not_exists' is true, the file will be created if it doesn't exist.".to_string(),
             FunctionParameters::new(
                 "object".to_string(),
                 json!({
@@ -76,7 +76,7 @@ impl CallableFunction for EditTool {
                     },
                     "old_string": {
                         "type": "string",
-                        "description": "The exact string to find and replace"
+                        "description": "The exact string to find and replace. Optional if create_if_not_exists is true."
                     },
                     "new_string": {
                         "type": "string",
@@ -85,9 +85,13 @@ impl CallableFunction for EditTool {
                     "replace_all": {
                         "type": "boolean",
                         "description": "If true, replace all occurrences of 'old_string'. If false (default), 'old_string' must be unique."
+                    },
+                    "create_if_not_exists": {
+                        "type": "boolean",
+                        "description": "If true, create the file if it does not exist. In this case, 'old_string' is ignored and the file is created with 'new_string' as its content."
                     }
                 }),
-                vec!["file_path".to_string(), "old_string".to_string(), "new_string".to_string()],
+                vec!["file_path".to_string(), "new_string".to_string()],
             ),
         )
     }
@@ -99,10 +103,7 @@ impl CallableFunction for EditTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| FunctionError::ArgumentMismatch("Missing file_path".to_string()))?;
 
-        let old_string = args
-            .get("old_string")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| FunctionError::ArgumentMismatch("Missing old_string".to_string()))?;
+        let old_string = args.get("old_string").and_then(|v| v.as_str());
 
         let new_string = args
             .get("new_string")
@@ -114,7 +115,14 @@ impl CallableFunction for EditTool {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
-        if old_string == new_string {
+        let create_if_not_exists = args
+            .get("create_if_not_exists")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        if let Some(old) = old_string
+            && old == new_string
+        {
             return Ok(error_response(
                 "The 'old_string' and 'new_string' are the same. No replacement needed.",
                 error_codes::INVALID_ARGUMENT,
@@ -136,7 +144,8 @@ impl CallableFunction for EditTool {
 
         // Read the file
         let content = match tokio::fs::read_to_string(&path).await {
-            Ok(c) => c,
+            Ok(c) => Some(c),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
             Err(e) => {
                 return Ok(error_response(
                     &format!(
@@ -145,6 +154,51 @@ impl CallableFunction for EditTool {
                         e
                     ),
                     error_codes::IO_ERROR,
+                    json!({"path": file_path}),
+                ));
+            }
+        };
+
+        let content = match content {
+            Some(c) => c,
+            None if create_if_not_exists => {
+                // Create new file
+                match tokio::fs::write(&path, new_string).await {
+                    Ok(()) => {
+                        return Ok(json!({
+                            "file_path": file_path,
+                            "success": true,
+                            "created": true,
+                            "file_size": new_string.len()
+                        }));
+                    }
+                    Err(e) => {
+                        return Ok(error_response(
+                            &format!("Failed to create {}: {}", path.display(), e),
+                            error_codes::IO_ERROR,
+                            json!({"path": file_path}),
+                        ));
+                    }
+                }
+            }
+            None => {
+                return Ok(error_response(
+                    &format!(
+                        "File not found: {}. Set 'create_if_not_exists' to true to create it.",
+                        file_path
+                    ),
+                    error_codes::NOT_FOUND,
+                    json!({"path": file_path}),
+                ));
+            }
+        };
+
+        let old_string = match old_string {
+            Some(s) => s,
+            None => {
+                return Ok(error_response(
+                    "Missing 'old_string' for existing file. 'old_string' is only optional when 'create_if_not_exists' is true and the file does not exist.",
+                    error_codes::INVALID_ARGUMENT,
                     json!({"path": file_path}),
                 ));
             }
@@ -465,7 +519,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_edit_tool_file_not_exists() {
+    async fn test_edit_tool_file_not_exists_default() {
         let dir = tempdir().unwrap();
         let cwd = dir.path().to_path_buf();
 
@@ -477,7 +531,72 @@ mod tests {
         });
 
         let result = tool.call(args).await.unwrap();
-        assert!(result["error"].as_str().unwrap().contains("Failed to read"));
-        assert_eq!(result["error_code"], error_codes::IO_ERROR);
+        assert!(result["error"].as_str().unwrap().contains("File not found"));
+        assert_eq!(result["error_code"], error_codes::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_edit_tool_create_if_not_exists() {
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().to_path_buf();
+
+        let tool = EditTool::new(cwd.clone(), vec![cwd.clone()]);
+        let args = json!({
+            "file_path": "new_file.txt",
+            "new_string": "initial content",
+            "create_if_not_exists": true
+        });
+
+        let result = tool.call(args).await.unwrap();
+        assert!(result["success"].as_bool().unwrap());
+        assert!(result["created"].as_bool().unwrap());
+
+        let saved_content = fs::read_to_string(cwd.join("new_file.txt")).unwrap();
+        assert_eq!(saved_content, "initial content");
+    }
+
+    #[tokio::test]
+    async fn test_edit_tool_create_if_not_exists_with_old_string_ignored() {
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().to_path_buf();
+
+        let tool = EditTool::new(cwd.clone(), vec![cwd.clone()]);
+        let args = json!({
+            "file_path": "new_file.txt",
+            "old_string": "something",
+            "new_string": "initial content",
+            "create_if_not_exists": true
+        });
+
+        let result = tool.call(args).await.unwrap();
+        assert!(result["success"].as_bool().unwrap());
+        assert!(result["created"].as_bool().unwrap());
+
+        let saved_content = fs::read_to_string(cwd.join("new_file.txt")).unwrap();
+        assert_eq!(saved_content, "initial content");
+    }
+
+    #[tokio::test]
+    async fn test_edit_tool_existing_file_missing_old_string_error() {
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().to_path_buf();
+        let file_path = cwd.join("test.txt");
+        fs::write(&file_path, "content").unwrap();
+
+        let tool = EditTool::new(cwd.clone(), vec![cwd.clone()]);
+        let args = json!({
+            "file_path": "test.txt",
+            "new_string": "new content",
+            "create_if_not_exists": true
+        });
+
+        let result = tool.call(args).await.unwrap();
+        assert!(
+            result["error"]
+                .as_str()
+                .unwrap()
+                .contains("Missing 'old_string' for existing file")
+        );
+        assert_eq!(result["error_code"], error_codes::INVALID_ARGUMENT);
     }
 }
