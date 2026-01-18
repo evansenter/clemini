@@ -30,7 +30,7 @@ use colored::Colorize;
 use serde_json::Value;
 use termimad::MadSkin;
 
-use crate::log_event;
+use crate::logging::log_event;
 
 // ============================================================================
 // Markdown Rendering Infrastructure
@@ -130,7 +130,7 @@ pub fn flush_streaming_buffer() -> Option<String> {
 /// Used by EventHandlers after rendering with `render_streaming_chunk()`.
 pub fn write_to_streaming_log(rendered: &str) {
     // Skip logging during tests unless explicitly enabled
-    if !crate::is_logging_enabled() {
+    if !crate::logging::is_logging_enabled() {
         return;
     }
 

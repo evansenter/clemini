@@ -13,7 +13,9 @@ release:
 	cargo build --release
 
 test:
-	cargo test
+	cargo test --lib
+	cargo test --bin clemini
+	cargo test --test confirmation_tests
 
 clippy:
 	cargo clippy -- -D warnings

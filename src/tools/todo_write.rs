@@ -4,6 +4,7 @@ use genai_rs::{CallableFunction, FunctionDeclaration, FunctionError, FunctionPar
 use serde_json::{Value, json};
 use tracing::instrument;
 
+#[derive(Default)]
 pub struct TodoWriteTool;
 
 #[derive(Debug, PartialEq, Clone)]
@@ -145,9 +146,9 @@ impl CallableFunction for TodoWriteTool {
     async fn call(&self, args: Value) -> Result<Value, FunctionError> {
         let todos = self.parse_args(args)?;
 
-        crate::log_event(""); // Leading newline before list
+        crate::logging::log_event(""); // Leading newline before list
         for todo in &todos {
-            crate::log_event(&Self::render_todo(todo));
+            crate::logging::log_event(&Self::render_todo(todo));
         }
 
         Ok(json!({

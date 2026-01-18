@@ -4,6 +4,7 @@ use genai_rs::{CallableFunction, FunctionDeclaration, FunctionError, FunctionPar
 use serde_json::{Value, json};
 use tracing::instrument;
 
+#[derive(Default)]
 pub struct KillShellTool;
 
 impl KillShellTool {
@@ -46,7 +47,7 @@ impl CallableFunction for KillShellTool {
         if let Some(mut child) = child.take() {
             match child.kill().await {
                 Ok(_) => {
-                    crate::log_event(&format!("[kill_shell] Killed task {}", task_id));
+                    crate::logging::log_event(&format!("[kill_shell] Killed task {}", task_id));
                     Ok(json!({
                         "task_id": task_id,
                         "status": "killed",

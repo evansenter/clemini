@@ -10,6 +10,7 @@ struct SearchArgs {
     blocked_domains: Option<Vec<String>>,
 }
 
+#[derive(Default)]
 pub struct WebSearchTool {}
 
 impl WebSearchTool {

@@ -870,16 +870,20 @@ mod tests {
             "command": "rm /tmp/test",
             "message": "Confirm?"
         });
-        assert!(result_with_confirmation
-            .get("needs_confirmation")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false));
+        assert!(
+            result_with_confirmation
+                .get("needs_confirmation")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+        );
 
         // Test that normal results don't trigger it
         let normal_result = json!({"output": "success"});
-        assert!(!normal_result
-            .get("needs_confirmation")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false));
+        assert!(
+            !normal_result
+                .get("needs_confirmation")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+        );
     }
 }
