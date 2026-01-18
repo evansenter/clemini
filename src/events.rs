@@ -192,7 +192,7 @@ pub fn format_tool_args(tool_name: &str, args: &Value) -> String {
 /// Format tool executing line for display.
 pub fn format_tool_executing(name: &str, args: &Value) -> String {
     let args_str = format_tool_args(name, args);
-    format!("{} {} {}", "┌─".dimmed(), name.cyan(), args_str.dimmed())
+    format!("┌─ {} {}", name.cyan(), args_str)
 }
 
 /// Rough token estimate: ~4 chars per token.
