@@ -26,7 +26,7 @@ impl CallableFunction for GlobTool {
     fn declaration(&self) -> FunctionDeclaration {
         FunctionDeclaration::new(
             "glob".to_string(),
-            "Find files matching a glob pattern. Returns list of matching file paths relative to cwd. Use patterns like '**/*.rs' for recursive search or 'src/*.rs' for single directory.".to_string(),
+            "Find files matching a glob pattern. Use patterns like '**/*.rs' for recursive search or 'src/*.rs' for single directory. Returns: {matches[], count, total_found, truncated}".to_string(),
             FunctionParameters::new(
                 "object".to_string(),
                 json!({
@@ -34,22 +34,22 @@ impl CallableFunction for GlobTool {
                         "type": "string",
                         "description": "Glob pattern to match (e.g., '**/*.rs', 'src/**/*.ts', '*.json')"
                     },
-                    "path": {
+                    "directory": {
                         "type": "string",
-                        "description": "Directory to search in (relative to cwd or absolute), defaults to cwd"
+                        "description": "Directory to search in (relative to cwd or absolute). Defaults to current working directory."
                     },
                     "sort": {
                         "type": "string",
-                        "description": "How to sort results: 'name' (alphabetical, default), 'modified' (newest first), 'size' (largest first)",
+                        "description": "How to sort results: 'name' (alphabetical), 'modified' (newest first), 'size' (largest first). (default: 'name')",
                         "enum": ["name", "modified", "size"]
                     },
                     "head_limit": {
                         "type": "integer",
-                        "description": "Maximum number of results to return from the final list (applied after sorting)"
+                        "description": "Maximum number of results to return from the final list (applied after sorting). (default: no limit)"
                     },
                     "offset": {
                         "type": "integer",
-                        "description": "Number of results to skip from the beginning of the final list (for pagination)"
+                        "description": "Number of results to skip from the beginning of the final list (for pagination). (default: 0)"
                     }
                 }),
                 vec!["pattern".to_string()],
@@ -64,7 +64,7 @@ impl CallableFunction for GlobTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| FunctionError::ArgumentMismatch("Missing pattern".to_string()))?;
 
-        let search_path = args.get("path").and_then(|v| v.as_str());
+        let search_path = args.get("directory").and_then(|v| v.as_str());
         let sort_by = args.get("sort").and_then(|v| v.as_str()).unwrap_or("name");
         let head_limit = args.get("head_limit").and_then(|v| v.as_u64());
         let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
@@ -276,7 +276,7 @@ mod tests {
         // Search in subdir
         let args = json!({
             "pattern": "*.txt",
-            "path": "subdir"
+            "directory": "subdir"
         });
 
         let result = tool.call(args).await.unwrap();

@@ -33,14 +33,13 @@ impl CallableFunction for WebFetchTool {
     fn declaration(&self) -> FunctionDeclaration {
         FunctionDeclaration::new(
             "web_fetch".to_string(),
-            "Fetch the content of a web page from a URL and optionally process it with a prompt."
-                .to_string(),
+            "Fetch the content of a web page from a URL and optionally process it with a prompt. Returns: {content} or {processed_content} if prompt provided".to_string(),
             FunctionParameters::new(
                 "object".to_string(),
                 json!({
                     "url": {
                         "type": "string",
-                        "description": "The URL to fetch"
+                        "description": "The URL to fetch (e.g., 'https://docs.rs/tokio/latest/tokio')"
                     },
                     "prompt": {
                         "type": "string",

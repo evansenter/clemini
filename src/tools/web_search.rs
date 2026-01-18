@@ -53,7 +53,8 @@ impl CallableFunction for WebSearchTool {
     fn declaration(&self) -> FunctionDeclaration {
         FunctionDeclaration::new(
             "web_search".to_string(),
-            "Search the web using DuckDuckGo's instant answer API.".to_string(),
+            "Search the web using DuckDuckGo's instant answer API. Returns: {results[], query}"
+                .to_string(),
             FunctionParameters::new(
                 "object".to_string(),
                 json!({
@@ -196,7 +197,7 @@ mod tests {
         assert_eq!(decl.name(), "web_search");
         assert_eq!(
             decl.description(),
-            "Search the web using DuckDuckGo's instant answer API."
+            "Search the web using DuckDuckGo's instant answer API. Returns: {results[], query}"
         );
 
         let params = decl.parameters();

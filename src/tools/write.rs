@@ -22,7 +22,7 @@ impl CallableFunction for WriteTool {
     fn declaration(&self) -> FunctionDeclaration {
         FunctionDeclaration::new(
             "write_file".to_string(),
-            "Write content to a file. Creates the file if it doesn't exist, overwrites if it does. Creates parent directories as needed. Optionally creates a backup if the file already exists.".to_string(),
+            "Write content to a file. Creates the file if it doesn't exist, overwrites if it does. Creates parent directories as needed. Returns: {success, bytes_written, created?, overwritten?, backup_created?}".to_string(),
             FunctionParameters::new(
                 "object".to_string(),
                 json!({
@@ -36,7 +36,7 @@ impl CallableFunction for WriteTool {
                     },
                     "backup": {
                         "type": "boolean",
-                        "description": "Whether to create a backup of the existing file (as {filename}.bak) before overwriting. Defaults to false."
+                        "description": "Whether to create a backup of the existing file (as {filename}.bak) before overwriting. (default: false)"
                     }
                 }),
                 vec!["file_path".to_string(), "content".to_string()],

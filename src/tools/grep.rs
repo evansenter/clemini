@@ -236,25 +236,25 @@ impl CallableFunction for GrepTool {
     fn declaration(&self) -> FunctionDeclaration {
         FunctionDeclaration::new(
             "grep".to_string(),
-            "Search for a pattern in files using ripgrep. Supports regex patterns, case-insensitive search, and different output modes (content, file paths only, or match counts).".to_string(),
+            "Search for a pattern in files using ripgrep. Supports regex, case-insensitive search, and different output modes (content, files_with_matches, count). Returns: {matches[], count, total_found, truncated?}".to_string(),
             FunctionParameters::new(
                 "object".to_string(),
                 json!({
                     "pattern": {
                         "type": "string",
-                        "description": "Regex pattern to search for"
+                        "description": "Regex pattern to search for (e.g., 'fn\\s+\\w+', 'TODO|FIXME', 'impl.*for')"
                     },
                     "file_pattern": {
                         "type": "string",
-                        "description": "Glob pattern for files to search (e.g., '**/*.rs', 'src/*.ts'). Defaults to '**/*' if not specified."
+                        "description": "Glob pattern for files to search (e.g., '**/*.rs', 'src/*.ts'). (default: '**/*')"
                     },
                     "type": {
                         "type": "string",
                         "description": "Filter by file type (e.g., 'rust', 'js', 'ts', 'py', 'go', 'json', 'md', 'toml', 'yaml')."
                     },
-                    "path": {
+                    "directory": {
                         "type": "string",
-                        "description": "Directory to search in (relative to cwd or absolute), defaults to cwd"
+                        "description": "Directory to search in (relative to cwd or absolute). Defaults to current working directory."
                     },
                     "case_insensitive": {
                         "type": "boolean",
@@ -278,11 +278,11 @@ impl CallableFunction for GrepTool {
                     },
                     "head_limit": {
                         "type": "integer",
-                        "description": "Maximum number of results to return from the final list (applied after search)"
+                        "description": "Maximum number of results to return from the final list (applied after search). (default: no limit)"
                     },
                     "offset": {
                         "type": "integer",
-                        "description": "Number of results to skip from the beginning of the final list (for pagination)"
+                        "description": "Number of results to skip from the beginning of the final list (for pagination). (default: 0)"
                     },
                     "multiline": {
                         "type": "boolean",
@@ -339,7 +339,7 @@ impl CallableFunction for GrepTool {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
-        let search_path = args.get("path").and_then(|v| v.as_str());
+        let search_path = args.get("directory").and_then(|v| v.as_str());
 
         let type_arg = args.get("type").and_then(|v| v.as_str());
 
@@ -692,10 +692,10 @@ mod tests {
 
         let tool = GrepTool::new(cwd.clone(), vec![cwd.clone()]);
 
-        // Search ONLY in subdir using the new path parameter
+        // Search ONLY in subdir using the directory parameter
         let args = json!({
             "pattern": "match",
-            "path": "subdir"
+            "directory": "subdir"
         });
 
         let result = tool.call(args).await.unwrap();

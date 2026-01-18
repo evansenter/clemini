@@ -33,7 +33,7 @@ impl CallableFunction for AskUserTool {
     fn declaration(&self) -> FunctionDeclaration {
         FunctionDeclaration::new(
             "ask_user".to_string(),
-            "Ask the user a question and wait for their response. Use this when you need clarification or a decision from the user.".to_string(),
+            "Ask the user a question and wait for their response. Use this when you need clarification or a decision from the user. Returns: {answer}".to_string(),
             FunctionParameters::new(
                 "object".to_string(),
                 json!({
@@ -92,7 +92,7 @@ mod tests {
         assert_eq!(decl.name(), "ask_user");
         assert_eq!(
             decl.description(),
-            "Ask the user a question and wait for their response. Use this when you need clarification or a decision from the user."
+            "Ask the user a question and wait for their response. Use this when you need clarification or a decision from the user. Returns: {answer}"
         );
 
         let params = decl.parameters();

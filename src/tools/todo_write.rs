@@ -110,7 +110,7 @@ impl CallableFunction for TodoWriteTool {
     fn declaration(&self) -> FunctionDeclaration {
         FunctionDeclaration::new(
             "todo_write".to_string(),
-            "Display a todo list to track progress on multi-step tasks.".to_string(),
+            "Track progress on multi-step tasks. Call this to create or update your todo list. Each call replaces the entire list, so include all items (completed, in_progress, pending). Mark exactly one item as in_progress at a time. Returns: {success, count}".to_string(),
             FunctionParameters::new(
                 "object".to_string(),
                 json!({
@@ -171,7 +171,7 @@ mod tests {
         assert_eq!(decl.name(), "todo_write");
         assert_eq!(
             decl.description(),
-            "Display a todo list to track progress on multi-step tasks."
+            "Track progress on multi-step tasks. Call this to create or update your todo list. Each call replaces the entire list, so include all items (completed, in_progress, pending). Mark exactly one item as in_progress at a time. Returns: {success, count}"
         );
 
         let params = decl.parameters();

@@ -17,13 +17,13 @@ impl CallableFunction for KillShellTool {
     fn declaration(&self) -> FunctionDeclaration {
         FunctionDeclaration::new(
             "kill_shell".to_string(),
-            "Kill a background bash task started with run_in_background=true.".to_string(),
+            "Kill a background bash task started with run_in_background=true. Returns: {task_id, status, success}".to_string(),
             FunctionParameters::new(
                 "object".to_string(),
                 json!({
                     "task_id": {
                         "type": "string",
-                        "description": "The task ID to kill"
+                        "description": "The task ID to kill (returned by bash with run_in_background=true)"
                     }
                 }),
                 vec!["task_id".to_string()],

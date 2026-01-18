@@ -66,7 +66,7 @@ impl CallableFunction for EditTool {
     fn declaration(&self) -> FunctionDeclaration {
         FunctionDeclaration::new(
             "edit".to_string(),
-            "Replace a specific string in a file with new content. If 'replace_all' is true, all occurrences are replaced. Otherwise, 'old_string' must match exactly and uniquely in the file. If 'create_if_not_exists' is true, the file will be created if it doesn't exist.".to_string(),
+            "Replace a specific string in a file with new content. If 'replace_all' is true, all occurrences are replaced. Otherwise, 'old_string' must match exactly and uniquely in the file. Returns: {success, replacements, file_size} or {error, suggestions?}".to_string(),
             FunctionParameters::new(
                 "object".to_string(),
                 json!({
@@ -84,11 +84,11 @@ impl CallableFunction for EditTool {
                     },
                     "replace_all": {
                         "type": "boolean",
-                        "description": "If true, replace all occurrences of 'old_string'. If false (default), 'old_string' must be unique."
+                        "description": "If true, replace all occurrences of 'old_string'. If false, 'old_string' must be unique. (default: false)"
                     },
                     "create_if_not_exists": {
                         "type": "boolean",
-                        "description": "If true, create the file if it does not exist. In this case, 'old_string' is ignored and the file is created with 'new_string' as its content."
+                        "description": "If true, create the file if it does not exist. In this case, 'old_string' is ignored and the file is created with 'new_string' as its content. (default: false)"
                     }
                 }),
                 vec!["file_path".to_string(), "new_string".to_string()],

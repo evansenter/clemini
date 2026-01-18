@@ -23,7 +23,7 @@ impl CallableFunction for ReadTool {
     fn declaration(&self) -> FunctionDeclaration {
         FunctionDeclaration::new(
             "read_file".to_string(),
-            "Read the contents of a file. Returns the file contents as text with line numbers. Use this to examine source code, configuration files, or other text documents. For large files, use offset and limit to read in chunks. By default, it reads the first 2000 lines.".to_string(),
+            "Read the contents of a file. Returns the file contents as text with line numbers. Use this to examine source code, configuration files, or other text documents. For large files, use offset and limit to read in chunks. Returns: {contents, total_lines, truncated?}".to_string(),
             FunctionParameters::new(
                 "object".to_string(),
                 json!({
@@ -33,11 +33,11 @@ impl CallableFunction for ReadTool {
                     },
                     "offset": {
                         "type": "integer",
-                        "description": "The 1-indexed line number to start reading from. For example, to start from the beginning of the file, use 1. If the offset is beyond the end of the file, an error is returned. Defaults to 1."
+                        "description": "The 1-indexed line number to start reading from. For example, to start from the beginning of the file, use 1. If the offset is beyond the end of the file, an error is returned. (default: 1)"
                     },
                     "limit": {
                         "type": "integer",
-                        "description": "The maximum number of lines to read. If not specified, defaults to 2000 lines. Use this to avoid hitting context limits with very large files. If set to 0, no lines will be returned (only metadata like total_lines)."
+                        "description": "The maximum number of lines to read. Use this to avoid hitting context limits with very large files. If set to 0, no lines will be returned (only metadata like total_lines). (default: 2000)"
                     }
                 }),
                 vec!["file_path".to_string()],

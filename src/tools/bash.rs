@@ -148,13 +148,13 @@ impl CallableFunction for BashTool {
     fn declaration(&self) -> FunctionDeclaration {
         FunctionDeclaration::new(
             "bash".to_string(),
-            "Execute a bash command and return the output. Use this for running builds, tests, git operations, and other shell commands.".to_string(),
+            "Execute a bash command and return the output. Use for builds, tests, git, and shell commands. Returns: {stdout, stderr, exit_code} or {task_id, status} when run_in_background=true".to_string(),
             FunctionParameters::new(
                 "object".to_string(),
                 json!({
                     "command": {
                         "type": "string",
-                        "description": "The bash command to execute"
+                        "description": "The bash command to execute (e.g., 'cargo test', 'gh issue view 42', 'git status')"
                     },
                     "description": {
                         "type": "string",
@@ -166,15 +166,15 @@ impl CallableFunction for BashTool {
                     },
                     "confirmed": {
                         "type": "boolean",
-                        "description": "Set to true to confirm execution of a destructive command (required for caution commands in MCP mode)"
+                        "description": "Set to true to skip confirmation for potentially destructive commands (rm, sudo, git push --force, etc.). (default: false)"
                     },
                     "working_directory": {
                         "type": "string",
-                        "description": "Directory to run the command in (must be within allowed paths)"
+                        "description": "Directory to run the command in (must be within allowed paths). (default: current working directory)"
                     },
                     "run_in_background": {
                         "type": "boolean",
-                        "description": "If true, run the command in the background and return a task_id immediately"
+                        "description": "If true, run the command in the background and return a task_id immediately. (default: false)"
                     }
                 }),
                 vec!["command".to_string()],
