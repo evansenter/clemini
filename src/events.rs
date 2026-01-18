@@ -544,6 +544,38 @@ mod tests {
     }
 
     #[test]
+    fn test_dispatch_tool_result_includes_args_and_result_tokens() {
+        use crate::agent::AgentEvent;
+        use genai_rs::FunctionExecutionResult;
+
+        let (mut handler, events) = RecordingHandler::new(true);
+
+        // Create a result with known args and result sizes
+        let args = serde_json::json!({"file_path": "/path/to/file.txt", "old_string": "hello", "new_string": "world"});
+        let result_data = serde_json::json!({"success": true, "bytes": 100});
+
+        let args_tokens = estimate_tokens(&args);
+        let result_tokens = estimate_tokens(&result_data);
+        let expected_total = args_tokens + result_tokens;
+
+        let result = FunctionExecutionResult::new(
+            "edit".to_string(),
+            "call-1".to_string(),
+            args,
+            result_data,
+            Duration::from_millis(10),
+        );
+
+        dispatch_event(&mut handler, &AgentEvent::ToolResult(result));
+
+        // Verify the token count passed to handler includes both args AND result
+        let events = events.borrow();
+        assert_eq!(events.len(), 1);
+        // The recording format is: "tool_result:name:duration:tokens:error:msg"
+        assert!(events[0].contains(&format!("{}tok", expected_total)));
+    }
+
+    #[test]
     fn test_format_tool_result_duration() {
         colored::control::set_override(false);
 
