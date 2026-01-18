@@ -596,7 +596,7 @@ async fn main() -> Result<()> {
 enum AppEvent {
     StreamChunk(String),
     ToolExecuting { name: String, args: Value },
-    ToolCompleted { name: String, duration_ms: u64 },
+    ToolCompleted { name: String, duration_ms: u64, tokens: u32 },
     InteractionComplete(Result<InteractionResult>),
     ContextWarning(String),
 }
@@ -637,6 +637,7 @@ fn convert_agent_event_to_app_events(event: &AgentEvent) -> Vec<AppEvent> {
         AgentEvent::ToolResult(result) => vec![AppEvent::ToolCompleted {
             name: result.name.clone(),
             duration_ms: result.duration.as_millis() as u64,
+            tokens: events::estimate_tokens(&result.args) + events::estimate_tokens(&result.result),
         }],
         AgentEvent::ContextWarning { percentage, .. } => {
             vec![AppEvent::ContextWarning(format_context_warning(
@@ -1055,14 +1056,15 @@ async fn run_tui_event_loop(
                         );
                         app.append_to_chat(&msg);
                     }
-                    AppEvent::ToolCompleted { name, duration_ms } => {
-                        // Tool completed - show duration
+                    AppEvent::ToolCompleted { name, duration_ms, tokens } => {
+                        // Tool completed - show duration and token estimate
                         let duration_str = format_tool_duration(duration_ms);
                         let msg = format!(
-                            "  {} {} {}",
+                            "  {} {} {} ~{} tok",
                             "└─".dimmed(),
                             name.dimmed(),
-                            duration_str.dimmed()
+                            duration_str.dimmed(),
+                            tokens
                         );
                         app.append_to_chat(&msg);
                         app.append_to_chat(""); // Single blank line after tool completes
@@ -1527,9 +1529,10 @@ mod event_handling_tests {
 
         assert_eq!(app_events.len(), 1);
         match &app_events[0] {
-            AppEvent::ToolCompleted { name, duration_ms } => {
+            AppEvent::ToolCompleted { name, duration_ms, tokens } => {
                 assert_eq!(name, "bash");
                 assert_eq!(*duration_ms, 150);
+                assert!(*tokens > 0); // Should have some token estimate
             }
             _ => panic!("Expected ToolCompleted"),
         }
