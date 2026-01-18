@@ -580,8 +580,8 @@ impl McpServer {
                         continue;
                     }
                     AgentEvent::ToolResult(result) => {
-                        // Log to human-readable log
-                        let tokens = estimate_tokens(&result.result);
+                        // Log to human-readable log (include both args and result for full context impact)
+                        let tokens = estimate_tokens(&result.args) + estimate_tokens(&result.result);
                         let has_error = result.is_error();
                         crate::log_event(&format_tool_result(
                             &result.name,

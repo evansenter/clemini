@@ -195,7 +195,7 @@ pub fn dispatch_event<H: EventHandler>(handler: &mut H, event: &crate::agent::Ag
             }
         }
         AgentEvent::ToolResult(result) => {
-            let tokens = estimate_tokens(&result.result);
+            let tokens = estimate_tokens(&result.args) + estimate_tokens(&result.result);
             let has_error = result.is_error();
             let error_message = if has_error {
                 result.error_message()
