@@ -74,11 +74,13 @@ pub struct InteractionResult {
     pub context_size: u32,
     pub total_tokens: u32,
     pub tool_calls: Vec<String>,
+    pub needs_confirmation: Option<serde_json::Value>,
 }
 
 struct ToolExecutionResult {
     results: Vec<Content>,
     cancelled: bool,
+    needs_confirmation: Option<Value>,
 }
 
 /// Check context window usage and send warning event if needed.
@@ -118,6 +120,7 @@ async fn execute_tools(
             return ToolExecutionResult {
                 results,
                 cancelled: true,
+                needs_confirmation: None,
             };
         }
 
@@ -147,13 +150,28 @@ async fn execute_tools(
         results.push(Content::function_result(
             call_name.to_string(),
             call_id.clone().unwrap_or_default(),
-            result,
+            result.clone(),
         ));
+
+        // If tool requires confirmation, stop and return to caller.
+        // This prevents Gemini from self-confirming.
+        if result
+            .get("needs_confirmation")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            return ToolExecutionResult {
+                results,
+                cancelled: false,
+                needs_confirmation: Some(result),
+            };
+        }
     }
 
     ToolExecutionResult {
         results,
         cancelled: false,
+        needs_confirmation: None,
     }
 }
 
@@ -279,6 +297,7 @@ pub async fn run_interaction(
                 context_size: current_context_size,
                 total_tokens,
                 tool_calls,
+                needs_confirmation: None,
             });
         }
 
@@ -327,6 +346,18 @@ pub async fn run_interaction(
                 context_size: current_context_size,
                 total_tokens,
                 tool_calls,
+                needs_confirmation: None,
+            });
+        }
+
+        if let Some(confirmation) = tool_result.needs_confirmation {
+            return Ok(InteractionResult {
+                id: last_id,
+                response: full_response,
+                context_size: current_context_size,
+                total_tokens,
+                tool_calls,
+                needs_confirmation: Some(confirmation),
             });
         }
 
@@ -363,6 +394,7 @@ pub async fn run_interaction(
         context_size: current_context_size,
         total_tokens,
         tool_calls,
+        needs_confirmation: None,
     })
 }
 
