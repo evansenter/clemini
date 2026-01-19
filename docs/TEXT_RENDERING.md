@@ -183,6 +183,7 @@ When the edit tool successfully modifies a file, it displays a colored diff with
 ### Syntax Highlighting
 
 Diffs use `syntect` for language-aware syntax highlighting based on file extension:
+- Theme: Catppuccin Mocha (bundled at `themes/catppuccin-mocha.tmTheme`)
 - Foreground colors: Language-specific token colors (keywords, strings, etc.)
 - Background colors distinguish line types:
   - Deletions: Dark red background `rgb(80, 40, 40)`

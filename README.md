@@ -4,7 +4,8 @@ Clemini is a Gemini-powered coding CLI built with [genai-rs](https://github.com/
 
 ## Features
 
-- **Interactive REPL**: A conversational interface for coding tasks
+- **Full-Screen TUI**: Interactive REPL with a full-screen terminal UI (default mode)
+- **Plain Terminal Mode**: Classic REPL with `--no-tui` for simpler output
 - **Single Prompt Mode**: Run one-off commands with `-p "your prompt"`
 - **MCP Server**: Expose clemini as an MCP tool for Claude Code (`--mcp-server`)
 - **Tool Integration**: Built-in tools for file operations, bash execution, searching, and more
@@ -23,9 +24,14 @@ cargo install --path .
 
 ## Usage
 
-Start the interactive REPL:
+Start the interactive REPL (full-screen TUI):
 ```bash
 clemini
+```
+
+Start in plain terminal mode (no TUI):
+```bash
+clemini --no-tui
 ```
 
 Run a single prompt:

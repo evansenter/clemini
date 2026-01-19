@@ -86,6 +86,7 @@ enum AppEvent {
     ToolCompleted { name, duration_ms, tokens, has_error },
     InteractionComplete(Result<InteractionResult>),
     ContextWarning(String),
+    ToolOutput(String),
 }
 ```
 - Converts `AgentEvent` to TUI-specific events
