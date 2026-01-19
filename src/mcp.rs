@@ -142,7 +142,13 @@ impl EventHandler for McpEventHandler {
     }
 
     fn on_tool_executing(&mut self, name: &str, args: &Value) {
-        // Log to human-readable log
+        // Flush streaming buffer before tool output (normalizes to \n\n)
+        if let Some(rendered) = flush_streaming_buffer() {
+            write_to_streaming_log(&rendered);
+        } else {
+            // No buffered content - add blank line for spacing
+            crate::logging::log_event("");
+        }
         crate::logging::log_event(&format_tool_executing(name, args));
         // Send MCP notification
         self.send_notification(create_tool_executing_notification(name, args));
@@ -175,9 +181,12 @@ impl EventHandler for McpEventHandler {
     }
 
     fn on_complete(&mut self) {
-        // Flush any remaining buffered text with unified streaming
+        // Flush any remaining buffered text with unified streaming (normalizes to \n\n)
         if let Some(rendered) = flush_streaming_buffer() {
             write_to_streaming_log(&rendered);
+        } else {
+            // No buffered content - add blank line for spacing before OUT
+            crate::logging::log_event("");
         }
     }
 
@@ -202,7 +211,9 @@ async fn handle_post(
     ));
     if !msg_body.is_empty() {
         crate::logging::log_event("");
-        crate::logging::log_event(msg_body.trim());
+        // User input with background for visibility
+        crate::logging::log_event(&msg_body.trim().on_bright_black().to_string());
+        crate::logging::log_event(""); // Blank line after user input
     }
 
     // For HTTP, we use the server's broadcast channel for notifications
@@ -220,7 +231,6 @@ async fn handle_post(
         .await
     {
         Ok(response) => {
-            crate::logging::log_event("");
             crate::logging::log_event(&format!(
                 "{} {} ({})",
                 "OUT".cyan(),
@@ -340,7 +350,9 @@ impl McpServer {
                     ));
                     if !msg_body.is_empty() {
                         crate::logging::log_event("");
-                        crate::logging::log_event(msg_body.trim());
+                        // User input with background for visibility
+                        crate::logging::log_event(&msg_body.trim().on_bright_black().to_string());
+                        crate::logging::log_event(""); // Blank line after user input
                     }
                     req
                 }
@@ -437,7 +449,6 @@ impl McpServer {
                         resp_body.push_str(&format!("\n{}", msg.red()));
                     }
                     if let Ok(resp_str) = serde_json::to_string(&response) {
-                        crate::logging::log_event("");
                         // Use log_event_raw to avoid markdown wrapping long interaction IDs
                         crate::logging::log_event_raw(&format!(
                             "{} {} ({}){}",
@@ -463,7 +474,6 @@ impl McpServer {
                 .handle_request(request.clone(), tx.clone(), cancellation_token)
                 .await?;
             let resp_str = serde_json::to_string(&response)?;
-            crate::logging::log_event("");
             crate::logging::log_event(&format!(
                 "{} {} ({})",
                 "OUT".cyan(),
@@ -998,6 +1008,42 @@ mod tests {
         handler.on_context_warning(85.5);
 
         // No notification should be sent for context warnings
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn test_handle_tools_call_errors() {
+        let server = create_test_server();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let ct = tokio_util::sync::CancellationToken::new();
+
+        // Missing parameters
+        let result = server.handle_tools_call(None, tx.clone(), ct.clone()).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Missing parameters"));
+
+        // Missing tool name
+        let params = json!({ "arguments": {} });
+        let result = server.handle_tools_call(Some(params), tx.clone(), ct.clone()).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Missing tool name"));
+
+        // Unknown tool
+        let params = json!({ "name": "unknown_tool", "arguments": {} });
+        let result = server.handle_tools_call(Some(params), tx.clone(), ct.clone()).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Unknown tool"));
+    }
+
+    #[test]
+    fn test_mcp_handler_on_tool_output() {
+        crate::logging::disable_logging();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let mut handler = McpEventHandler::new(tx);
+
+        // Tool output is used for internal logging/UI display (like bash progress)
+        // but does not map to any MCP protocol notification, so it should be ignored by the handler.
+        handler.on_tool_output("some output");
         assert!(rx.try_recv().is_err());
     }
 }

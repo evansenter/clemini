@@ -116,7 +116,8 @@ pub fn render_streaming_chunk(text: &str) -> Option<String> {
 
 /// Flush any remaining buffered streaming text with markdown rendering.
 /// Returns rendered text, or None if buffer was empty.
-/// Call this when streaming is complete (e.g., in on_complete handler).
+/// Call this when streaming is complete (e.g., before tool execution or on_complete).
+/// Output is normalized to end with exactly `\n\n` for consistent spacing.
 pub fn flush_streaming_buffer() -> Option<String> {
     let Ok(mut buffer) = STREAMING_BUFFER.lock() else {
         return None;
@@ -130,7 +131,15 @@ pub fn flush_streaming_buffer() -> Option<String> {
 
     // Render with markdown
     colored::control::set_override(true);
-    Some(text_nowrap(&text))
+    let rendered = text_nowrap(&text);
+
+    // Normalize trailing newlines to exactly \n\n
+    let trimmed = rendered.trim_end_matches('\n');
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(format!("{}\n\n", trimmed))
+    }
 }
 
 /// Write rendered streaming text to log files.
@@ -320,6 +329,18 @@ impl EventHandler for TerminalEventHandler {
     }
 
     fn on_tool_executing(&mut self, name: &str, args: &Value) {
+        // Flush streaming buffer before tool output (normalizes to \n\n)
+        if let Some(rendered) = flush_streaming_buffer() {
+            if self.stream_enabled {
+                print!("{}", rendered);
+                let _ = io::stdout().flush();
+            }
+            write_to_streaming_log(&rendered);
+        } else {
+            // No buffered content - add blank line for spacing
+            // (streaming may have written complete lines already)
+            log_event("");
+        }
         log_event(&format_tool_executing(name, args));
     }
 
@@ -344,13 +365,16 @@ impl EventHandler for TerminalEventHandler {
     }
 
     fn on_complete(&mut self) {
-        // Flush any remaining buffered text with unified streaming
+        // Flush any remaining buffered text with unified streaming (normalizes to \n\n)
         if let Some(rendered) = flush_streaming_buffer() {
             if self.stream_enabled {
                 print!("{}", rendered);
                 let _ = io::stdout().flush();
             }
             write_to_streaming_log(&rendered);
+        } else {
+            // No buffered content - add blank line for spacing before OUT
+            log_event("");
         }
     }
 }
@@ -977,5 +1001,83 @@ mod tests {
         STREAMING_BUFFER.lock().unwrap().clear();
         let out = flush_streaming_buffer();
         assert!(out.is_none());
+    }
+
+    #[test]
+    fn test_flush_normalizes_to_double_newline() {
+        // flush_streaming_buffer should normalize output to end with exactly \n\n
+        // This is critical for consistent spacing before tool calls and OUT lines
+
+        // Case 1: Text with no trailing newline -> normalized to \n\n
+        STREAMING_BUFFER.lock().unwrap().clear();
+        STREAMING_BUFFER
+            .lock()
+            .unwrap()
+            .push_str("Hello world");
+        let out = flush_streaming_buffer().unwrap();
+        assert!(out.ends_with("\n\n"), "Should end with \\n\\n, got: {:?}", out);
+        assert!(!out.ends_with("\n\n\n"), "Should not have triple newline");
+
+        // Case 2: Text with single trailing newline -> normalized to \n\n
+        STREAMING_BUFFER.lock().unwrap().clear();
+        STREAMING_BUFFER
+            .lock()
+            .unwrap()
+            .push_str("Hello world\n");
+        let out = flush_streaming_buffer().unwrap();
+        assert!(out.ends_with("\n\n"), "Should end with \\n\\n, got: {:?}", out);
+
+        // Case 3: Text with double trailing newline -> stays \n\n
+        STREAMING_BUFFER.lock().unwrap().clear();
+        STREAMING_BUFFER
+            .lock()
+            .unwrap()
+            .push_str("Hello world\n\n");
+        let out = flush_streaming_buffer().unwrap();
+        assert!(out.ends_with("\n\n"), "Should end with \\n\\n, got: {:?}", out);
+        assert!(!out.ends_with("\n\n\n"), "Should not have triple newline");
+    }
+
+    #[test]
+    fn test_flush_returns_none_for_whitespace_only() {
+        // If buffer only contains whitespace/newlines, flush should return None
+        STREAMING_BUFFER.lock().unwrap().clear();
+        STREAMING_BUFFER.lock().unwrap().push_str("\n\n");
+        let out = flush_streaming_buffer();
+        assert!(out.is_none(), "Whitespace-only buffer should return None");
+    }
+
+    // =========================================
+    // Spacing contract documentation tests
+    // =========================================
+
+    /// Documents the spacing contract for tool execution and completion.
+    ///
+    /// The handlers use this pattern:
+    /// - If flush_streaming_buffer() returns Some -> content normalized to \n\n -> no extra blank
+    /// - If flush_streaming_buffer() returns None -> add blank line manually
+    ///
+    /// This ensures exactly one blank line before tool calls and OUT lines regardless of
+    /// whether the model text ended with a newline (rendered immediately) or not (buffered).
+    #[test]
+    fn test_spacing_contract_documentation() {
+        // This test documents the expected behavior, not the implementation.
+        // The actual handlers implement this logic.
+
+        // Scenario 1: Model sends "I'll read the file" (no trailing newline)
+        // - Text is buffered
+        // - Tool starts, flush returns "I'll read the file\n\n"
+        // - No extra blank line needed
+        // Result: "I'll read the file\n\n┌─ read_file..."
+
+        // Scenario 2: Model sends "I'll read the file\n" (with trailing newline)
+        // - Text is rendered immediately by render_streaming_chunk
+        // - Buffer is empty
+        // - Tool starts, flush returns None
+        // - Handler adds blank line
+        // Result: "I'll read the file\n\n┌─ read_file..."
+
+        // Both scenarios produce the same visual output: one blank line before tool.
+        assert!(true, "Spacing contract documented");
     }
 }

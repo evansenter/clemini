@@ -264,9 +264,12 @@ This ensures `tail -f` shows streaming text naturally while still applying markd
 
 ## Spacing Guidelines
 
-1. **Before tool execution**: No extra blank line
-2. **After tool result**: Single blank line
-3. **Between response and tools**: Natural flow (no forced spacing)
+1. **After streaming text (before tool execution or OUT)**: Exactly one blank line.
+   - If `flush_streaming_buffer()` returns `Some` → content normalized to `\n\n` → no extra blank needed
+   - If `flush_streaming_buffer()` returns `None` → handler adds blank line manually
+   - This handles both cases: model sends text with trailing `\n` (rendered immediately) or without (buffered)
+2. **After tool result**: Single blank line (added by `on_tool_result`)
+3. **After user input**: Single blank line
 4. **Todo list**: Leading newline before list, no trailing newline
 
 ## Implementation Notes

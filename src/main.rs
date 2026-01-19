@@ -192,11 +192,11 @@ const SYSTEM_PROMPT: &str = r#"You are clemini, a coding assistant. Be concise. 
 
 ## Communication Style
 **ALWAYS narrate your work.** Before each tool call, output a brief status update explaining what you're about to do and why:
-- "Let me fetch the issue to understand the requirements..."
-- "Reading the file to see the current implementation..."
-- "I'll update the function to handle this edge case..."
+- Let me fetch the issue to understand the requirements...
+- Reading the file to see the current implementation...
+- I'll update the function to handle this edge case...
 
-This is NOT optional. Users need to follow your thought process. One line per step, output text BEFORE calling tools.
+This is NOT optional. Users need to follow your thought process. One line per step, output text BEFORE calling tools. Do NOT wrap your narration in quotes.
 
 ## Tools
 
@@ -650,6 +650,15 @@ impl events::EventHandler for TuiEventHandler {
     }
 
     fn on_tool_executing(&mut self, name: &str, args: &serde_json::Value) {
+        // Flush streaming buffer before tool output (normalizes to \n\n)
+        if let Some(rendered) = events::flush_streaming_buffer() {
+            let _ = self.app_tx.try_send(AppEvent::StreamChunk(rendered.clone()));
+            events::write_to_streaming_log(&rendered);
+        } else {
+            // No buffered content - add blank line for spacing
+            let _ = self.app_tx.try_send(AppEvent::StreamChunk("\n".to_string()));
+            logging::log_event("");
+        }
         let _ = self.app_tx.try_send(AppEvent::ToolExecuting {
             name: name.to_string(),
             args: args.clone(),
@@ -687,12 +696,16 @@ impl events::EventHandler for TuiEventHandler {
     }
 
     fn on_complete(&mut self) {
-        // Flush any remaining buffered text with unified streaming
+        // Flush any remaining buffered text with unified streaming (normalizes to \n\n)
         if let Some(rendered) = events::flush_streaming_buffer() {
             let _ = self
                 .app_tx
                 .try_send(AppEvent::StreamChunk(rendered.clone()));
             events::write_to_streaming_log(&rendered);
+        } else {
+            // No buffered content - add blank line for spacing before OUT
+            let _ = self.app_tx.try_send(AppEvent::StreamChunk("\n".to_string()));
+            logging::log_event("");
         }
     }
 
@@ -1634,8 +1647,16 @@ mod event_handling_tests {
 
         handler.on_tool_executing("read_file", &json!({"file_path": "test.rs"}));
 
-        let event = rx.try_recv().unwrap();
-        match event {
+        // First event: StreamChunk for blank line (when flush returns None)
+        let event1 = rx.try_recv().unwrap();
+        assert!(
+            matches!(event1, AppEvent::StreamChunk(_)),
+            "Expected StreamChunk for spacing"
+        );
+
+        // Second event: ToolExecuting
+        let event2 = rx.try_recv().unwrap();
+        match event2 {
             AppEvent::ToolExecuting { name, args } => {
                 assert_eq!(name, "read_file");
                 assert_eq!(args["file_path"], "test.rs");
