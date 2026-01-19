@@ -1081,6 +1081,5 @@ mod tests {
         // Result: "I'll read the file\n\n┌─ read_file..."
 
         // Both scenarios produce the same visual output: one blank line before tool.
-        assert!(true, "Spacing contract documented");
     }
 }
