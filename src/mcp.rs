@@ -22,8 +22,8 @@ use tracing::instrument;
 
 use crate::agent::{AgentEvent, run_interaction};
 use crate::events::{
-    EventHandler, flush_streaming_buffer, format_context_warning, format_error_detail,
-    format_tool_executing, format_tool_result, render_streaming_chunk, write_to_streaming_log,
+    EventHandler, buffer_text, flush_text_buffer, format_context_warning, format_error_detail,
+    format_tool_executing, format_tool_result, write_to_streaming_log,
 };
 use crate::tools::CleminiToolService;
 
@@ -134,20 +134,14 @@ impl McpEventHandler {
 
 impl EventHandler for McpEventHandler {
     fn on_text_delta(&mut self, text: &str) {
-        // Use unified streaming: buffer, render markdown, write to logs
-        // (MCP mode has no display output, only logging)
-        if let Some(rendered) = render_streaming_chunk(text) {
-            write_to_streaming_log(&rendered);
-        }
+        // Buffer text until event boundary (full buffering architecture)
+        buffer_text(text);
     }
 
     fn on_tool_executing(&mut self, name: &str, args: &Value) {
-        // Flush streaming buffer before tool output (normalizes to \n\n)
-        if let Some(rendered) = flush_streaming_buffer() {
+        // Flush buffer before tool output (normalizes to \n\n for spacing)
+        if let Some(rendered) = flush_text_buffer() {
             write_to_streaming_log(&rendered);
-        } else {
-            // No buffered content - add blank line for spacing
-            crate::logging::log_event("");
         }
         crate::logging::log_event(&format_tool_executing(name, args));
         // Send MCP notification
@@ -181,12 +175,9 @@ impl EventHandler for McpEventHandler {
     }
 
     fn on_complete(&mut self) {
-        // Flush any remaining buffered text with unified streaming (normalizes to \n\n)
-        if let Some(rendered) = flush_streaming_buffer() {
+        // Flush any remaining buffered text (normalizes to \n\n)
+        if let Some(rendered) = flush_text_buffer() {
             write_to_streaming_log(&rendered);
-        } else {
-            // No buffered content - add blank line for spacing before OUT
-            crate::logging::log_event("");
         }
     }
 

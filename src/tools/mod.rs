@@ -90,6 +90,16 @@ impl CleminiToolService {
         }
     }
 
+    /// Emit tool output through event channel or fallback to log.
+    /// Tools call this instead of duplicating the emit pattern.
+    pub fn emit_output(&self, output: &str) {
+        if let Some(ref tx) = self.events_tx() {
+            let _ = tx.try_send(AgentEvent::ToolOutput(output.to_string()));
+        } else {
+            crate::logging::log_event(output);
+        }
+    }
+
     pub async fn execute(&self, name: &str, args: Value) -> Result<Value> {
         let tools = self.tools();
         let tool = tools

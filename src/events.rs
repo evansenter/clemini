@@ -2,8 +2,8 @@
 //!
 //! This module is the canonical location for:
 //! - `EventHandler` trait - UI implementations handle `AgentEvent`s
-//! - Formatting functions - `format_tool_*`, `format_error_detail`, `format_context_warning`
-//! - Streaming text rendering - `render_streaming_chunk`, `flush_streaming_buffer`
+//! - Formatting functions - pure functions for formatting events
+//! - Text buffering - `buffer_text`, `flush_text_buffer`
 //!
 //! # Design
 //!
@@ -15,11 +15,14 @@
 //!
 //! All handlers use the shared formatting functions to ensure consistent output.
 //!
-//! # Future (#59)
+//! # Pure Formatters
 //!
-//! When we move to streaming-first architecture, the handler will consume
-//! `Stream<Item = AgentEvent>` instead of individual events, but the trait
-//! methods remain the same.
+//! Type-aligned pure formatters take genai-rs types directly:
+//! - `format_call()` - OwnedFunctionCallInfo → String
+//! - `format_result()` - FunctionExecutionResult → String
+//!
+//! Lower-level formatters for individual fields:
+//! - `format_tool_executing()`, `format_tool_result()`, etc.
 
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -27,6 +30,7 @@ use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
 use colored::Colorize;
+use genai_rs::{FunctionExecutionResult, OwnedFunctionCallInfo};
 use serde_json::Value;
 use termimad::MadSkin;
 
@@ -53,35 +57,20 @@ pub fn text_nowrap(text: &str) -> String {
     FmtText::from(&SKIN, text, Some(10000)).to_string()
 }
 
-/// Buffer for streaming text - accumulates until newlines, then renders with markdown
-static STREAMING_BUFFER: LazyLock<Mutex<String>> = LazyLock::new(|| Mutex::new(String::new()));
+/// Buffer for streaming text - accumulates until event boundary, then renders
+static TEXT_BUFFER: LazyLock<Mutex<String>> = LazyLock::new(|| Mutex::new(String::new()));
 
 // ============================================================================
-// Unified Streaming Text Rendering
+// Text Buffering (Full Buffering Architecture)
 // ============================================================================
 //
-// These functions provide a unified approach to streaming text rendering.
-// All UI modes (Terminal, TUI, MCP) use these to ensure consistent behavior:
+// Text is buffered until an event boundary (tool executing, complete), then
+// rendered with markdown and normalized spacing. This is simpler than line-by-line
+// rendering and ensures consistent spacing.
 //
-// 1. render_streaming_chunk() - Buffer text, render complete lines with markdown
-// 2. flush_streaming_buffer() - Flush remaining text at end of stream
-// 3. write_to_streaming_log() - Write rendered text to log files
-//
-// Usage pattern in EventHandler.on_text_delta():
-//   if let Some(rendered) = render_streaming_chunk(text) {
-//       // Display rendered text (mode-specific: print, channel, etc.)
-//       write_to_streaming_log(&rendered);
-//   }
-
-/// Split text at the last newline, returning (complete_lines, remainder).
-/// Returns None if there's no newline in the text.
-fn split_at_last_newline(text: &str) -> Option<(&str, &str)> {
-    text.rfind('\n').map(|pos| {
-        let complete = &text[..=pos];
-        let remaining = &text[pos + 1..];
-        (complete, remaining)
-    })
-}
+// Usage pattern in EventHandler:
+//   on_text_delta: buffer_text(text)
+//   on_tool_executing/on_complete: if let Some(rendered) = flush_text_buffer() { ... }
 
 /// Write streaming text directly to a log file (no newline added).
 fn write_streaming_to_log_file(path: impl Into<PathBuf>, text: &str) -> std::io::Result<()> {
@@ -93,33 +82,19 @@ fn write_streaming_to_log_file(path: impl Into<PathBuf>, text: &str) -> std::io:
     Ok(())
 }
 
-/// Buffer streaming text and render complete lines with markdown.
-/// Returns rendered text for complete lines, or None if still buffering.
-/// Call `flush_streaming_buffer()` when streaming completes.
-pub fn render_streaming_chunk(text: &str) -> Option<String> {
-    let Ok(mut buffer) = STREAMING_BUFFER.lock() else {
-        return None;
-    };
-
-    buffer.push_str(text);
-
-    // Find the last newline - everything before it can be rendered
-    let (complete, remaining) = split_at_last_newline(&buffer)?;
-    let complete = complete.to_string();
-    let remaining = remaining.to_string();
-    *buffer = remaining;
-
-    // Render complete lines with markdown
-    colored::control::set_override(true);
-    Some(text_nowrap(&complete))
+/// Buffer text for later rendering. Call at each TextDelta event.
+/// Text is accumulated until `flush_text_buffer()` is called at event boundaries.
+pub fn buffer_text(text: &str) {
+    if let Ok(mut buffer) = TEXT_BUFFER.lock() {
+        buffer.push_str(text);
+    }
 }
 
-/// Flush any remaining buffered streaming text with markdown rendering.
+/// Flush buffered text with markdown rendering, normalized to `\n\n`.
 /// Returns rendered text, or None if buffer was empty.
-/// Call this when streaming is complete (e.g., before tool execution or on_complete).
-/// Output is normalized to end with exactly `\n\n` for consistent spacing.
-pub fn flush_streaming_buffer() -> Option<String> {
-    let Ok(mut buffer) = STREAMING_BUFFER.lock() else {
+/// Call at event boundaries (before tool execution, on complete).
+pub fn flush_text_buffer() -> Option<String> {
+    let Ok(mut buffer) = TEXT_BUFFER.lock() else {
         return None;
     };
 
@@ -128,9 +103,6 @@ pub fn flush_streaming_buffer() -> Option<String> {
     }
 
     let text = std::mem::take(&mut *buffer);
-
-    // Render with markdown
-    colored::control::set_override(true);
     let rendered = text_nowrap(&text);
 
     // Normalize trailing newlines to exactly \n\n
@@ -142,8 +114,8 @@ pub fn flush_streaming_buffer() -> Option<String> {
     }
 }
 
-/// Write rendered streaming text to log files.
-/// Used by EventHandlers after rendering with `render_streaming_chunk()`.
+/// Write rendered text to log files.
+/// Used by EventHandlers after flushing with `flush_text_buffer()`.
 pub fn write_to_streaming_log(rendered: &str) {
     // Skip logging during tests unless explicitly enabled
     if !crate::logging::is_logging_enabled() {
@@ -270,6 +242,36 @@ pub fn format_error_detail(error_message: &str) -> String {
     format!("  └─ error: {}", error_message.dimmed())
 }
 
+// ============================================================================
+// Type-aligned pure formatters (take genai-rs types directly)
+// ============================================================================
+
+/// Pure: Format a function call for display.
+/// Takes the genai-rs type directly for clean consumer API.
+pub fn format_call(call: &OwnedFunctionCallInfo) -> String {
+    format_tool_executing(&call.name, &call.args)
+}
+
+/// Pure: Format a function execution result for display.
+/// Takes the genai-rs type directly, computing tokens internally.
+pub fn format_result(result: &FunctionExecutionResult) -> String {
+    let tokens = estimate_tokens(&result.args) + estimate_tokens(&result.result);
+    let has_error = result.is_error();
+    format_tool_result(&result.name, result.duration, tokens, has_error)
+}
+
+/// Pure: Format a function result with error detail if present.
+/// Returns a tuple of (result_line, optional_error_line).
+pub fn format_result_with_error(result: &FunctionExecutionResult) -> (String, Option<String>) {
+    let result_line = format_result(result);
+    let error_line = if result.is_error() {
+        result.error_message().map(format_error_detail)
+    } else {
+        None
+    };
+    (result_line, error_line)
+}
+
 /// Handler for agent events. UI modes implement this to process events.
 pub trait EventHandler {
     /// Handle streaming text (should append to current line, not create new line).
@@ -318,28 +320,18 @@ impl TerminalEventHandler {
 
 impl EventHandler for TerminalEventHandler {
     fn on_text_delta(&mut self, text: &str) {
-        // Use unified streaming: buffer, render markdown, then display + log
-        if let Some(rendered) = render_streaming_chunk(text) {
-            if self.stream_enabled {
-                print!("{}", rendered);
-                let _ = io::stdout().flush();
-            }
-            write_to_streaming_log(&rendered);
-        }
+        // Buffer text until event boundary (full buffering architecture)
+        buffer_text(text);
     }
 
     fn on_tool_executing(&mut self, name: &str, args: &Value) {
-        // Flush streaming buffer before tool output (normalizes to \n\n)
-        if let Some(rendered) = flush_streaming_buffer() {
+        // Flush buffer before tool output (normalizes to \n\n for spacing)
+        if let Some(rendered) = flush_text_buffer() {
             if self.stream_enabled {
                 print!("{}", rendered);
                 let _ = io::stdout().flush();
             }
             write_to_streaming_log(&rendered);
-        } else {
-            // No buffered content - add blank line for spacing
-            // (streaming may have written complete lines already)
-            log_event("");
         }
         log_event(&format_tool_executing(name, args));
     }
@@ -365,16 +357,13 @@ impl EventHandler for TerminalEventHandler {
     }
 
     fn on_complete(&mut self) {
-        // Flush any remaining buffered text with unified streaming (normalizes to \n\n)
-        if let Some(rendered) = flush_streaming_buffer() {
+        // Flush any remaining buffered text (normalizes to \n\n)
+        if let Some(rendered) = flush_text_buffer() {
             if self.stream_enabled {
                 print!("{}", rendered);
                 let _ = io::stdout().flush();
             }
             write_to_streaming_log(&rendered);
-        } else {
-            // No buffered content - add blank line for spacing before OUT
-            log_event("");
         }
     }
 }
@@ -922,96 +911,42 @@ mod tests {
     }
 
     // =========================================
-    // Line buffering tests for streaming log
+    // Text buffer tests (full buffering architecture)
     // =========================================
 
     #[test]
-    fn test_split_at_last_newline_no_newline() {
-        assert!(split_at_last_newline("hello world").is_none());
-    }
-
-    #[test]
-    fn test_split_at_last_newline_single_newline() {
-        let (complete, remaining) = split_at_last_newline("hello\n").unwrap();
-        assert_eq!(complete, "hello\n");
-        assert_eq!(remaining, "");
-    }
-
-    #[test]
-    fn test_split_at_last_newline_with_remainder() {
-        let (complete, remaining) = split_at_last_newline("hello\nworld").unwrap();
-        assert_eq!(complete, "hello\n");
-        assert_eq!(remaining, "world");
-    }
-
-    #[test]
-    fn test_split_at_last_newline_multiple_lines() {
-        let (complete, remaining) = split_at_last_newline("line1\nline2\npartial").unwrap();
-        assert_eq!(complete, "line1\nline2\n");
-        assert_eq!(remaining, "partial");
-    }
-
-    #[test]
-    fn test_split_at_last_newline_ends_with_newline() {
-        let (complete, remaining) = split_at_last_newline("line1\nline2\n").unwrap();
-        assert_eq!(complete, "line1\nline2\n");
-        assert_eq!(remaining, "");
-    }
-
-    #[test]
-    fn test_streaming_buffer_basic() {
+    fn test_buffer_text_accumulates() {
         // Clear buffer before test
-        STREAMING_BUFFER.lock().unwrap().clear();
+        TEXT_BUFFER.lock().unwrap().clear();
 
-        // No newline: should buffer and return None
-        let out1 = render_streaming_chunk("Hello ");
-        assert!(out1.is_none());
-        assert_eq!(*STREAMING_BUFFER.lock().unwrap(), "Hello ");
+        // Buffer text chunks
+        buffer_text("Hello ");
+        buffer_text("world!");
+        assert_eq!(*TEXT_BUFFER.lock().unwrap(), "Hello world!");
 
-        // Newline: should render up to the newline
-        let out2 = render_streaming_chunk("world!\nNext line");
-        let rendered = out2.unwrap();
-        assert!(rendered.contains("Hello world!"));
-        assert!(rendered.ends_with('\n'));
-        assert_eq!(*STREAMING_BUFFER.lock().unwrap(), "Next line");
-
-        // Flush: should render remaining
-        let out3 = flush_streaming_buffer();
-        let flushed = out3.unwrap();
-        assert!(flushed.contains("Next line"));
-        assert!(STREAMING_BUFFER.lock().unwrap().is_empty());
-    }
-
-    #[test]
-    fn test_streaming_multiple_lines() {
-        STREAMING_BUFFER.lock().unwrap().clear();
-
-        let out = render_streaming_chunk("Line 1\nLine 2\nPartial");
-        let rendered = out.unwrap();
-        assert!(rendered.contains("Line 1"));
-        assert!(rendered.contains("Line 2"));
-        assert_eq!(*STREAMING_BUFFER.lock().unwrap(), "Partial");
-
-        let out2 = flush_streaming_buffer();
-        assert!(out2.unwrap().contains("Partial"));
+        // Flush returns rendered content
+        let out = flush_text_buffer();
+        assert!(out.is_some());
+        assert!(out.unwrap().contains("Hello world!"));
+        assert!(TEXT_BUFFER.lock().unwrap().is_empty());
     }
 
     #[test]
     fn test_flush_empty_buffer() {
-        STREAMING_BUFFER.lock().unwrap().clear();
-        let out = flush_streaming_buffer();
+        TEXT_BUFFER.lock().unwrap().clear();
+        let out = flush_text_buffer();
         assert!(out.is_none());
     }
 
     #[test]
     fn test_flush_normalizes_to_double_newline() {
-        // flush_streaming_buffer should normalize output to end with exactly \n\n
-        // This is critical for consistent spacing before tool calls and OUT lines
+        // flush_text_buffer should normalize output to end with exactly \n\n
+        // This is critical for consistent spacing before tool calls
 
         // Case 1: Text with no trailing newline -> normalized to \n\n
-        STREAMING_BUFFER.lock().unwrap().clear();
-        STREAMING_BUFFER.lock().unwrap().push_str("Hello world");
-        let out = flush_streaming_buffer().unwrap();
+        TEXT_BUFFER.lock().unwrap().clear();
+        TEXT_BUFFER.lock().unwrap().push_str("Hello world");
+        let out = flush_text_buffer().unwrap();
         assert!(
             out.ends_with("\n\n"),
             "Should end with \\n\\n, got: {:?}",
@@ -1020,9 +955,9 @@ mod tests {
         assert!(!out.ends_with("\n\n\n"), "Should not have triple newline");
 
         // Case 2: Text with single trailing newline -> normalized to \n\n
-        STREAMING_BUFFER.lock().unwrap().clear();
-        STREAMING_BUFFER.lock().unwrap().push_str("Hello world\n");
-        let out = flush_streaming_buffer().unwrap();
+        TEXT_BUFFER.lock().unwrap().clear();
+        TEXT_BUFFER.lock().unwrap().push_str("Hello world\n");
+        let out = flush_text_buffer().unwrap();
         assert!(
             out.ends_with("\n\n"),
             "Should end with \\n\\n, got: {:?}",
@@ -1030,9 +965,9 @@ mod tests {
         );
 
         // Case 3: Text with double trailing newline -> stays \n\n
-        STREAMING_BUFFER.lock().unwrap().clear();
-        STREAMING_BUFFER.lock().unwrap().push_str("Hello world\n\n");
-        let out = flush_streaming_buffer().unwrap();
+        TEXT_BUFFER.lock().unwrap().clear();
+        TEXT_BUFFER.lock().unwrap().push_str("Hello world\n\n");
+        let out = flush_text_buffer().unwrap();
         assert!(
             out.ends_with("\n\n"),
             "Should end with \\n\\n, got: {:?}",
@@ -1044,9 +979,9 @@ mod tests {
     #[test]
     fn test_flush_returns_none_for_whitespace_only() {
         // If buffer only contains whitespace/newlines, flush should return None
-        STREAMING_BUFFER.lock().unwrap().clear();
-        STREAMING_BUFFER.lock().unwrap().push_str("\n\n");
-        let out = flush_streaming_buffer();
+        TEXT_BUFFER.lock().unwrap().clear();
+        TEXT_BUFFER.lock().unwrap().push_str("\n\n");
+        let out = flush_text_buffer();
         assert!(out.is_none(), "Whitespace-only buffer should return None");
     }
 
@@ -1056,30 +991,18 @@ mod tests {
 
     /// Documents the spacing contract for tool execution and completion.
     ///
-    /// The handlers use this pattern:
-    /// - If flush_streaming_buffer() returns Some -> content normalized to \n\n -> no extra blank
-    /// - If flush_streaming_buffer() returns None -> add blank line manually
-    ///
-    /// This ensures exactly one blank line before tool calls and OUT lines regardless of
-    /// whether the model text ended with a newline (rendered immediately) or not (buffered).
+    /// With full buffering, the pattern is:
+    /// - All text is buffered via buffer_text()
+    /// - At event boundaries, flush_text_buffer() returns content normalized to \n\n
+    /// - This ensures consistent spacing before tool calls and OUT lines
     #[test]
     fn test_spacing_contract_documentation() {
-        // This test documents the expected behavior, not the implementation.
-        // The actual handlers implement this logic.
+        // With full buffering, all text goes to buffer_text()
+        // At boundaries (tool executing, complete), flush_text_buffer() normalizes to \n\n
 
-        // Scenario 1: Model sends "I'll read the file" (no trailing newline)
-        // - Text is buffered
-        // - Tool starts, flush returns "I'll read the file\n\n"
-        // - No extra blank line needed
-        // Result: "I'll read the file\n\n┌─ read_file..."
-
-        // Scenario 2: Model sends "I'll read the file\n" (with trailing newline)
-        // - Text is rendered immediately by render_streaming_chunk
-        // - Buffer is empty
-        // - Tool starts, flush returns None
-        // - Handler adds blank line
-        // Result: "I'll read the file\n\n┌─ read_file..."
-
-        // Both scenarios produce the same visual output: one blank line before tool.
+        // Example: Model sends "I'll read the file" then tool starts
+        // - buffer_text("I'll read the file")
+        // - Tool starts, flush_text_buffer() returns "I'll read the file\n\n"
+        // - Consistent spacing before "┌─ read_file..."
     }
 }

@@ -175,6 +175,7 @@ Test visual changes by running clemini in each mode and verifying the output loo
 |-----------|---------|
 | **Explicit over implicit** | No magical defaults. Clear code beats hidden behavior. If spacing/formatting varies by mode, that's a bug. |
 | **Formatting owns visual output** | Format functions return complete visual blocks including spacing. Output layer just emits—no newline decisions. |
+| **Pure rendering** | Format/render functions are pure: no side effects, no global state. Color control, file I/O, and logging happen in callers, not formatters. |
 | **Graceful unknowns** | Unknown/unexpected data is logged and handled, not crashed on. Tool errors return JSON so the model can retry. |
 | **Breaking changes over shims** | Clean breaks preferred. No deprecated wrappers, re-exports for compatibility, or `// legacy` code paths. |
 

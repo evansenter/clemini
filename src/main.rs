@@ -51,10 +51,8 @@ impl OutputSink for FileSink {
         log_event_to_file(message, render_markdown);
     }
     fn emit_streaming(&self, text: &str) {
-        // No terminal to stream to, but still log for tail -f
-        if let Some(rendered) = events::render_streaming_chunk(text) {
-            events::write_to_streaming_log(&rendered);
-        }
+        // No terminal to stream to, buffer for later flush
+        events::buffer_text(text);
     }
 }
 
@@ -77,10 +75,8 @@ impl OutputSink for TerminalSink {
     fn emit_streaming(&self, text: &str) {
         print!("{text}");
         let _ = io::stdout().flush();
-        // Also log for tail -f
-        if let Some(rendered) = events::render_streaming_chunk(text) {
-            events::write_to_streaming_log(&rendered);
-        }
+        // Buffer for logging at event boundaries
+        events::buffer_text(text);
     }
 }
 
@@ -118,10 +114,8 @@ impl OutputSink for TuiSink {
         if let Some(tx) = TUI_OUTPUT_TX.get() {
             let _ = tx.send(TuiMessage::Streaming(text.to_string()));
         }
-        // Also log for tail -f
-        if let Some(rendered) = events::render_streaming_chunk(text) {
-            events::write_to_streaming_log(&rendered);
-        }
+        // Buffer for logging at event boundaries
+        events::buffer_text(text);
     }
 }
 
@@ -640,28 +634,17 @@ impl TuiEventHandler {
 
 impl events::EventHandler for TuiEventHandler {
     fn on_text_delta(&mut self, text: &str) {
-        // Use unified streaming: buffer, render markdown, then display + log
-        if let Some(rendered) = events::render_streaming_chunk(text) {
-            let _ = self
-                .app_tx
-                .try_send(AppEvent::StreamChunk(rendered.clone()));
-            events::write_to_streaming_log(&rendered);
-        }
+        // Buffer text until event boundary (full buffering architecture)
+        events::buffer_text(text);
     }
 
     fn on_tool_executing(&mut self, name: &str, args: &serde_json::Value) {
-        // Flush streaming buffer before tool output (normalizes to \n\n)
-        if let Some(rendered) = events::flush_streaming_buffer() {
+        // Flush buffer before tool output (normalizes to \n\n for spacing)
+        if let Some(rendered) = events::flush_text_buffer() {
             let _ = self
                 .app_tx
                 .try_send(AppEvent::StreamChunk(rendered.clone()));
             events::write_to_streaming_log(&rendered);
-        } else {
-            // No buffered content - add blank line for spacing
-            let _ = self
-                .app_tx
-                .try_send(AppEvent::StreamChunk("\n".to_string()));
-            logging::log_event("");
         }
         let _ = self.app_tx.try_send(AppEvent::ToolExecuting {
             name: name.to_string(),
@@ -700,18 +683,12 @@ impl events::EventHandler for TuiEventHandler {
     }
 
     fn on_complete(&mut self) {
-        // Flush any remaining buffered text with unified streaming (normalizes to \n\n)
-        if let Some(rendered) = events::flush_streaming_buffer() {
+        // Flush any remaining buffered text (normalizes to \n\n)
+        if let Some(rendered) = events::flush_text_buffer() {
             let _ = self
                 .app_tx
                 .try_send(AppEvent::StreamChunk(rendered.clone()));
             events::write_to_streaming_log(&rendered);
-        } else {
-            // No buffered content - add blank line for spacing before OUT
-            let _ = self
-                .app_tx
-                .try_send(AppEvent::StreamChunk("\n".to_string()));
-            logging::log_event("");
         }
     }
 
@@ -1630,15 +1607,22 @@ mod event_handling_tests {
     // =========================================
 
     #[tokio::test]
-    async fn test_tui_handler_text_delta_sends_stream_chunk() {
+    async fn test_tui_handler_text_delta_buffers_until_flush() {
         logging::disable_logging();
 
         let (tx, mut rx) = mpsc::channel::<AppEvent>(10);
         let mut handler = TuiEventHandler::new(tx);
 
-        // Text is buffered until newlines, then rendered with markdown
+        // Text is buffered until event boundary (tool executing, complete)
         handler.on_text_delta("Hello\n");
 
+        // Nothing sent yet - text is buffered
+        assert!(rx.try_recv().is_err(), "Expected no event until flush");
+
+        // Flush happens at on_complete
+        handler.on_complete();
+
+        // Now the buffered text is sent
         let event = rx.try_recv().unwrap();
         match event {
             AppEvent::StreamChunk(text) => assert!(text.contains("Hello")),
@@ -1653,16 +1637,9 @@ mod event_handling_tests {
 
         handler.on_tool_executing("read_file", &json!({"file_path": "test.rs"}));
 
-        // First event: StreamChunk for blank line (when flush returns None)
-        let event1 = rx.try_recv().unwrap();
-        assert!(
-            matches!(event1, AppEvent::StreamChunk(_)),
-            "Expected StreamChunk for spacing"
-        );
-
-        // Second event: ToolExecuting
-        let event2 = rx.try_recv().unwrap();
-        match event2 {
+        // With empty buffer, only ToolExecuting is sent (no blank line antipattern)
+        let event = rx.try_recv().unwrap();
+        match event {
             AppEvent::ToolExecuting { name, args } => {
                 assert_eq!(name, "read_file");
                 assert_eq!(args["file_path"], "test.rs");
