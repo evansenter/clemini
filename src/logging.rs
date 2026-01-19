@@ -25,8 +25,6 @@ pub fn is_logging_enabled() -> bool {
 pub trait OutputSink: Send + Sync {
     /// Emit a complete message/line.
     fn emit(&self, message: &str, render_markdown: bool);
-    /// Emit streaming text (no newline, no markdown). Used for model response streaming.
-    fn emit_streaming(&self, text: &str);
 }
 
 static OUTPUT_SINK: OnceLock<Arc<dyn OutputSink>> = OnceLock::new();
@@ -57,13 +55,6 @@ pub fn log_event_raw(message: &str) {
         sink.emit(message, false);
     }
     // No fallback - see log_event comment
-}
-
-/// Emit streaming text (for model response streaming).
-pub fn emit_streaming(text: &str) {
-    if let Some(sink) = OUTPUT_SINK.get() {
-        sink.emit_streaming(text);
-    }
 }
 
 #[cfg(test)]

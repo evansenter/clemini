@@ -50,10 +50,6 @@ impl OutputSink for FileSink {
     fn emit(&self, message: &str, render_markdown: bool) {
         log_event_to_file(message, render_markdown);
     }
-    fn emit_streaming(&self, text: &str) {
-        // No terminal to stream to, buffer for later flush
-        events::buffer_text(text);
-    }
 }
 
 /// Writes to stderr AND log files (for REPL mode)
@@ -71,12 +67,6 @@ impl OutputSink for TerminalSink {
             eprintln!("{}", message);
         }
         log_event_to_file(message, render_markdown);
-    }
-    fn emit_streaming(&self, text: &str) {
-        print!("{text}");
-        let _ = io::stdout().flush();
-        // Buffer for logging at event boundaries
-        events::buffer_text(text);
     }
 }
 
@@ -108,14 +98,6 @@ impl OutputSink for TuiSink {
         }
         // Also log to file (without markdown rendering to avoid termimad formatting issues)
         log_event_to_file(message, false);
-    }
-    fn emit_streaming(&self, text: &str) {
-        // Send streaming text to TUI via channel
-        if let Some(tx) = TUI_OUTPUT_TX.get() {
-            let _ = tx.send(TuiMessage::Streaming(text.to_string()));
-        }
-        // Buffer for logging at event boundaries
-        events::buffer_text(text);
     }
 }
 
@@ -624,24 +606,51 @@ fn convert_agent_event_to_app_events(event: &AgentEvent) -> Vec<AppEvent> {
 /// Also logs events to file for `make logs` visibility.
 struct TuiEventHandler {
     app_tx: mpsc::Sender<AppEvent>,
+    /// Per-handler text buffer for streaming text accumulation.
+    text_buffer: String,
 }
 
 impl TuiEventHandler {
     fn new(app_tx: mpsc::Sender<AppEvent>) -> Self {
-        Self { app_tx }
+        Self {
+            app_tx,
+            text_buffer: String::new(),
+        }
+    }
+
+    /// Buffer text for later rendering.
+    fn buffer_text(&mut self, text: &str) {
+        self.text_buffer.push_str(text);
+    }
+
+    /// Flush buffered text with markdown rendering, normalized to `\n\n`.
+    fn flush_buffer(&mut self) -> Option<String> {
+        if self.text_buffer.is_empty() {
+            return None;
+        }
+
+        let text = std::mem::take(&mut self.text_buffer);
+        let rendered = events::text_nowrap(&text);
+
+        let trimmed = rendered.trim_end_matches('\n');
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(format!("{}\n\n", trimmed))
+        }
     }
 }
 
 impl events::EventHandler for TuiEventHandler {
     fn on_text_delta(&mut self, text: &str) {
         // Buffer text until event boundary (full buffering architecture)
-        events::buffer_text(text);
+        self.buffer_text(text);
     }
 
     fn on_tool_executing(&mut self, name: &str, args: &serde_json::Value) {
         // Flush buffer before tool output (normalizes to \n\n for spacing)
         // Logging is handled by dispatch_event() after this method returns
-        if let Some(rendered) = events::flush_text_buffer() {
+        if let Some(rendered) = self.flush_buffer() {
             let _ = self
                 .app_tx
                 .try_send(AppEvent::StreamChunk(rendered.clone()));
@@ -678,7 +687,7 @@ impl events::EventHandler for TuiEventHandler {
 
     fn on_complete(&mut self) {
         // Flush any remaining buffered text (normalizes to \n\n)
-        if let Some(rendered) = events::flush_text_buffer() {
+        if let Some(rendered) = self.flush_buffer() {
             let _ = self
                 .app_tx
                 .try_send(AppEvent::StreamChunk(rendered.clone()));

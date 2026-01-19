@@ -3,7 +3,6 @@
 //! This module is the canonical location for:
 //! - `EventHandler` trait - UI implementations handle `AgentEvent`s
 //! - Formatting functions - pure functions for formatting events
-//! - Text buffering - `buffer_text`, `flush_text_buffer`
 //!
 //! # Design
 //!
@@ -14,6 +13,7 @@
 //! - TUI mode: Uses `AppEvent` internally (handled separately)
 //!
 //! All handlers use the shared formatting functions to ensure consistent output.
+//! Each handler owns its own text buffer for streaming text accumulation.
 //!
 //! # Pure Formatters
 //!
@@ -26,7 +26,7 @@
 
 use std::io::{self, Write};
 use std::path::PathBuf;
-use std::sync::{LazyLock, Mutex};
+use std::sync::LazyLock;
 use std::time::Duration;
 
 use colored::Colorize;
@@ -57,21 +57,6 @@ pub fn text_nowrap(text: &str) -> String {
     FmtText::from(&SKIN, text, Some(10000)).to_string()
 }
 
-/// Buffer for streaming text - accumulates until event boundary, then renders
-static TEXT_BUFFER: LazyLock<Mutex<String>> = LazyLock::new(|| Mutex::new(String::new()));
-
-// ============================================================================
-// Text Buffering (Full Buffering Architecture)
-// ============================================================================
-//
-// Text is buffered until an event boundary (tool executing, complete), then
-// rendered with markdown and normalized spacing. This is simpler than line-by-line
-// rendering and ensures consistent spacing.
-//
-// Usage pattern in EventHandler:
-//   on_text_delta: buffer_text(text)
-//   on_tool_executing/on_complete: if let Some(rendered) = flush_text_buffer() { ... }
-
 /// Write streaming text directly to a log file (no newline added).
 fn write_streaming_to_log_file(path: impl Into<PathBuf>, text: &str) -> std::io::Result<()> {
     let mut file = std::fs::OpenOptions::new()
@@ -80,45 +65,6 @@ fn write_streaming_to_log_file(path: impl Into<PathBuf>, text: &str) -> std::io:
         .open(path.into())?;
     write!(file, "{}", text)?;
     Ok(())
-}
-
-/// Buffer text for later rendering. Call at each TextDelta event.
-/// Text is accumulated until `flush_text_buffer()` is called at event boundaries.
-pub fn buffer_text(text: &str) {
-    if let Ok(mut buffer) = TEXT_BUFFER.lock() {
-        buffer.push_str(text);
-    }
-}
-
-/// Clear the text buffer. Used by tests to ensure isolation.
-pub fn clear_text_buffer() {
-    if let Ok(mut buffer) = TEXT_BUFFER.lock() {
-        buffer.clear();
-    }
-}
-
-/// Flush buffered text with markdown rendering, normalized to `\n\n`.
-/// Returns rendered text, or None if buffer was empty.
-/// Call at event boundaries (before tool execution, on complete).
-pub fn flush_text_buffer() -> Option<String> {
-    let Ok(mut buffer) = TEXT_BUFFER.lock() else {
-        return None;
-    };
-
-    if buffer.is_empty() {
-        return None;
-    }
-
-    let text = std::mem::take(&mut *buffer);
-    let rendered = text_nowrap(&text);
-
-    // Normalize trailing newlines to exactly \n\n
-    let trimmed = rendered.trim_end_matches('\n');
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(format!("{}\n\n", trimmed))
-    }
 }
 
 /// Write rendered text to log files.
@@ -305,24 +251,54 @@ pub trait EventHandler {
 /// Event handler for terminal output (plain REPL and non-interactive modes).
 pub struct TerminalEventHandler {
     stream_enabled: bool,
+    /// Per-handler text buffer for streaming text accumulation.
+    /// Text is buffered until event boundaries, then rendered with markdown.
+    text_buffer: String,
 }
 
 impl TerminalEventHandler {
     pub fn new(stream_enabled: bool) -> Self {
-        Self { stream_enabled }
+        Self {
+            stream_enabled,
+            text_buffer: String::new(),
+        }
+    }
+
+    /// Buffer text for later rendering. Called at each TextDelta event.
+    fn buffer_text(&mut self, text: &str) {
+        self.text_buffer.push_str(text);
+    }
+
+    /// Flush buffered text with markdown rendering, normalized to `\n\n`.
+    /// Returns rendered text, or None if buffer was empty.
+    fn flush_buffer(&mut self) -> Option<String> {
+        if self.text_buffer.is_empty() {
+            return None;
+        }
+
+        let text = std::mem::take(&mut self.text_buffer);
+        let rendered = text_nowrap(&text);
+
+        // Normalize trailing newlines to exactly \n\n
+        let trimmed = rendered.trim_end_matches('\n');
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(format!("{}\n\n", trimmed))
+        }
     }
 }
 
 impl EventHandler for TerminalEventHandler {
     fn on_text_delta(&mut self, text: &str) {
         // Buffer text until event boundary (full buffering architecture)
-        buffer_text(text);
+        self.buffer_text(text);
     }
 
     fn on_tool_executing(&mut self, _name: &str, _args: &Value) {
         // Flush buffer before tool output (normalizes to \n\n for spacing)
         // Logging is handled by dispatch_event() after this method returns
-        if let Some(rendered) = flush_text_buffer() {
+        if let Some(rendered) = self.flush_buffer() {
             if self.stream_enabled {
                 print!("{}", rendered);
                 let _ = io::stdout().flush();
@@ -349,7 +325,7 @@ impl EventHandler for TerminalEventHandler {
 
     fn on_complete(&mut self) {
         // Flush any remaining buffered text (normalizes to \n\n)
-        if let Some(rendered) = flush_text_buffer() {
+        if let Some(rendered) = self.flush_buffer() {
             if self.stream_enabled {
                 print!("{}", rendered);
                 let _ = io::stdout().flush();
@@ -910,42 +886,42 @@ mod tests {
     }
 
     // =========================================
-    // Text buffer tests (full buffering architecture)
+    // Per-handler text buffer tests
     // =========================================
 
     #[test]
-    fn test_buffer_text_accumulates() {
-        // Clear buffer before test
-        clear_text_buffer();
+    fn test_terminal_handler_buffer_accumulates() {
+        let mut handler = TerminalEventHandler::new(false);
 
         // Buffer text chunks
-        buffer_text("Hello ");
-        buffer_text("world!");
-        assert_eq!(*TEXT_BUFFER.lock().unwrap(), "Hello world!");
+        handler.buffer_text("Hello ");
+        handler.buffer_text("world!");
 
         // Flush returns rendered content
-        let out = flush_text_buffer();
+        let out = handler.flush_buffer();
         assert!(out.is_some());
         assert!(out.unwrap().contains("Hello world!"));
-        assert!(TEXT_BUFFER.lock().unwrap().is_empty());
+
+        // Buffer is now empty
+        assert!(handler.flush_buffer().is_none());
     }
 
     #[test]
-    fn test_flush_empty_buffer() {
-        clear_text_buffer();
-        let out = flush_text_buffer();
+    fn test_terminal_handler_flush_empty_buffer() {
+        let mut handler = TerminalEventHandler::new(false);
+        let out = handler.flush_buffer();
         assert!(out.is_none());
     }
 
     #[test]
-    fn test_flush_normalizes_to_double_newline() {
-        // flush_text_buffer should normalize output to end with exactly \n\n
+    fn test_terminal_handler_flush_normalizes_to_double_newline() {
+        // flush_buffer should normalize output to end with exactly \n\n
         // This is critical for consistent spacing before tool calls
 
         // Case 1: Text with no trailing newline -> normalized to \n\n
-        clear_text_buffer();
-        TEXT_BUFFER.lock().unwrap().push_str("Hello world");
-        let out = flush_text_buffer().unwrap();
+        let mut handler = TerminalEventHandler::new(false);
+        handler.buffer_text("Hello world");
+        let out = handler.flush_buffer().unwrap();
         assert!(
             out.ends_with("\n\n"),
             "Should end with \\n\\n, got: {:?}",
@@ -954,9 +930,9 @@ mod tests {
         assert!(!out.ends_with("\n\n\n"), "Should not have triple newline");
 
         // Case 2: Text with single trailing newline -> normalized to \n\n
-        clear_text_buffer();
-        TEXT_BUFFER.lock().unwrap().push_str("Hello world\n");
-        let out = flush_text_buffer().unwrap();
+        let mut handler = TerminalEventHandler::new(false);
+        handler.buffer_text("Hello world\n");
+        let out = handler.flush_buffer().unwrap();
         assert!(
             out.ends_with("\n\n"),
             "Should end with \\n\\n, got: {:?}",
@@ -964,9 +940,9 @@ mod tests {
         );
 
         // Case 3: Text with double trailing newline -> stays \n\n
-        clear_text_buffer();
-        TEXT_BUFFER.lock().unwrap().push_str("Hello world\n\n");
-        let out = flush_text_buffer().unwrap();
+        let mut handler = TerminalEventHandler::new(false);
+        handler.buffer_text("Hello world\n\n");
+        let out = handler.flush_buffer().unwrap();
         assert!(
             out.ends_with("\n\n"),
             "Should end with \\n\\n, got: {:?}",
@@ -976,32 +952,11 @@ mod tests {
     }
 
     #[test]
-    fn test_flush_returns_none_for_whitespace_only() {
+    fn test_terminal_handler_flush_returns_none_for_whitespace_only() {
         // If buffer only contains whitespace/newlines, flush should return None
-        clear_text_buffer();
-        TEXT_BUFFER.lock().unwrap().push_str("\n\n");
-        let out = flush_text_buffer();
+        let mut handler = TerminalEventHandler::new(false);
+        handler.buffer_text("\n\n");
+        let out = handler.flush_buffer();
         assert!(out.is_none(), "Whitespace-only buffer should return None");
-    }
-
-    // =========================================
-    // Spacing contract documentation tests
-    // =========================================
-
-    /// Documents the spacing contract for tool execution and completion.
-    ///
-    /// With full buffering, the pattern is:
-    /// - All text is buffered via buffer_text()
-    /// - At event boundaries, flush_text_buffer() returns content normalized to \n\n
-    /// - This ensures consistent spacing before tool calls and OUT lines
-    #[test]
-    fn test_spacing_contract_documentation() {
-        // With full buffering, all text goes to buffer_text()
-        // At boundaries (tool executing, complete), flush_text_buffer() normalizes to \n\n
-
-        // Example: Model sends "I'll read the file" then tool starts
-        // - buffer_text("I'll read the file")
-        // - Tool starts, flush_text_buffer() returns "I'll read the file\n\n"
-        // - Consistent spacing before "┌─ read_file..."
     }
 }
