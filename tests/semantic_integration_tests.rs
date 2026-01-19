@@ -449,8 +449,9 @@ async fn test_file_not_found_helpful_response() {
     fs::write(temp_dir.path().join("config.json"), "{}").unwrap();
     fs::write(temp_dir.path().join("settings.yaml"), "key: value").unwrap();
 
+    // Use extended timeout - model may try multiple approaches before giving up
     let (result, _) = with_timeout(
-        DEFAULT_TIMEOUT,
+        EXTENDED_TIMEOUT,
         run_test_interaction(
             &client,
             &tool_service,
