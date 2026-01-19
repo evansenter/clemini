@@ -75,8 +75,6 @@ impl OutputSink for TerminalSink {
 pub enum TuiMessage {
     /// Complete line/message (uses append_to_chat)
     Line(String),
-    /// Streaming text chunk (uses append_streaming)
-    Streaming(String),
 }
 
 /// Channel for TUI output - global sender that TuiSink writes to
@@ -1129,7 +1127,6 @@ async fn run_tui_event_loop(
                         // Add blank line after so streaming starts on new line
                         app.append_to_chat("");
                     }
-                    TuiMessage::Streaming(text) => app.append_streaming(&text),
                 }
             }
         }

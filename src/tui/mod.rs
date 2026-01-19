@@ -599,7 +599,7 @@ mod tests {
     }
 
     /// Test that streaming after Line message starts on new line.
-    /// This simulates the TuiMessage::Line followed by TuiMessage::Streaming pattern.
+    /// This simulates the TuiMessage::Line followed by AppEvent::StreamChunk pattern.
     #[test]
     fn test_line_then_streaming_separation() {
         let mut app = App::new("test");
