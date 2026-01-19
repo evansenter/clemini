@@ -114,6 +114,7 @@ Debugging: `LOUD_WIRE=1` logs all HTTP requests/responses.
 
 ## Documentation
 
+- [docs/TOOLS.md](docs/TOOLS.md) - Tool reference, design philosophy, implementation guide
 - [docs/TUI.md](docs/TUI.md) - TUI architecture (ratatui, event loop, output channels)
 - [docs/TEXT_RENDERING.md](docs/TEXT_RENDERING.md) - Output formatting guidelines (colors, truncation, spacing)
 
