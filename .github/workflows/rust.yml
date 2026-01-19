@@ -37,6 +37,32 @@ jobs:
         run: cargo nextest run --workspace
       # Note: No doctests - clemini is a binary crate without a library target
 
+  test-integration:
+    name: Integration Tests
+    needs: check
+    runs-on: ubuntu-latest
+    # Only run on push to main or PRs from same repo (forks don't have secrets)
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@cargo-nextest
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: integration
+      - name: Install mold linker
+        run: sudo apt-get update && sudo apt-get install -y mold
+      - name: Run integration tests
+        run: |
+          set -e
+          for test in confirmation_tests tool_output_tests semantic_integration_tests; do
+            echo "::group::Running $test"
+            cargo nextest run --test $test --run-ignored all
+            echo "::endgroup::"
+          done
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+
   fmt:
     name: Format
     runs-on: ubuntu-latest

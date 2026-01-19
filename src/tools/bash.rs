@@ -1,3 +1,4 @@
+use crate::agent::AgentEvent;
 use crate::tools::{error_codes, error_response};
 use async_trait::async_trait;
 use colored::Colorize;
@@ -12,12 +13,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{LazyLock, Mutex};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
+use tokio::sync::mpsc;
 use tracing::instrument;
 
 pub(crate) static BACKGROUND_TASKS: LazyLock<Mutex<HashMap<String, tokio::process::Child>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-static NEXT_TASK_ID: AtomicUsize = AtomicUsize::new(1);
+pub(crate) static NEXT_TASK_ID: AtomicUsize = AtomicUsize::new(1);
 
 /// Blocked command patterns that are always rejected.
 static BLOCKED_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
@@ -73,6 +75,7 @@ pub struct BashTool {
     allowed_paths: Vec<PathBuf>,
     timeout_secs: u64,
     is_mcp_mode: bool,
+    events_tx: Option<mpsc::Sender<AgentEvent>>,
 }
 
 impl BashTool {
@@ -81,12 +84,32 @@ impl BashTool {
         allowed_paths: Vec<PathBuf>,
         timeout_secs: u64,
         is_mcp_mode: bool,
+        events_tx: Option<mpsc::Sender<AgentEvent>>,
     ) -> Self {
         Self {
             cwd,
             allowed_paths,
             timeout_secs,
             is_mcp_mode,
+            events_tx,
+        }
+    }
+
+    /// Emit tool output via events (if available) or fallback to log_event.
+    fn emit(&self, output: &str) {
+        if let Some(tx) = &self.events_tx {
+            let _ = tx.try_send(AgentEvent::ToolOutput(output.to_string()));
+        } else {
+            crate::logging::log_event(output);
+        }
+    }
+
+    /// Emit raw tool output (no newline handling) via events or fallback to log_event_raw.
+    fn emit_raw(&self, output: &str) {
+        if let Some(tx) = &self.events_tx {
+            let _ = tx.try_send(AgentEvent::ToolOutput(output.to_string()));
+        } else {
+            crate::logging::log_event_raw(output);
         }
     }
 
@@ -128,7 +151,7 @@ impl BashTool {
             command.bold()
         );
         eprintln!("{}", msg);
-        crate::log_event(&msg);
+        self.emit(&msg);
 
         eprint!("Proceed? [y/N] ");
         let _ = io::stderr().flush();
@@ -226,8 +249,12 @@ impl CallableFunction for BashTool {
 
         // Safety check
         if let Some(pattern) = Self::is_blocked(command) {
-            let msg = format!("[bash BLOCKED: {command}] (matches pattern: {pattern})");
-            crate::log_event(&msg);
+            let msg = format!(
+                "  {} {}",
+                format!("BLOCKED (matches pattern: {pattern}):").red(),
+                command.dimmed()
+            );
+            self.emit(&msg);
             return Ok(error_response(
                 &format!("Command blocked: matches pattern '{}'", pattern),
                 error_codes::BLOCKED,
@@ -241,8 +268,12 @@ impl CallableFunction for BashTool {
         if Self::needs_caution(command) {
             if self.is_mcp_mode {
                 if !confirmed {
-                    let msg = format!("[bash CAUTION: {command}] (requesting MCP confirmation)");
-                    crate::log_event(&msg);
+                    let msg = format!(
+                        "  {} {}",
+                        "CAUTION (requesting MCP confirmation):".yellow(),
+                        command.dimmed()
+                    );
+                    self.emit(&msg);
                     let mut resp = json!({
                         "needs_confirmation": true,
                         "command": command,
@@ -254,8 +285,8 @@ impl CallableFunction for BashTool {
                     return Ok(resp);
                 }
             } else if !confirmed && !self.confirm_execution(command) {
-                let msg = format!("[bash CANCELLED: {command}]");
-                crate::log_event(&msg);
+                let msg = format!("  {} {}", "CANCELLED:".red(), command.dimmed());
+                self.emit(&msg);
                 return Ok(error_response(
                     "Command cancelled by user",
                     error_codes::BLOCKED,
@@ -265,19 +296,12 @@ impl CallableFunction for BashTool {
                     }),
                 ));
             }
-            let msg = if let Some(desc) = description {
-                format!("[bash CAUTION: {}] (user confirmed): \"{}\"", desc, command)
-            } else {
-                format!("[bash CAUTION: {}] (user confirmed)", command)
-            };
-            crate::log_event(&msg);
-        } else {
-            let log_msg = if let Some(desc) = description {
-                format!("[bash] {}: \"{}\"", desc, command)
-            } else {
-                format!("[bash] running: \"{}\"", command)
-            };
-            crate::log_event_raw(&log_msg.dimmed().italic().to_string());
+            let msg = format!(
+                "  {} {}",
+                "CAUTION (user confirmed):".yellow(),
+                command.dimmed()
+            );
+            self.emit(&msg);
         }
 
         if run_in_background {
@@ -353,10 +377,10 @@ impl CallableFunction for BashTool {
                         match line {
                             Ok(Some(line)) => {
                                 if logged_stdout_lines < MAX_LOG_LINES {
-                                    crate::log_event_raw(&line.dimmed().italic().to_string());
+                                    self.emit_raw(&format!("  {}", line.dimmed()));
                                     logged_stdout_lines += 1;
                                 } else if logged_stdout_lines == MAX_LOG_LINES {
-                                    crate::log_event_raw(&"[...more stdout...]".dimmed().italic().to_string());
+                                    self.emit_raw(&format!("  {}", "[...more stdout...]".dimmed()));
                                     logged_stdout_lines += 1;
                                 }
                                 captured_stdout.push_str(&line);
@@ -371,10 +395,10 @@ impl CallableFunction for BashTool {
                         match line {
                             Ok(Some(line)) => {
                                 if logged_stderr_lines < MAX_LOG_LINES {
-                                    crate::log_event_raw(&line.dimmed().italic().to_string());
+                                    self.emit_raw(&format!("  {}", line.dimmed()));
                                     logged_stderr_lines += 1;
                                 } else if logged_stderr_lines == MAX_LOG_LINES {
-                                    crate::log_event_raw(&"[...more stderr...]".dimmed().italic().to_string());
+                                    self.emit_raw(&format!("  {}", "[...more stderr...]".dimmed()));
                                     logged_stderr_lines += 1;
                                 }
                                 captured_stderr.push_str(&line);
@@ -452,6 +476,7 @@ mod tests {
             vec![dir.path().to_path_buf()],
             5,
             false,
+            None,
         );
         let args = json!({ "command": "echo 'hello world'" });
 
@@ -468,6 +493,7 @@ mod tests {
             vec![dir.path().to_path_buf()],
             5,
             false,
+            None,
         );
         let args = json!({
             "command": "echo 'test'",
@@ -490,6 +516,7 @@ mod tests {
             vec![dir.path().to_path_buf()],
             5,
             false,
+            None,
         );
         let args = json!({ "command": "exit 1" });
 
@@ -506,6 +533,7 @@ mod tests {
             vec![dir.path().to_path_buf()],
             1,
             false,
+            None,
         );
         let args = json!({ "command": "sleep 2" });
 
@@ -546,6 +574,7 @@ mod tests {
             vec![dir.path().to_path_buf()],
             5,
             false,
+            None,
         );
         let args = json!({ "command": "echo 'error message' >&2" });
 
@@ -562,6 +591,7 @@ mod tests {
             vec![dir.path().to_path_buf()],
             5,
             false,
+            None,
         );
         let args = json!({ "command": "pwd" });
 
@@ -585,6 +615,7 @@ mod tests {
             vec![dir.path().to_path_buf()],
             5,
             false,
+            None,
         );
 
         // Run pwd in subdir
@@ -609,6 +640,7 @@ mod tests {
             vec![dir.path().to_path_buf()],
             5,
             false,
+            None,
         );
 
         // Try to run in a directory outside allowed paths
@@ -635,6 +667,7 @@ mod tests {
             vec![dir.path().to_path_buf()],
             5,
             false,
+            None,
         );
         let args = json!({
             "command": "sleep 10",
@@ -654,11 +687,12 @@ mod tests {
         }
 
         // Cleanup: kill the background process
-        {
+        let child = {
             let mut tasks = BACKGROUND_TASKS.lock().unwrap();
-            if let Some(mut child) = tasks.remove(&task_id) {
-                let _ = child.kill().await;
-            }
+            tasks.remove(&task_id)
+        };
+        if let Some(mut child) = child {
+            let _ = child.kill().await;
         }
     }
 
@@ -670,6 +704,7 @@ mod tests {
             vec![dir.path().to_path_buf()],
             5,
             false,
+            None,
         );
 
         let args1 = json!({
@@ -689,12 +724,15 @@ mod tests {
 
         assert_ne!(id1, id2);
 
-        // Cleanup
-        let mut tasks = BACKGROUND_TASKS.lock().unwrap();
-        if let Some(mut child) = tasks.remove(id1) {
+        // Cleanup - extract children before dropping lock to avoid holding across await
+        let (child1, child2) = {
+            let mut tasks = BACKGROUND_TASKS.lock().unwrap();
+            (tasks.remove(id1), tasks.remove(id2))
+        };
+        if let Some(mut child) = child1 {
             let _ = child.kill().await;
         }
-        if let Some(mut child) = tasks.remove(id2) {
+        if let Some(mut child) = child2 {
             let _ = child.kill().await;
         }
     }

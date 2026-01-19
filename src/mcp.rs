@@ -18,7 +18,7 @@ use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio_util::sync::CancellationToken;
 use tower_http::cors::CorsLayer;
 use tracing::instrument;
-// Note: info! macro goes to JSON logs only. For human-readable logs, use crate::log_event()
+// Note: info! macro goes to JSON logs only. For human-readable logs, use crate::logging::log_event()
 
 use crate::agent::{AgentEvent, run_interaction};
 use crate::events::{
@@ -143,7 +143,7 @@ impl EventHandler for McpEventHandler {
 
     fn on_tool_executing(&mut self, name: &str, args: &Value) {
         // Log to human-readable log
-        crate::log_event(&format_tool_executing(name, args));
+        crate::logging::log_event(&format_tool_executing(name, args));
         // Send MCP notification
         self.send_notification(create_tool_executing_notification(name, args));
     }
@@ -157,10 +157,11 @@ impl EventHandler for McpEventHandler {
         error_message: Option<&str>,
     ) {
         // Log to human-readable log
-        crate::log_event(&format_tool_result(name, duration, tokens, has_error));
+        crate::logging::log_event(&format_tool_result(name, duration, tokens, has_error));
         if let Some(err_msg) = error_message {
-            crate::log_event(&format_error_detail(err_msg));
+            crate::logging::log_event(&format_error_detail(err_msg));
         }
+        crate::logging::log_event(""); // Blank line after tool result
         // Send MCP notification
         self.send_notification(create_tool_result_notification(
             name,
@@ -170,7 +171,7 @@ impl EventHandler for McpEventHandler {
 
     fn on_context_warning(&mut self, percentage: f64) {
         let msg = format_context_warning(percentage);
-        crate::log_event(&msg);
+        crate::logging::log_event(&msg);
     }
 
     fn on_complete(&mut self) {
@@ -178,6 +179,11 @@ impl EventHandler for McpEventHandler {
         if let Some(rendered) = flush_streaming_buffer() {
             write_to_streaming_log(&rendered);
         }
+    }
+
+    fn on_tool_output(&mut self, output: &str) {
+        // Tool output is pre-formatted with ANSI codes, skip markdown rendering
+        crate::logging::log_event_raw(output);
     }
 }
 
@@ -187,16 +193,16 @@ async fn handle_post(
     Json(request): Json<JsonRpcRequest>,
 ) -> Json<JsonRpcResponse> {
     let (detail, msg_body) = format_request_log(&request.method, &request.params);
-    crate::log_event("");
-    crate::log_event(&format!(
+    crate::logging::log_event("");
+    crate::logging::log_event(&format!(
         "{} {}{}",
         "IN".green(),
         request.method.bold(),
         detail,
     ));
     if !msg_body.is_empty() {
-        crate::log_event("");
-        crate::log_event(msg_body.trim());
+        crate::logging::log_event("");
+        crate::logging::log_event(msg_body.trim());
     }
 
     // For HTTP, we use the server's broadcast channel for notifications
@@ -214,8 +220,8 @@ async fn handle_post(
         .await
     {
         Ok(response) => {
-            crate::log_event("");
-            crate::log_event(&format!(
+            crate::logging::log_event("");
+            crate::logging::log_event(&format!(
                 "{} {} ({})",
                 "OUT".cyan(),
                 request.method.bold(),
@@ -265,7 +271,7 @@ impl McpServer {
 
     #[instrument(skip(self))]
     pub async fn run_http(self: Arc<Self>, port: u16) -> Result<()> {
-        crate::log_event(&format!(
+        crate::logging::log_event(&format!(
             "MCP HTTP server starting on {} ({} enable multi-turn conversations)",
             format!("http://0.0.0.0:{}", port).cyan(),
             "interaction IDs".cyan()
@@ -285,7 +291,7 @@ impl McpServer {
 
     #[instrument(skip(self))]
     pub async fn run_stdio(self: Arc<Self>) -> Result<()> {
-        crate::log_event(&format!(
+        crate::logging::log_event(&format!(
             "MCP server starting ({} enable multi-turn conversations)",
             "interaction IDs".cyan()
         ));
@@ -325,11 +331,16 @@ impl McpServer {
             let request: JsonRpcRequest = match serde_json::from_str::<JsonRpcRequest>(&line) {
                 Ok(req) => {
                     let (detail, msg_body) = format_request_log(&req.method, &req.params);
-                    crate::log_event("");
-                    crate::log_event(&format!("{} {}{}", "IN".green(), req.method.bold(), detail,));
+                    crate::logging::log_event("");
+                    crate::logging::log_event(&format!(
+                        "{} {}{}",
+                        "IN".green(),
+                        req.method.bold(),
+                        detail,
+                    ));
                     if !msg_body.is_empty() {
-                        crate::log_event("");
-                        crate::log_event(msg_body.trim());
+                        crate::logging::log_event("");
+                        crate::logging::log_event(msg_body.trim());
                     }
                     req
                 }
@@ -355,7 +366,10 @@ impl McpServer {
                 {
                     token.cancel();
                     handle.abort();
-                    crate::log_event(&format!("{} task cancelled by client", "ABORTED".red()));
+                    crate::logging::log_event(&format!(
+                        "{} task cancelled by client",
+                        "ABORTED".red()
+                    ));
                 }
                 continue;
             }
@@ -398,7 +412,24 @@ impl McpServer {
                                 .and_then(|v| v.get("text"))
                                 .and_then(|v| v.as_str())
                         {
-                            resp_body.push_str(&format!("\n{}", text));
+                            // For clemini_chat, avoid duplicating streamed text
+                            let tool_name = request_clone
+                                .params
+                                .as_ref()
+                                .and_then(|p| p.get("name"))
+                                .and_then(|v| v.as_str());
+                            if tool_name == Some("clemini_chat") {
+                                // Check if this is a confirmation response (not streamed)
+                                let has_confirmation =
+                                    res.get("needs_confirmation").is_some_and(|v| !v.is_null());
+                                if has_confirmation {
+                                    // Confirmation text wasn't streamed, log it all
+                                    resp_body.push_str(&format!("\n{}", text));
+                                }
+                                // Normal responses: text was streamed, interaction_id is in OUT line - nothing more to log
+                            } else {
+                                resp_body.push_str(&format!("\n{}", text));
+                            }
                         }
                     } else if let Some(err) = &response.error
                         && let Some(msg) = err.get("message").and_then(|v| v.as_str())
@@ -406,9 +437,9 @@ impl McpServer {
                         resp_body.push_str(&format!("\n{}", msg.red()));
                     }
                     if let Ok(resp_str) = serde_json::to_string(&response) {
-                        crate::log_event("");
+                        crate::logging::log_event("");
                         // Use log_event_raw to avoid markdown wrapping long interaction IDs
-                        crate::log_event_raw(&format!(
+                        crate::logging::log_event_raw(&format!(
                             "{} {} ({}){}",
                             "OUT".cyan(),
                             request_clone.method.bold(),
@@ -416,8 +447,8 @@ impl McpServer {
                             detail,
                         ));
                         if !resp_body.is_empty() {
-                            crate::log_event("");
-                            crate::log_event(resp_body.trim());
+                            crate::logging::log_event("");
+                            crate::logging::log_event(resp_body.trim());
                         }
                         let _ = tx_clone.send(format!("{}\n", resp_str));
                     }
@@ -432,8 +463,8 @@ impl McpServer {
                 .handle_request(request.clone(), tx.clone(), cancellation_token)
                 .await?;
             let resp_str = serde_json::to_string(&response)?;
-            crate::log_event("");
-            crate::log_event(&format!(
+            crate::logging::log_event("");
+            crate::logging::log_event(&format!(
                 "{} {} ({})",
                 "OUT".cyan(),
                 request.method.bold(),
@@ -623,12 +654,15 @@ impl McpServer {
 
         // Spawn task to handle AgentEvents via McpEventHandler
         let tx_clone = tx.clone();
-        tokio::spawn(async move {
+        let event_handler = tokio::spawn(async move {
             let mut handler = McpEventHandler::new(tx_clone);
             while let Some(event) = events_rx.recv().await {
                 crate::events::dispatch_event(&mut handler, &event);
             }
         });
+
+        // Set events_tx so tools emit ToolOutput events instead of calling log_event directly
+        self.tool_service.set_events_tx(Some(events_tx.clone()));
 
         let result = run_interaction(
             &self.client,
@@ -641,6 +675,14 @@ impl McpServer {
             cancellation_token,
         )
         .await?;
+
+        // Clear events_tx after interaction completes - this closes the channel
+        // which causes the event handler loop to exit
+        self.tool_service.set_events_tx(None);
+
+        // Wait for event handler to finish processing all events before continuing
+        // This ensures streaming output is fully flushed before we return the response
+        let _ = event_handler.await;
 
         // Include interaction_id and needs_confirmation in the content text so it's visible to the LLM
         // (MCP protocol only guarantees content array is surfaced, not extra fields)
@@ -755,6 +797,9 @@ mod tests {
 
     #[test]
     fn test_format_status() {
+        // Disable colors for consistent test output
+        colored::control::set_override(false);
+
         let ok_resp = JsonRpcResponse {
             jsonrpc: "2.0".to_string(),
             result: Some(json!({})),
@@ -770,6 +815,9 @@ mod tests {
             id: None,
         };
         assert_eq!(format_status(&err_resp).to_string(), "ERROR");
+
+        // Re-enable colors
+        colored::control::unset_override();
     }
 
     fn create_test_server() -> McpServer {
@@ -782,6 +830,7 @@ mod tests {
             vec![cwd],
             "dummy-key".to_string(),
         ));
+        // Note: events_tx is left as None for tests (tools fall back to log_event)
         McpServer::new(
             client,
             tool_service,
@@ -928,6 +977,8 @@ mod tests {
 
     #[test]
     fn test_mcp_handler_text_delta_no_notification() {
+        crate::logging::disable_logging();
+
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
         let mut handler = McpEventHandler::new(tx);
 

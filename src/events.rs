@@ -30,7 +30,7 @@ use colored::Colorize;
 use serde_json::Value;
 use termimad::MadSkin;
 
-use crate::log_event;
+use crate::logging::log_event;
 
 // ============================================================================
 // Markdown Rendering Infrastructure
@@ -45,6 +45,13 @@ pub static SKIN: LazyLock<MadSkin> = LazyLock::new(|| {
     }
     skin
 });
+
+/// Render text with markdown formatting but without line wrapping.
+/// Uses a very large width to effectively disable termimad's wrapping.
+pub fn text_nowrap(text: &str) -> String {
+    use termimad::FmtText;
+    FmtText::from(&SKIN, text, Some(10000)).to_string()
+}
 
 /// Buffer for streaming text - accumulates until newlines, then renders with markdown
 static STREAMING_BUFFER: LazyLock<Mutex<String>> = LazyLock::new(|| Mutex::new(String::new()));
@@ -104,7 +111,7 @@ pub fn render_streaming_chunk(text: &str) -> Option<String> {
 
     // Render complete lines with markdown
     colored::control::set_override(true);
-    Some(SKIN.term_text(&complete).to_string())
+    Some(text_nowrap(&complete))
 }
 
 /// Flush any remaining buffered streaming text with markdown rendering.
@@ -123,14 +130,14 @@ pub fn flush_streaming_buffer() -> Option<String> {
 
     // Render with markdown
     colored::control::set_override(true);
-    Some(SKIN.term_text(&text).to_string())
+    Some(text_nowrap(&text))
 }
 
 /// Write rendered streaming text to log files.
 /// Used by EventHandlers after rendering with `render_streaming_chunk()`.
 pub fn write_to_streaming_log(rendered: &str) {
     // Skip logging during tests unless explicitly enabled
-    if !crate::is_logging_enabled() {
+    if !crate::logging::is_logging_enabled() {
         return;
     }
 
@@ -164,6 +171,14 @@ pub fn format_tool_args(tool_name: &str, args: &Value) -> String {
         if tool_name == "edit" && (k == "old_string" || k == "new_string") {
             continue;
         }
+        // Skip todos for todo_write as they are rendered below
+        if tool_name == "todo_write" && k == "todos" {
+            continue;
+        }
+        // Skip question/options for ask_user as they are rendered below
+        if tool_name == "ask_user" && (k == "question" || k == "options") {
+            continue;
+        }
 
         let val_str = match v {
             Value::String(s) => {
@@ -192,7 +207,7 @@ pub fn format_tool_args(tool_name: &str, args: &Value) -> String {
 /// Format tool executing line for display.
 pub fn format_tool_executing(name: &str, args: &Value) -> String {
     let args_str = format_tool_args(name, args);
-    format!("{} {} {}", "🔧".dimmed(), name.cyan(), args_str.dimmed())
+    format!("┌─ {} {}", name.cyan(), args_str)
 }
 
 /// Rough token estimate: ~4 chars per token.
@@ -272,6 +287,13 @@ pub trait EventHandler {
 
     /// Handle cancellation (optional, default no-op).
     fn on_cancelled(&mut self) {}
+
+    /// Handle tool output (emitted by tools for visual display).
+    /// Default implementation logs the output.
+    fn on_tool_output(&mut self, output: &str) {
+        // Tool output is pre-formatted with ANSI codes, skip markdown rendering
+        crate::logging::log_event_raw(output);
+    }
 }
 
 /// Event handler for terminal output (plain REPL and non-interactive modes).
@@ -313,6 +335,7 @@ impl EventHandler for TerminalEventHandler {
         if let Some(err_msg) = error_message {
             log_event(&format_error_detail(err_msg));
         }
+        log_event(""); // Blank line after tool result
     }
 
     fn on_context_warning(&mut self, percentage: f64) {
@@ -367,6 +390,7 @@ pub fn dispatch_event<H: EventHandler>(handler: &mut H, event: &crate::agent::Ag
         }
         AgentEvent::Complete { .. } => handler.on_complete(),
         AgentEvent::Cancelled => handler.on_cancelled(),
+        AgentEvent::ToolOutput(output) => handler.on_tool_output(output),
     }
 }
 
@@ -440,6 +464,12 @@ mod tests {
 
         fn on_cancelled(&mut self) {
             self.events.borrow_mut().push("cancelled".to_string());
+        }
+
+        fn on_tool_output(&mut self, output: &str) {
+            self.events
+                .borrow_mut()
+                .push(format!("tool_output:{}", output));
         }
     }
 
@@ -703,6 +733,30 @@ mod tests {
     }
 
     #[test]
+    fn test_format_tool_args_todo_write_filtering() {
+        let args = serde_json::json!({
+            "todos": [
+                {"content": "Task 1", "status": "pending"},
+                {"content": "Task 2", "status": "completed"}
+            ]
+        });
+        let formatted = format_tool_args("todo_write", &args);
+        // todos should be filtered out since they're rendered below
+        assert_eq!(formatted, "");
+    }
+
+    #[test]
+    fn test_format_tool_args_ask_user_filtering() {
+        let args = serde_json::json!({
+            "question": "What is your favorite color?",
+            "options": ["red", "blue", "green"]
+        });
+        let formatted = format_tool_args("ask_user", &args);
+        // question and options should be filtered out since they're rendered below
+        assert_eq!(formatted, "");
+    }
+
+    #[test]
     fn test_estimate_tokens() {
         // ~4 chars per token
         assert_eq!(estimate_tokens(&serde_json::json!("hello")), 1); // "hello" = 7 chars / 4 = 1
@@ -715,7 +769,7 @@ mod tests {
         colored::control::set_override(false);
         let args = serde_json::json!({"file_path": "test.rs"});
         let formatted = format_tool_executing("read_file", &args);
-        assert!(formatted.contains("🔧"));
+        assert!(formatted.contains("┌─"));
         assert!(formatted.contains("read_file"));
         assert!(formatted.contains("file_path=\"test.rs\""));
     }
@@ -724,7 +778,7 @@ mod tests {
     fn test_format_tool_executing_empty_args() {
         colored::control::set_override(false);
         let formatted = format_tool_executing("list_files", &serde_json::json!({}));
-        assert!(formatted.contains("🔧"));
+        assert!(formatted.contains("┌─"));
         assert!(formatted.contains("list_files"));
     }
 

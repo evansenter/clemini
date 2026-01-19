@@ -16,15 +16,13 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tui_textarea::{Input, TextArea};
 
-mod agent;
-mod diff;
-mod events;
 mod mcp;
-mod tools;
 mod tui;
 
-use agent::{AgentEvent, InteractionResult, run_interaction};
-use tools::CleminiToolService;
+use clemini::agent::{self, AgentEvent, InteractionResult, run_interaction};
+use clemini::events;
+use clemini::logging::OutputSink;
+use clemini::tools::{self, CleminiToolService};
 
 const DEFAULT_MODEL: &str = "gemini-3-flash-preview";
 
@@ -38,28 +36,11 @@ pub fn init_logging() {
     let _ = std::fs::create_dir_all(&log_dir);
 }
 
-use std::sync::atomic::{AtomicBool, Ordering};
-
-static TEST_LOGGING_ENABLED: AtomicBool = AtomicBool::new(false);
-
-/// Enable or disable logging to files during tests.
-pub fn set_test_logging_enabled(enabled: bool) {
-    TEST_LOGGING_ENABLED.store(enabled, Ordering::SeqCst);
-}
-
-pub(crate) fn is_logging_enabled() -> bool {
-    if cfg!(test) {
-        TEST_LOGGING_ENABLED.load(Ordering::SeqCst)
-            || std::env::var("CLEMINI_ALLOW_TEST_LOGS").is_ok()
-    } else {
-        true
-    }
-}
-
-pub trait OutputSink: Send + Sync {
-    fn emit(&self, message: &str, render_markdown: bool);
-    /// Emit streaming text (no newline, no markdown). Used for model response streaming.
-    fn emit_streaming(&self, text: &str);
+// Re-export logging module to enable `crate::logging::` imports in mcp.rs.
+// This wrapper is needed because mcp.rs uses `crate::logging::log_event` paths,
+// and we can't use `clemini::logging` directly as `crate::` in the binary crate.
+pub(crate) mod logging {
+    pub use clemini::logging::*;
 }
 
 /// Writes to log files only (current behavior of log_event)
@@ -82,9 +63,12 @@ pub struct TerminalSink;
 
 impl OutputSink for TerminalSink {
     fn emit(&self, message: &str, render_markdown: bool) {
-        if render_markdown {
-            // term_text includes trailing newline, use eprint to avoid doubling
-            eprint!("{}", events::SKIN.term_text(message));
+        if message.is_empty() {
+            // Empty message = blank line
+            eprintln!();
+        } else if render_markdown {
+            // text_nowrap includes trailing newline, use eprint to avoid doubling
+            eprint!("{}", events::text_nowrap(message));
         } else {
             eprintln!("{}", message);
         }
@@ -141,53 +125,22 @@ impl OutputSink for TuiSink {
     }
 }
 
-static OUTPUT_SINK: OnceLock<Arc<dyn OutputSink>> = OnceLock::new();
-
-pub fn set_output_sink(sink: Arc<dyn OutputSink>) {
-    let _ = OUTPUT_SINK.set(sink);
-}
-
-/// Log to human-readable file with ANSI colors preserved
-/// Uses same naming as rolling::daily: clemini.log.YYYY-MM-DD
-pub fn log_event(message: &str) {
-    if let Some(sink) = OUTPUT_SINK.get() {
-        sink.emit(message, true);
-    }
-    // No fallback - OUTPUT_SINK is always set in production before logging.
-    // Skipping prevents test pollution of shared log files.
-}
-
-/// Log without markdown rendering (for protocol messages with long content)
-pub fn log_event_raw(message: &str) {
-    if let Some(sink) = OUTPUT_SINK.get() {
-        sink.emit(message, false);
-    }
-    // No fallback - see log_event comment
-}
-
 /// Log to file only (skip terminal output even with TerminalSink)
 pub fn log_to_file(message: &str) {
     log_event_to_file(message, true);
 }
 
-/// Emit streaming text (for model response streaming)
-pub fn emit_streaming(text: &str) {
-    if let Some(sink) = OUTPUT_SINK.get() {
-        sink.emit_streaming(text);
-    }
-}
-
 fn log_event_to_file(message: &str, render_markdown: bool) {
     // Skip logging during tests unless explicitly enabled
-    if !is_logging_enabled() {
+    if !logging::is_logging_enabled() {
         return;
     }
 
     colored::control::set_override(true);
 
-    // Optionally render markdown (can wrap long lines)
+    // Optionally render markdown (no wrapping)
     let rendered = if render_markdown {
-        events::SKIN.term_text(message).to_string()
+        events::text_nowrap(message)
     } else {
         message.to_string()
     };
@@ -396,50 +349,7 @@ mod tests {
         assert_eq!(config.allowed_paths, vec!["/etc", "/var"]);
     }
 
-    #[test]
-    fn test_logging_disabled_by_default() {
-        let original_env = std::env::var("CLEMINI_ALLOW_TEST_LOGS");
-        unsafe { std::env::remove_var("CLEMINI_ALLOW_TEST_LOGS") };
-
-        set_test_logging_enabled(false);
-        assert!(!is_logging_enabled());
-
-        if let Ok(val) = original_env {
-            unsafe { std::env::set_var("CLEMINI_ALLOW_TEST_LOGS", val) };
-        }
-    }
-
-    #[test]
-    fn test_set_test_logging_enabled() {
-        let original_env = std::env::var("CLEMINI_ALLOW_TEST_LOGS");
-        unsafe { std::env::remove_var("CLEMINI_ALLOW_TEST_LOGS") };
-
-        set_test_logging_enabled(true);
-        assert!(is_logging_enabled());
-
-        set_test_logging_enabled(false);
-        assert!(!is_logging_enabled());
-
-        if let Ok(val) = original_env {
-            unsafe { std::env::set_var("CLEMINI_ALLOW_TEST_LOGS", val) };
-        }
-    }
-
-    #[test]
-    fn test_env_var_enables_logging() {
-        let original_env = std::env::var("CLEMINI_ALLOW_TEST_LOGS");
-
-        set_test_logging_enabled(false);
-        unsafe { std::env::set_var("CLEMINI_ALLOW_TEST_LOGS", "1") };
-        assert!(is_logging_enabled());
-
-        unsafe { std::env::remove_var("CLEMINI_ALLOW_TEST_LOGS") };
-        assert!(!is_logging_enabled());
-
-        if let Ok(val) = original_env {
-            unsafe { std::env::set_var("CLEMINI_ALLOW_TEST_LOGS", val) };
-        }
-    }
+    // Note: Logging tests moved to src/logging.rs since they test lib functionality
 }
 
 #[derive(Parser)]
@@ -527,6 +437,7 @@ async fn main() -> Result<()> {
         allowed_paths,
         api_key.clone(),
     ));
+    // Note: events_tx is set per-interaction via tool_service.set_events_tx()
 
     let mut system_prompt = SYSTEM_PROMPT.to_string();
     if let Ok(claude_md) = std::fs::read_to_string(cwd.join("CLAUDE.md")) {
@@ -539,7 +450,7 @@ async fn main() -> Result<()> {
 
     // MCP server mode - handle early before consuming stdin or printing banner
     if args.mcp_server {
-        set_output_sink(Arc::new(FileSink));
+        logging::set_output_sink(Arc::new(FileSink));
         let mcp_server = Arc::new(mcp::McpServer::new(
             client,
             tool_service,
@@ -593,7 +504,7 @@ async fn main() -> Result<()> {
     };
 
     if let Some(prompt) = combined_prompt {
-        set_output_sink(Arc::new(TerminalSink));
+        logging::set_output_sink(Arc::new(TerminalSink));
         // Non-interactive mode: run single prompt
         let cancellation_token = CancellationToken::new();
         let ct_clone = cancellation_token.clone();
@@ -615,6 +526,9 @@ async fn main() -> Result<()> {
             }
         });
 
+        // Set events_tx for tools to emit output through the event system
+        tool_service.set_events_tx(Some(events_tx.clone()));
+
         let result = run_interaction(
             &client,
             &tool_service,
@@ -626,6 +540,9 @@ async fn main() -> Result<()> {
             cancellation_token,
         )
         .await?;
+
+        // Clear events_tx after interaction
+        tool_service.set_events_tx(None);
 
         // Wait for event handler to finish
         let _ = event_handler.await;
@@ -641,7 +558,7 @@ async fn main() -> Result<()> {
         let use_tui = !args.no_tui && io::stderr().is_terminal();
         // Set output sink based on mode (TUI sets its own sink, plain REPL uses TerminalSink)
         if !use_tui {
-            set_output_sink(Arc::new(TerminalSink));
+            logging::set_output_sink(Arc::new(TerminalSink));
         }
         // TUI mode always needs streaming for incremental updates
         let stream_output = use_tui || args.stream;
@@ -675,6 +592,7 @@ enum AppEvent {
     },
     InteractionComplete(Result<InteractionResult>),
     ContextWarning(String),
+    ToolOutput(String),
 }
 
 /// Convert AgentEvent to AppEvents for the TUI.
@@ -704,6 +622,7 @@ fn convert_agent_event_to_app_events(event: &AgentEvent) -> Vec<AppEvent> {
         }
         // Complete and Cancelled are handled differently (via join handle result)
         AgentEvent::Complete { .. } | AgentEvent::Cancelled => vec![],
+        AgentEvent::ToolOutput(output) => vec![AppEvent::ToolOutput(output.clone())],
     }
 }
 
@@ -735,7 +654,7 @@ impl events::EventHandler for TuiEventHandler {
             name: name.to_string(),
             args: args.clone(),
         });
-        log_event(&events::format_tool_executing(name, args));
+        logging::log_event(&events::format_tool_executing(name, args));
     }
 
     fn on_tool_result(
@@ -752,18 +671,19 @@ impl events::EventHandler for TuiEventHandler {
             tokens,
             has_error,
         });
-        log_event(&events::format_tool_result(
+        logging::log_event(&events::format_tool_result(
             name, duration, tokens, has_error,
         ));
         if let Some(err_msg) = error_message {
-            log_event(&events::format_error_detail(err_msg));
+            logging::log_event(&events::format_error_detail(err_msg));
         }
+        logging::log_event(""); // Blank line after tool result
     }
 
     fn on_context_warning(&mut self, percentage: f64) {
         let msg = events::format_context_warning(percentage);
         let _ = self.app_tx.try_send(AppEvent::ContextWarning(msg.clone()));
-        log_event(&msg);
+        logging::log_event(&msg);
     }
 
     fn on_complete(&mut self) {
@@ -774,6 +694,14 @@ impl events::EventHandler for TuiEventHandler {
                 .try_send(AppEvent::StreamChunk(rendered.clone()));
             events::write_to_streaming_log(&rendered);
         }
+    }
+
+    fn on_tool_output(&mut self, output: &str) {
+        let _ = self
+            .app_tx
+            .try_send(AppEvent::ToolOutput(output.to_string()));
+        // Tool output is pre-formatted with ANSI codes, skip markdown rendering
+        logging::log_event_raw(output);
     }
 }
 
@@ -876,6 +804,9 @@ async fn run_plain_repl(
             }
         });
 
+        // Set events_tx for tools to emit output through the event system
+        tool_service.set_events_tx(Some(events_tx.clone()));
+
         match run_interaction(
             client,
             tool_service,
@@ -900,6 +831,9 @@ async fn run_plain_repl(
                 eprintln!("\n{}", format!("[error: {e}]").bright_red());
             }
         }
+
+        // Clear events_tx after interaction
+        tool_service.set_events_tx(None);
 
         // Wait for event handler to finish
         let _ = event_handler.await;
@@ -968,7 +902,7 @@ async fn run_tui_event_loop(
     // Set up TUI output channel (for OutputSink -> TUI)
     let (tui_tx, mut tui_rx) = mpsc::unbounded_channel::<TuiMessage>();
     set_tui_output_channel(tui_tx);
-    set_output_sink(Arc::new(TuiSink));
+    logging::set_output_sink(Arc::new(TuiSink));
 
     let mut app = tui::App::new(model);
     let mut textarea = create_textarea();
@@ -1101,6 +1035,9 @@ async fn run_tui_event_loop(
                                     }
                                 });
 
+                                // Set events_tx for tools to emit output through the event system
+                                tool_service.set_events_tx(Some(events_tx.clone()));
+
                                 let result = run_interaction(
                                     &client,
                                     &tool_service,
@@ -1112,6 +1049,9 @@ async fn run_tui_event_loop(
                                     cancellation_token,
                                 )
                                 .await;
+
+                                // Clear events_tx after interaction
+                                tool_service.set_events_tx(None);
 
                                 let _ = tx.send(AppEvent::InteractionComplete(result)).await;
                             });
@@ -1199,6 +1139,9 @@ async fn run_tui_event_loop(
                         app.append_to_chat("");
                         app.append_to_chat(&msg.bright_red().bold().to_string());
                         app.append_to_chat("");
+                    }
+                    AppEvent::ToolOutput(output) => {
+                        app.append_to_chat(&output);
                     }
                 }
             }
@@ -1355,7 +1298,7 @@ mod event_handling_tests {
     // These verify the formatting used across all UI modes
     // =========================================
 
-    /// ToolExecuting events should format as: 🔧 <tool_name> <args>
+    /// ToolExecuting events should format as: ┌─ <tool_name> <args>
     #[test]
     fn test_tool_executing_format() {
         let args = json!({"file_path": "src/main.rs", "limit": 100});
@@ -1448,7 +1391,7 @@ mod event_handling_tests {
         let mut app = tui::App::new("test");
 
         app.append_streaming("Let me search.\n"); // Creates 2 lines: "Let me search." and ""
-        app.append_to_chat("🔧 grep pattern=\"test\""); // Line-based, adds new line
+        app.append_to_chat("┌─ grep pattern=\"test\""); // Line-based, adds new line
 
         assert_eq!(app.chat_lines().len(), 3);
         assert_eq!(app.chat_lines()[0], "Let me search.");
@@ -1461,7 +1404,7 @@ mod event_handling_tests {
     fn test_tool_result_requires_line_output() {
         let mut app = tui::App::new("test");
 
-        app.append_to_chat("🔧 read_file path=\"test.rs\"");
+        app.append_to_chat("┌─ read_file path=\"test.rs\"");
         app.append_to_chat("[read_file] 0.02s, ~100 tok");
 
         assert_eq!(app.chat_lines().len(), 2);
@@ -1483,7 +1426,7 @@ mod event_handling_tests {
         app.append_streaming("the function.\n\n");
 
         // Tool executes (line-based)
-        app.append_to_chat("🔧 grep pattern=\"fn main\"");
+        app.append_to_chat("┌─ grep pattern=\"fn main\"");
 
         // Tool result (line-based)
         app.append_to_chat("[grep] 0.01s, ~50 tok");
@@ -1498,7 +1441,7 @@ mod event_handling_tests {
         assert_eq!(app.chat_lines()[0], "I'll search for the function.");
         assert_eq!(app.chat_lines()[1], ""); // from \n\n
         assert_eq!(app.chat_lines()[2], ""); // from \n\n
-        assert_eq!(app.chat_lines()[3], "🔧 grep pattern=\"fn main\"");
+        assert_eq!(app.chat_lines()[3], "┌─ grep pattern=\"fn main\"");
         assert_eq!(app.chat_lines()[4], "[grep] 0.01s, ~50 tok");
         assert_eq!(app.chat_lines()[5], "");
         assert_eq!(app.chat_lines()[6], "Found it in src/main.rs");
@@ -1669,6 +1612,8 @@ mod event_handling_tests {
 
     #[tokio::test]
     async fn test_tui_handler_text_delta_sends_stream_chunk() {
+        logging::disable_logging();
+
         let (tx, mut rx) = mpsc::channel::<AppEvent>(10);
         let mut handler = TuiEventHandler::new(tx);
 

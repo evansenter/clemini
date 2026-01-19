@@ -1,8 +1,10 @@
+use crate::agent::AgentEvent;
 use async_trait::async_trait;
 use genai_rs::{CallableFunction, FunctionDeclaration, FunctionError, FunctionParameters};
 use serde_json::{Value, json};
 use std::path::PathBuf;
 use strsim::normalized_levenshtein;
+use tokio::sync::mpsc;
 use tracing::instrument;
 
 use super::{error_codes, error_response, resolve_and_validate_path};
@@ -10,11 +12,29 @@ use super::{error_codes, error_response, resolve_and_validate_path};
 pub struct EditTool {
     cwd: PathBuf,
     allowed_paths: Vec<PathBuf>,
+    events_tx: Option<mpsc::Sender<AgentEvent>>,
 }
 
 impl EditTool {
-    pub fn new(cwd: PathBuf, allowed_paths: Vec<PathBuf>) -> Self {
-        Self { cwd, allowed_paths }
+    pub fn new(
+        cwd: PathBuf,
+        allowed_paths: Vec<PathBuf>,
+        events_tx: Option<mpsc::Sender<AgentEvent>>,
+    ) -> Self {
+        Self {
+            cwd,
+            allowed_paths,
+            events_tx,
+        }
+    }
+
+    /// Emit raw tool output via events (if available) or fallback to log_event_raw.
+    fn emit_raw(&self, output: &str) {
+        if let Some(tx) = &self.events_tx {
+            let _ = tx.try_send(AgentEvent::ToolOutput(output.to_string()));
+        } else {
+            crate::logging::log_event_raw(output);
+        }
     }
 }
 
@@ -287,7 +307,7 @@ impl CallableFunction for EditTool {
                 // Log the diff
                 let diff_output = crate::diff::format_diff(old_string, new_string, 2);
                 if !diff_output.is_empty() {
-                    crate::log_event_raw(&diff_output);
+                    self.emit_raw(&diff_output);
                 }
 
                 Ok(json!({
@@ -325,7 +345,7 @@ mod tests {
         let file_path = cwd.join("test.txt");
         fs::write(&file_path, "original content").unwrap();
 
-        let tool = EditTool::new(cwd.clone(), vec![cwd.clone()]);
+        let tool = EditTool::new(cwd.clone(), vec![cwd.clone()], None);
         let args = json!({
             "file_path": "test.txt",
             "old_string": "original",
@@ -347,7 +367,7 @@ mod tests {
         let file_path = cwd.join("test.txt");
         fs::write(&file_path, "content").unwrap();
 
-        let tool = EditTool::new(cwd.clone(), vec![cwd.clone()]);
+        let tool = EditTool::new(cwd.clone(), vec![cwd.clone()], None);
         let args = json!({
             "file_path": "test.txt",
             "old_string": "missing",
@@ -367,7 +387,7 @@ mod tests {
         let file_path = cwd.join("test.txt");
         fs::write(&file_path, "repeat\nrepeat").unwrap();
 
-        let tool = EditTool::new(cwd.clone(), vec![cwd.clone()]);
+        let tool = EditTool::new(cwd.clone(), vec![cwd.clone()], None);
         let args = json!({
             "file_path": "test.txt",
             "old_string": "repeat",
@@ -389,7 +409,7 @@ mod tests {
         let file_path = cwd.join("test.txt");
         fs::write(&file_path, "repeat repeat").unwrap();
 
-        let tool = EditTool::new(cwd.clone(), vec![cwd.clone()]);
+        let tool = EditTool::new(cwd.clone(), vec![cwd.clone()], None);
         let args = json!({
             "file_path": "test.txt",
             "old_string": "repeat",
@@ -412,7 +432,7 @@ mod tests {
         let file_path = cwd.join("empty.txt");
         fs::write(&file_path, "").unwrap();
 
-        let tool = EditTool::new(cwd.clone(), vec![cwd.clone()]);
+        let tool = EditTool::new(cwd.clone(), vec![cwd.clone()], None);
         let args = json!({
             "file_path": "empty.txt",
             "old_string": "something",
@@ -431,7 +451,7 @@ mod tests {
         let file_path = cwd.join("test.txt");
         fs::write(&file_path, "line 1\nline 2\nline 3").unwrap();
 
-        let tool = EditTool::new(cwd.clone(), vec![cwd.clone()]);
+        let tool = EditTool::new(cwd.clone(), vec![cwd.clone()], None);
         let args = json!({
             "file_path": "test.txt",
             "old_string": "line 1\nline 2",
@@ -452,7 +472,7 @@ mod tests {
         let file_path = cwd.join("test.txt");
         fs::write(&file_path, "hello world").unwrap();
 
-        let tool = EditTool::new(cwd.clone(), vec![cwd.clone()]);
+        let tool = EditTool::new(cwd.clone(), vec![cwd.clone()], None);
         let args = json!({
             "file_path": "test.txt",
             "old_string": "world",
@@ -473,7 +493,7 @@ mod tests {
         let file_path = cwd.join("test.txt");
         fs::write(&file_path, "fn hello_world() {\n    println!(\"hi\");\n}").unwrap();
 
-        let tool = EditTool::new(cwd.clone(), vec![cwd.clone()]);
+        let tool = EditTool::new(cwd.clone(), vec![cwd.clone()], None);
         let args = json!({
             "file_path": "test.txt",
             "old_string": "fn hello_wrold() {",  // typo
@@ -499,7 +519,7 @@ mod tests {
         let file_path = cwd.join("test.txt");
         fs::write(&file_path, "completely different content").unwrap();
 
-        let tool = EditTool::new(cwd.clone(), vec![cwd.clone()]);
+        let tool = EditTool::new(cwd.clone(), vec![cwd.clone()], None);
         let args = json!({
             "file_path": "test.txt",
             "old_string": "xyz123abc",
@@ -523,7 +543,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let cwd = dir.path().to_path_buf();
 
-        let tool = EditTool::new(cwd.clone(), vec![cwd.clone()]);
+        let tool = EditTool::new(cwd.clone(), vec![cwd.clone()], None);
         let args = json!({
             "file_path": "nonexistent.txt",
             "old_string": "old",
@@ -540,7 +560,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let cwd = dir.path().to_path_buf();
 
-        let tool = EditTool::new(cwd.clone(), vec![cwd.clone()]);
+        let tool = EditTool::new(cwd.clone(), vec![cwd.clone()], None);
         let args = json!({
             "file_path": "new_file.txt",
             "new_string": "initial content",
@@ -560,7 +580,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let cwd = dir.path().to_path_buf();
 
-        let tool = EditTool::new(cwd.clone(), vec![cwd.clone()]);
+        let tool = EditTool::new(cwd.clone(), vec![cwd.clone()], None);
         let args = json!({
             "file_path": "new_file.txt",
             "old_string": "something",
@@ -583,7 +603,7 @@ mod tests {
         let file_path = cwd.join("test.txt");
         fs::write(&file_path, "content").unwrap();
 
-        let tool = EditTool::new(cwd.clone(), vec![cwd.clone()]);
+        let tool = EditTool::new(cwd.clone(), vec![cwd.clone()], None);
         let args = json!({
             "file_path": "test.txt",
             "new_string": "new content",

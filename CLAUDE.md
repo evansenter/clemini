@@ -19,7 +19,8 @@ Clemini is a Gemini-powered coding CLI built with genai-rs. It's designed to be 
 make check               # Fast type checking
 make build               # Debug build
 make release             # Release build
-make test                # Run tests
+make test                # Unit tests only (fast, no API key)
+make test-all            # Full suite including integration tests (requires GEMINI_API_KEY)
 make clippy              # Lint with warnings as errors
 make fmt                 # Format code
 make logs                # Tail human-readable logs
@@ -72,7 +73,7 @@ run_interaction()                    UI Layer
 - `McpEventHandler` (`mcp.rs`) - MCP server mode
 
 All handlers use shared formatting functions:
-- `format_tool_executing()` - Format tool executing line (`🔧 name args`)
+- `format_tool_executing()` - Format tool executing line (`┌─ name args`)
 - `format_tool_result()` - Format tool completion line (`└─ name duration ~tokens tok`)
 - `format_tool_args()` - Format tool arguments as key=value pairs (used by format_tool_executing)
 - `format_context_warning()` - Format context window warnings
@@ -113,6 +114,7 @@ Debugging: `LOUD_WIRE=1` logs all HTTP requests/responses.
 
 ## Documentation
 
+- [docs/TOOLS.md](docs/TOOLS.md) - Tool reference, design philosophy, implementation guide
 - [docs/TUI.md](docs/TUI.md) - TUI architecture (ratatui, event loop, output channels)
 - [docs/TEXT_RENDERING.md](docs/TEXT_RENDERING.md) - Output formatting guidelines (colors, truncation, spacing)
 
@@ -141,11 +143,20 @@ Debugging: `LOUD_WIRE=1` logs all HTTP requests/responses.
 
 Don't skip tests. If a test is flaky or legitimately broken by your change, fix the test as part of the PR.
 
+**Integration tests** - Tests in `tests/` that require `GEMINI_API_KEY` use semantic validation:
+- `confirmation_tests.rs` - Confirmation flow for destructive commands
+- `tool_output_tests.rs` - Tool output events and model interpretation
+- `semantic_integration_tests.rs` - Multi-turn state, error recovery, code analysis
+
+Run locally with: `cargo test --test <name> -- --include-ignored --nocapture`
+
+These use `validate_response_semantically()` from `tests/common/mod.rs` - a second Gemini call with structured output that judges whether responses are appropriate. This provides a middle ground between brittle string assertions and purely structural checks.
+
 **Visual output changes** - Tool output formatting is centralized in `src/events.rs`:
 
 | Change | Location |
 |--------|----------|
-| Tool executing format (`🔧 name...`) | `format_tool_executing()` in `events.rs` |
+| Tool executing format (`┌─ name...`) | `format_tool_executing()` in `events.rs` |
 | Tool result format (`└─ name...`) | `format_tool_result()` in `events.rs` |
 | Tool error detail (`└─ error:...`) | `format_error_detail()` in `events.rs` |
 | Tool args format (`key=value`) | `format_tool_args()` in `events.rs` |
@@ -177,6 +188,18 @@ Test visual changes by running clemini in each mode and verifying the output loo
 - `TerminalEventHandler` in `events.rs` (generic)
 - `TuiEventHandler` in `main.rs` (needs `AppEvent`)
 - `McpEventHandler` in `mcp.rs` (needs MCP notification channel)
+
+**Tool output via events** - Tools emit `AgentEvent::ToolOutput` for visual output, never call `log_event()` directly. This ensures correct ordering (all output flows through the event channel) and keeps tools decoupled from the UI layer. The standard `emit()` helper pattern:
+```rust
+fn emit(&self, output: &str) {
+    if let Some(tx) = &self.events_tx {
+        let _ = tx.try_send(AgentEvent::ToolOutput(output.to_string()));
+    } else {
+        crate::logging::log_event(output);
+    }
+}
+```
+Uses `try_send` (non-blocking) to avoid stalling tools on slow consumers. The fallback to `log_event()` allows tools to work in contexts where events aren't available (e.g., direct tool tests).
 
 ### Module Responsibilities
 

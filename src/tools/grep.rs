@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use colored::Colorize;
 use genai_rs::{CallableFunction, FunctionDeclaration, FunctionError, FunctionParameters};
 use globset::{Glob, GlobSetBuilder};
 use grep::regex::RegexMatcherBuilder;
@@ -8,13 +9,10 @@ use ignore::overrides::OverrideBuilder;
 use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use tokio::sync::mpsc;
 use tracing::instrument;
 
-pub struct GrepTool {
-    cwd: PathBuf,
-    allowed_paths: Vec<PathBuf>,
-}
-
+use crate::agent::AgentEvent;
 use crate::tools::{
     DEFAULT_EXCLUDES, error_codes, error_response, make_relative, resolve_and_validate_path,
     validate_path,
@@ -22,9 +20,31 @@ use crate::tools::{
 
 const MAX_LINE_LENGTH: usize = 1000;
 
+pub struct GrepTool {
+    cwd: PathBuf,
+    allowed_paths: Vec<PathBuf>,
+    events_tx: Option<mpsc::Sender<AgentEvent>>,
+}
+
 impl GrepTool {
-    pub fn new(cwd: PathBuf, allowed_paths: Vec<PathBuf>) -> Self {
-        Self { cwd, allowed_paths }
+    pub fn new(
+        cwd: PathBuf,
+        allowed_paths: Vec<PathBuf>,
+        events_tx: Option<mpsc::Sender<AgentEvent>>,
+    ) -> Self {
+        Self {
+            cwd,
+            allowed_paths,
+            events_tx,
+        }
+    }
+
+    fn emit(&self, output: &str) {
+        if let Some(tx) = &self.events_tx {
+            let _ = tx.try_send(AgentEvent::ToolOutput(output.to_string()));
+        } else {
+            crate::logging::log_event(output);
+        }
     }
 }
 
@@ -526,12 +546,20 @@ impl CallableFunction for GrepTool {
                 error_msg.push_str(&format!(" and type '{}'", t));
             }
 
+            self.emit(&format!("  {}", "no matches".dimmed()));
+
             return Ok(error_response(
                 &error_msg,
                 error_codes::NOT_FOUND,
                 json!({"pattern": pattern, "file_pattern": file_pattern, "type": type_arg}),
             ));
         }
+
+        // Emit visual output
+        let msg = format!("  {} matches in {} files", total_found, files_with_matches)
+            .dimmed()
+            .to_string();
+        self.emit(&msg);
 
         Ok(json!({
             "pattern": pattern,
@@ -559,7 +587,7 @@ mod tests {
         let cwd = dir.path().to_path_buf();
         fs::write(cwd.join("test.txt"), "hello world\ngoodbye world").unwrap();
 
-        let tool = GrepTool::new(cwd.clone(), vec![cwd.clone()]);
+        let tool = GrepTool::new(cwd.clone(), vec![cwd.clone()], None);
         let args = json!({
             "pattern": "hello"
         });
@@ -583,7 +611,7 @@ mod tests {
         let cwd = dir.path().to_path_buf();
         fs::write(cwd.join("test.txt"), "line 1\nline 2 (match)\nline 3").unwrap();
 
-        let tool = GrepTool::new(cwd.clone(), vec![cwd.clone()]);
+        let tool = GrepTool::new(cwd.clone(), vec![cwd.clone()], None);
         let args = json!({
             "pattern": "match",
             "context": 1
@@ -601,7 +629,11 @@ mod tests {
     #[tokio::test]
     async fn test_grep_tool_no_matches() {
         let dir = tempdir().unwrap();
-        let tool = GrepTool::new(dir.path().to_path_buf(), vec![dir.path().to_path_buf()]);
+        let tool = GrepTool::new(
+            dir.path().to_path_buf(),
+            vec![dir.path().to_path_buf()],
+            None,
+        );
         let args = json!({ "pattern": "nonexistent" });
 
         let result = tool.call(args).await.unwrap();
@@ -621,7 +653,7 @@ mod tests {
         let cwd = dir.path().to_path_buf();
         fs::write(cwd.join("test.txt"), "some [special] (chars) here.").unwrap();
 
-        let tool = GrepTool::new(cwd.clone(), vec![cwd.clone()]);
+        let tool = GrepTool::new(cwd.clone(), vec![cwd.clone()], None);
         let args = json!({
             "pattern": r"\[special\] \(chars\)"
         });
@@ -643,7 +675,7 @@ mod tests {
         let cwd = dir.path().to_path_buf();
         fs::write(cwd.join("test.txt"), "HELLO world").unwrap();
 
-        let tool = GrepTool::new(cwd.clone(), vec![cwd.clone()]);
+        let tool = GrepTool::new(cwd.clone(), vec![cwd.clone()], None);
         let args = json!({
             "pattern": "hello",
             "case_insensitive": true
@@ -669,7 +701,7 @@ mod tests {
         fs::write(sub.join("test.txt"), "match in subdir").unwrap();
         fs::write(cwd.join("test.txt"), "match in root").unwrap();
 
-        let tool = GrepTool::new(cwd.clone(), vec![cwd.clone()]);
+        let tool = GrepTool::new(cwd.clone(), vec![cwd.clone()], None);
         let args = json!({
             "pattern": "match",
             "file_pattern": "subdir/*"
@@ -690,7 +722,7 @@ mod tests {
         fs::write(sub.join("test.txt"), "match in subdir").unwrap();
         fs::write(cwd.join("test.txt"), "match in root").unwrap();
 
-        let tool = GrepTool::new(cwd.clone(), vec![cwd.clone()]);
+        let tool = GrepTool::new(cwd.clone(), vec![cwd.clone()], None);
 
         // Search ONLY in subdir using the directory parameter
         let args = json!({
@@ -719,7 +751,7 @@ mod tests {
         fs::write(restricted_dir.join("test.txt"), "secret in restricted").unwrap();
 
         // Tool is configured with cwd, but ONLY allowed_dir is in allowed_paths
-        let tool = GrepTool::new(cwd.clone(), vec![allowed_dir.clone()]);
+        let tool = GrepTool::new(cwd.clone(), vec![allowed_dir.clone()], None);
 
         let args = json!({
             "pattern": "secret"
@@ -743,7 +775,7 @@ mod tests {
         fs::write(cwd.join("test2.txt"), "match").unwrap();
         fs::write(cwd.join("test3.txt"), "other").unwrap();
 
-        let tool = GrepTool::new(cwd.clone(), vec![cwd.clone()]);
+        let tool = GrepTool::new(cwd.clone(), vec![cwd.clone()], None);
         let args = json!({
             "pattern": "match",
             "output_mode": "files_with_matches"
@@ -772,7 +804,7 @@ mod tests {
         fs::write(cwd.join("test1.txt"), "match\nmatch\nother").unwrap();
         fs::write(cwd.join("test2.txt"), "match\nother").unwrap();
 
-        let tool = GrepTool::new(cwd.clone(), vec![cwd.clone()]);
+        let tool = GrepTool::new(cwd.clone(), vec![cwd.clone()], None);
         let args = json!({
             "pattern": "match",
             "output_mode": "count"
@@ -803,7 +835,7 @@ mod tests {
         )
         .unwrap();
 
-        let tool = GrepTool::new(cwd.clone(), vec![cwd.clone()]);
+        let tool = GrepTool::new(cwd.clone(), vec![cwd.clone()], None);
 
         // Test -B (before_context) only
         let args = json!({
@@ -869,7 +901,7 @@ mod tests {
         fs::write(cwd.join("test.js"), "console.log(\"hello\");").unwrap();
         fs::write(cwd.join("test.mjs"), "export const hello = \"hello\";").unwrap();
 
-        let tool = GrepTool::new(cwd.clone(), vec![cwd.clone()]);
+        let tool = GrepTool::new(cwd.clone(), vec![cwd.clone()], None);
 
         // Test type: "rust"
         let args = json!({
@@ -905,7 +937,7 @@ mod tests {
         fs::write(cwd.join("src/main.rs"), "hello").unwrap();
         fs::write(cwd.join("main.rs"), "hello").unwrap();
 
-        let tool = GrepTool::new(cwd.clone(), vec![cwd.clone()]);
+        let tool = GrepTool::new(cwd.clone(), vec![cwd.clone()], None);
 
         let args = json!({
             "pattern": "hello",
@@ -928,7 +960,7 @@ mod tests {
         )
         .unwrap();
 
-        let tool = GrepTool::new(cwd.clone(), vec![cwd.clone()]);
+        let tool = GrepTool::new(cwd.clone(), vec![cwd.clone()], None);
 
         // Test offset
         let args = json!({
@@ -976,7 +1008,7 @@ mod tests {
         )
         .unwrap();
 
-        let tool = GrepTool::new(cwd.clone(), vec![cwd.clone()]);
+        let tool = GrepTool::new(cwd.clone(), vec![cwd.clone()], None);
 
         // Test with multiline: true
         let args = json!({

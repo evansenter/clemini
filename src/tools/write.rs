@@ -1,19 +1,40 @@
 use async_trait::async_trait;
+use colored::Colorize;
 use genai_rs::{CallableFunction, FunctionDeclaration, FunctionError, FunctionParameters};
 use serde_json::{Value, json};
 use std::path::PathBuf;
+use tokio::sync::mpsc;
 use tracing::instrument;
 
 use super::{error_codes, error_response, resolve_and_validate_path};
+use crate::agent::AgentEvent;
 
 pub struct WriteTool {
     cwd: PathBuf,
     allowed_paths: Vec<PathBuf>,
+    events_tx: Option<mpsc::Sender<AgentEvent>>,
 }
 
 impl WriteTool {
-    pub fn new(cwd: PathBuf, allowed_paths: Vec<PathBuf>) -> Self {
-        Self { cwd, allowed_paths }
+    pub fn new(
+        cwd: PathBuf,
+        allowed_paths: Vec<PathBuf>,
+        events_tx: Option<mpsc::Sender<AgentEvent>>,
+    ) -> Self {
+        Self {
+            cwd,
+            allowed_paths,
+            events_tx,
+        }
+    }
+
+    /// Emit tool output via events channel or fallback to log_event.
+    fn emit(&self, output: &str) {
+        if let Some(tx) = &self.events_tx {
+            let _ = tx.try_send(AgentEvent::ToolOutput(output.to_string()));
+        } else {
+            crate::logging::log_event(output);
+        }
     }
 }
 
@@ -135,6 +156,14 @@ impl CallableFunction for WriteTool {
                     response["created"] = json!(true);
                 }
 
+                // Emit visual output
+                let line_count = content.lines().count();
+                let action = if exists { "overwritten" } else { "created" };
+                let msg = format!("  {} lines {}", line_count, action)
+                    .dimmed()
+                    .to_string();
+                self.emit(&msg);
+
                 Ok(response)
             }
             Err(e) => Ok(error_response(
@@ -161,7 +190,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let cwd = dir.path().to_path_buf();
         let allowed = vec![cwd.clone()];
-        let tool = WriteTool::new(cwd.clone(), allowed);
+        let tool = WriteTool::new(cwd.clone(), allowed, None);
         let file_path = "test.txt";
         let content = "hello world";
 
@@ -187,7 +216,7 @@ mod tests {
         let old_content = "old content";
         fs::write(&file_path, old_content).unwrap();
 
-        let tool = WriteTool::new(cwd.clone(), vec![cwd.clone()]);
+        let tool = WriteTool::new(cwd.clone(), vec![cwd.clone()], None);
         let args = json!({
             "file_path": "test.txt",
             "content": "new content"
@@ -205,7 +234,11 @@ mod tests {
     #[tokio::test]
     async fn test_write_tool_outside_cwd() {
         let dir = tempdir().unwrap();
-        let tool = WriteTool::new(dir.path().to_path_buf(), vec![dir.path().to_path_buf()]);
+        let tool = WriteTool::new(
+            dir.path().to_path_buf(),
+            vec![dir.path().to_path_buf()],
+            None,
+        );
         let args = json!({
             "file_path": "../outside.txt",
             "content": "data"
@@ -225,7 +258,7 @@ mod tests {
         let old_content = "old content";
         fs::write(&file_path, old_content).unwrap();
 
-        let tool = WriteTool::new(cwd.clone(), vec![cwd.clone()]);
+        let tool = WriteTool::new(cwd.clone(), vec![cwd.clone()], None);
         let args = json!({
             "file_path": "test.txt",
             "content": "new content",
@@ -254,7 +287,7 @@ mod tests {
         let old_content = "old content";
         fs::write(&file_path, old_content).unwrap();
 
-        let tool = WriteTool::new(cwd.clone(), vec![cwd.clone()]);
+        let tool = WriteTool::new(cwd.clone(), vec![cwd.clone()], None);
         let args = json!({
             "file_path": "test.txt",
             "content": "new content"
@@ -281,7 +314,7 @@ mod tests {
         let backup_path = cwd.join("test.txt.bak");
         fs::create_dir(&backup_path).unwrap();
 
-        let tool = WriteTool::new(cwd.clone(), vec![cwd.clone()]);
+        let tool = WriteTool::new(cwd.clone(), vec![cwd.clone()], None);
         let args = json!({
             "file_path": "test.txt",
             "content": "new content",

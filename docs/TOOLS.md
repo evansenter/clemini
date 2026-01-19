@@ -222,14 +222,37 @@ Execute shell commands.
 ---
 
 #### kill_shell
-Kill a background bash task.
+Kill a background task (bash or subagent).
 
 **Parameters:**
 | Name | Type | Required | Description |
 |------|------|----------|-------------|
-| task_id | string | yes | Task ID from bash with `run_in_background=true` |
+| task_id | string | yes | Task ID from bash or task tool |
 
 **Returns:** `{task_id, status, success}`
+
+---
+
+#### task
+Spawn a clemini subagent to handle delegated work.
+
+**Parameters:**
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| prompt | string | yes | The task/prompt for the subagent |
+| background | boolean | no | Return immediately with task_id. (default: false) |
+
+**Returns:** `{status, stdout, stderr, exit_code}` or `{task_id, status, prompt}` when `background=true`
+
+**Limitations:**
+- Subagent cannot use interactive tools (`ask_user`) - stdin is null
+- Subagent gets its own sandbox based on cwd (does not inherit parent's `allowed_paths`)
+- Background tasks are fire-and-forget (no output capture yet - see issue #79)
+
+**Use cases:**
+- Parallel work on independent subtasks
+- Breaking down complex tasks for focused execution
+- Long-running operations that don't need real-time output
 
 ---
 
@@ -306,5 +329,7 @@ Fetch and optionally process a web page.
 | Create new files | `write_file` | Only for new files or complete rewrites |
 | Run builds/tests | `bash` | Shell commands with output capture |
 | Long-running commands | `bash` + `run_in_background` | Don't block on slow operations |
+| Delegate complex work | `task` | Spawn focused subagent for subtasks |
+| Parallel subtasks | `task` + `background=true` | Multiple subagents working concurrently |
 | Need user input | `ask_user` | Rather than guessing |
 | Multi-step tasks | `todo_write` | Create todos FIRST, then work through them |

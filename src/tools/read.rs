@@ -1,20 +1,41 @@
 use async_trait::async_trait;
+use colored::Colorize;
 use genai_rs::{CallableFunction, FunctionDeclaration, FunctionError, FunctionParameters};
 use serde_json::{Value, json};
 use std::path::PathBuf;
 use tokio::io::AsyncReadExt;
+use tokio::sync::mpsc;
 use tracing::instrument;
 
 use super::{error_codes, error_response, resolve_and_validate_path};
+use crate::agent::AgentEvent;
 
 pub struct ReadTool {
     cwd: PathBuf,
     allowed_paths: Vec<PathBuf>,
+    events_tx: Option<mpsc::Sender<AgentEvent>>,
 }
 
 impl ReadTool {
-    pub fn new(cwd: PathBuf, allowed_paths: Vec<PathBuf>) -> Self {
-        Self { cwd, allowed_paths }
+    pub fn new(
+        cwd: PathBuf,
+        allowed_paths: Vec<PathBuf>,
+        events_tx: Option<mpsc::Sender<AgentEvent>>,
+    ) -> Self {
+        Self {
+            cwd,
+            allowed_paths,
+            events_tx,
+        }
+    }
+
+    /// Emit tool output via events channel or fallback to log_event.
+    fn emit(&self, output: &str) {
+        if let Some(tx) = &self.events_tx {
+            let _ = tx.try_send(AgentEvent::ToolOutput(output.to_string()));
+        } else {
+            crate::logging::log_event(output);
+        }
     }
 }
 
@@ -145,6 +166,23 @@ impl CallableFunction for ReadTool {
                     ));
                 }
 
+                // Emit visual output
+                let lines_shown = end.saturating_sub(start);
+                let msg = if end < total_lines {
+                    format!(
+                        "  {} lines ({}-{} of {})",
+                        lines_shown,
+                        start + 1,
+                        end,
+                        total_lines
+                    )
+                    .dimmed()
+                    .to_string()
+                } else {
+                    format!("  {} lines", total_lines).dimmed().to_string()
+                };
+                self.emit(&msg);
+
                 Ok(response)
             }
             Err(e) => Ok(error_response(
@@ -193,7 +231,7 @@ mod tests {
         let file_path = cwd.join("test.txt");
         fs::write(&file_path, "line 1\nline 2\nline 3").unwrap();
 
-        let tool = ReadTool::new(cwd.clone(), vec![cwd.clone()]);
+        let tool = ReadTool::new(cwd.clone(), vec![cwd.clone()], None);
         let args = json!({
             "file_path": "test.txt",
             "offset": 1,
@@ -211,7 +249,11 @@ mod tests {
     #[tokio::test]
     async fn test_read_tool_missing_file() {
         let dir = tempdir().unwrap();
-        let tool = ReadTool::new(dir.path().to_path_buf(), vec![dir.path().to_path_buf()]);
+        let tool = ReadTool::new(
+            dir.path().to_path_buf(),
+            vec![dir.path().to_path_buf()],
+            None,
+        );
         let args = json!({ "file_path": "missing.txt" });
 
         let result = tool.call(args).await.unwrap();
@@ -223,7 +265,11 @@ mod tests {
     #[tokio::test]
     async fn test_read_tool_outside_cwd() {
         let dir = tempdir().unwrap();
-        let tool = ReadTool::new(dir.path().to_path_buf(), vec![dir.path().to_path_buf()]);
+        let tool = ReadTool::new(
+            dir.path().to_path_buf(),
+            vec![dir.path().to_path_buf()],
+            None,
+        );
         let args = json!({ "file_path": "../outside.txt" });
 
         let result = tool.call(args).await.unwrap();
@@ -239,7 +285,7 @@ mod tests {
         let file_path = cwd.join("test.txt");
         fs::write(&file_path, "line 1\nline 2").unwrap();
 
-        let tool = ReadTool::new(cwd.clone(), vec![cwd.clone()]);
+        let tool = ReadTool::new(cwd.clone(), vec![cwd.clone()], None);
         let args = json!({
             "file_path": "test.txt",
             "offset": 5
@@ -258,7 +304,7 @@ mod tests {
         let file_path = cwd.join("empty.txt");
         fs::write(&file_path, "").unwrap();
 
-        let tool = ReadTool::new(cwd.clone(), vec![cwd.clone()]);
+        let tool = ReadTool::new(cwd.clone(), vec![cwd.clone()], None);
         let args = json!({ "file_path": "empty.txt" });
 
         let result = tool.call(args).await.unwrap();
@@ -277,7 +323,7 @@ mod tests {
             .join("\n");
         fs::write(&file_path, content).unwrap();
 
-        let tool = ReadTool::new(cwd.clone(), vec![cwd.clone()]);
+        let tool = ReadTool::new(cwd.clone(), vec![cwd.clone()], None);
         let args = json!({ "file_path": "large.txt" });
 
         let result = tool.call(args).await.unwrap();
@@ -297,7 +343,7 @@ mod tests {
         let file_path = cwd.join("test.txt");
         fs::write(&file_path, "line 1\nline 2\nline 3").unwrap();
 
-        let tool = ReadTool::new(cwd.clone(), vec![cwd.clone()]);
+        let tool = ReadTool::new(cwd.clone(), vec![cwd.clone()], None);
         let args = json!({
             "file_path": "test.txt",
             "limit": 0
@@ -323,7 +369,7 @@ mod tests {
         // PNG header + some nulls
         fs::write(&file_path, b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0DIHDR").unwrap();
 
-        let tool = ReadTool::new(cwd.clone(), vec![cwd.clone()]);
+        let tool = ReadTool::new(cwd.clone(), vec![cwd.clone()], None);
         let args = json!({ "file_path": "binary.bin" });
 
         let result = tool.call(args).await.unwrap();
