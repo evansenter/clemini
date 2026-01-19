@@ -1020,17 +1020,31 @@ mod tests {
         // Missing parameters
         let result = server.handle_tools_call(None, tx.clone(), ct.clone()).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Missing parameters"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Missing parameters")
+        );
 
         // Missing tool name
         let params = json!({ "arguments": {} });
-        let result = server.handle_tools_call(Some(params), tx.clone(), ct.clone()).await;
+        let result = server
+            .handle_tools_call(Some(params), tx.clone(), ct.clone())
+            .await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Missing tool name"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Missing tool name")
+        );
 
         // Unknown tool
         let params = json!({ "name": "unknown_tool", "arguments": {} });
-        let result = server.handle_tools_call(Some(params), tx.clone(), ct.clone()).await;
+        let result = server
+            .handle_tools_call(Some(params), tx.clone(), ct.clone())
+            .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Unknown tool"));
     }

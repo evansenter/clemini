@@ -1010,31 +1010,34 @@ mod tests {
 
         // Case 1: Text with no trailing newline -> normalized to \n\n
         STREAMING_BUFFER.lock().unwrap().clear();
-        STREAMING_BUFFER
-            .lock()
-            .unwrap()
-            .push_str("Hello world");
+        STREAMING_BUFFER.lock().unwrap().push_str("Hello world");
         let out = flush_streaming_buffer().unwrap();
-        assert!(out.ends_with("\n\n"), "Should end with \\n\\n, got: {:?}", out);
+        assert!(
+            out.ends_with("\n\n"),
+            "Should end with \\n\\n, got: {:?}",
+            out
+        );
         assert!(!out.ends_with("\n\n\n"), "Should not have triple newline");
 
         // Case 2: Text with single trailing newline -> normalized to \n\n
         STREAMING_BUFFER.lock().unwrap().clear();
-        STREAMING_BUFFER
-            .lock()
-            .unwrap()
-            .push_str("Hello world\n");
+        STREAMING_BUFFER.lock().unwrap().push_str("Hello world\n");
         let out = flush_streaming_buffer().unwrap();
-        assert!(out.ends_with("\n\n"), "Should end with \\n\\n, got: {:?}", out);
+        assert!(
+            out.ends_with("\n\n"),
+            "Should end with \\n\\n, got: {:?}",
+            out
+        );
 
         // Case 3: Text with double trailing newline -> stays \n\n
         STREAMING_BUFFER.lock().unwrap().clear();
-        STREAMING_BUFFER
-            .lock()
-            .unwrap()
-            .push_str("Hello world\n\n");
+        STREAMING_BUFFER.lock().unwrap().push_str("Hello world\n\n");
         let out = flush_streaming_buffer().unwrap();
-        assert!(out.ends_with("\n\n"), "Should end with \\n\\n, got: {:?}", out);
+        assert!(
+            out.ends_with("\n\n"),
+            "Should end with \\n\\n, got: {:?}",
+            out
+        );
         assert!(!out.ends_with("\n\n\n"), "Should not have triple newline");
     }
 

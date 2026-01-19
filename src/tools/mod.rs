@@ -338,11 +338,18 @@ mod tests {
         // Non-existent parent directory
         // If it's under an allowed path, it should be OK
         assert!(resolve_and_validate_path("newdir/newfile.txt", &cwd, &allowed).is_ok());
-        
+
         // Non-existent parent directory outside allowed paths
         let another_dir = tempdir().unwrap();
         let outside_dir = another_dir.path().join("some_dir");
-        assert!(resolve_and_validate_path(&outside_dir.join("file.txt").to_string_lossy(), &cwd, &allowed).is_err());
+        assert!(
+            resolve_and_validate_path(
+                &outside_dir.join("file.txt").to_string_lossy(),
+                &cwd,
+                &allowed
+            )
+            .is_err()
+        );
     }
 
     #[test]

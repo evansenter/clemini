@@ -305,7 +305,8 @@ impl CallableFunction for EditTool {
         match tokio::fs::write(&path, &new_content).await {
             Ok(()) => {
                 // Log the diff
-                let diff_output = crate::diff::format_diff(old_string, new_string, 2);
+                let diff_output =
+                    crate::diff::format_diff(old_string, new_string, 2, Some(file_path));
                 if !diff_output.is_empty() {
                     self.emit_raw(&diff_output);
                 }

@@ -178,7 +178,18 @@ Output returned to the model is truncated at 50,000 characters with message:
 
 ## Edit Tool Diff Output
 
-When the edit tool successfully modifies a file, it displays a colored diff:
+When the edit tool successfully modifies a file, it displays a colored diff with syntax highlighting.
+
+### Syntax Highlighting
+
+Diffs use `syntect` for language-aware syntax highlighting based on file extension:
+- Foreground colors: Language-specific token colors (keywords, strings, etc.)
+- Background colors distinguish line types:
+  - Deletions: Dark red background `rgb(80, 40, 40)`
+  - Additions: Dark green background `rgb(40, 80, 40)`
+  - Context: No background (dimmed)
+
+Falls back to simple red/green coloring for unknown file types.
 
 ### Single-line changes (simple format)
 ```
@@ -194,9 +205,10 @@ When the edit tool successfully modifies a file, it displays a colored diff:
     context line after
 ```
 
-- `-` and deleted text: Red
-- `+` and added text: Green
-- Context lines: Dimmed grey
+- `-` marker: Red
+- `+` marker: Green
+- Line content: Syntax-highlighted with background color
+- Context lines: Syntax-highlighted, dimmed (no background)
 - Two-space indent before markers
 
 ## Todo List Display
