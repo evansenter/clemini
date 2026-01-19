@@ -267,18 +267,6 @@ pub fn format_result(result: &FunctionExecutionResult) -> String {
     format_tool_result(&result.name, result.duration, tokens, has_error)
 }
 
-/// Pure: Format a function result with error detail if present.
-/// Returns a tuple of (result_line, optional_error_line).
-pub fn format_result_with_error(result: &FunctionExecutionResult) -> (String, Option<String>) {
-    let result_line = format_result(result);
-    let error_line = if result.is_error() {
-        result.error_message().map(format_error_detail)
-    } else {
-        None
-    };
-    (result_line, error_line)
-}
-
 /// Handler for agent events. UI modes implement this to process events.
 pub trait EventHandler {
     /// Handle streaming text (should append to current line, not create new line).
