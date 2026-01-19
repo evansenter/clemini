@@ -30,3 +30,11 @@ tmp/
 *.log
 error.log
 output.txt
+
+# Benchmark build artifacts
+benchmark/exercises/**/.gradle/
+benchmark/exercises/**/bin/
+benchmark/exercises/**/node_modules/
+benchmark/exercises/**/build/
+benchmark/exercises/**/*.class
+benchmark/exercises/**/package-lock.json
