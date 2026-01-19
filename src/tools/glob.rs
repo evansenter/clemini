@@ -1,8 +1,11 @@
+use crate::agent::AgentEvent;
 use async_trait::async_trait;
+use colored::Colorize;
 use genai_rs::{CallableFunction, FunctionDeclaration, FunctionError, FunctionParameters};
 use glob::glob;
 use serde_json::{Value, json};
 use std::path::PathBuf;
+use tokio::sync::mpsc;
 use tracing::instrument;
 
 use super::{
@@ -13,11 +16,29 @@ use super::{
 pub struct GlobTool {
     cwd: PathBuf,
     allowed_paths: Vec<PathBuf>,
+    events_tx: Option<mpsc::Sender<AgentEvent>>,
 }
 
 impl GlobTool {
-    pub fn new(cwd: PathBuf, allowed_paths: Vec<PathBuf>) -> Self {
-        Self { cwd, allowed_paths }
+    pub fn new(
+        cwd: PathBuf,
+        allowed_paths: Vec<PathBuf>,
+        events_tx: Option<mpsc::Sender<AgentEvent>>,
+    ) -> Self {
+        Self {
+            cwd,
+            allowed_paths,
+            events_tx,
+        }
+    }
+
+    /// Emit tool output via events (if available) or fallback to log_event.
+    fn emit(&self, output: &str) {
+        if let Some(tx) = &self.events_tx {
+            let _ = tx.try_send(AgentEvent::ToolOutput(output.to_string()));
+        } else {
+            crate::logging::log_event(output);
+        }
     }
 }
 
@@ -185,10 +206,13 @@ impl CallableFunction for GlobTool {
                     ));
                 }
 
+                let count = matches.len();
+                self.emit(&format!("  {}", format!("{} files", count).dimmed()));
+
                 Ok(json!({
                     "pattern": pattern,
                     "matches": matches,
-                    "count": matches.len(),
+                    "count": count,
                     "total_found": total_found,
                     "truncated": head_limit.is_some_and(|l| total_found > offset + l as usize),
                     "errors": if errors.is_empty() { Value::Null } else { json!(errors) }
@@ -218,7 +242,7 @@ mod tests {
         fs::write(cwd.join("src/lib.rs"), "").unwrap();
         fs::write(cwd.join("README.md"), "").unwrap();
 
-        let tool = GlobTool::new(cwd.clone(), vec![cwd.clone()]);
+        let tool = GlobTool::new(cwd.clone(), vec![cwd.clone()], None);
         let args = json!({ "pattern": "src/*.rs" });
 
         let result = tool.call(args).await.unwrap();
@@ -236,7 +260,7 @@ mod tests {
         fs::write(cwd.join(".git/config"), "").unwrap();
         fs::write(cwd.join("file.txt"), "").unwrap();
 
-        let tool = GlobTool::new(cwd.clone(), vec![cwd.clone()]);
+        let tool = GlobTool::new(cwd.clone(), vec![cwd.clone()], None);
         let args = json!({ "pattern": "**/*" });
 
         let result = tool.call(args).await.unwrap();
@@ -248,7 +272,11 @@ mod tests {
     #[tokio::test]
     async fn test_glob_tool_no_matches() {
         let dir = tempdir().unwrap();
-        let tool = GlobTool::new(dir.path().to_path_buf(), vec![dir.path().to_path_buf()]);
+        let tool = GlobTool::new(
+            dir.path().to_path_buf(),
+            vec![dir.path().to_path_buf()],
+            None,
+        );
         let args = json!({ "pattern": "*.nonexistent" });
 
         let result = tool.call(args).await.unwrap();
@@ -271,7 +299,7 @@ mod tests {
         fs::write(subdir.join("test.txt"), "hello").unwrap();
         fs::write(cwd.join("root.txt"), "world").unwrap();
 
-        let tool = GlobTool::new(cwd.clone(), vec![cwd.clone()]);
+        let tool = GlobTool::new(cwd.clone(), vec![cwd.clone()], None);
 
         // Search in subdir
         let args = json!({
@@ -306,7 +334,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(100));
         fs::write(cwd.join("b.txt"), "very large content indeed").unwrap(); // 25 bytes
 
-        let tool = GlobTool::new(cwd.clone(), vec![cwd.clone()]);
+        let tool = GlobTool::new(cwd.clone(), vec![cwd.clone()], None);
 
         // Sort by name (alphabetical)
         let args = json!({
@@ -364,7 +392,7 @@ mod tests {
         fs::write(cwd.join("c.txt"), "").unwrap();
         fs::write(cwd.join("d.txt"), "").unwrap();
 
-        let tool = GlobTool::new(cwd.clone(), vec![cwd.clone()]);
+        let tool = GlobTool::new(cwd.clone(), vec![cwd.clone()], None);
 
         // Test offset
         let args = json!({

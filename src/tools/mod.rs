@@ -14,7 +14,10 @@ use anyhow::Result;
 use genai_rs::{CallableFunction, ToolService};
 use serde_json::Value;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
+use tokio::sync::mpsc;
+
+use crate::agent::AgentEvent;
 
 pub use ask_user::AskUserTool;
 pub use bash::BashTool;
@@ -37,6 +40,11 @@ pub struct CleminiToolService {
     is_mcp_mode: bool,
     allowed_paths: Vec<PathBuf>,
     api_key: String,
+    /// Event sender for tools to emit output events (for correct ordering).
+    /// Tools use this instead of calling log_event() directly.
+    /// Uses interior mutability so events_tx can be set per-interaction while
+    /// the tool service itself is created once at startup.
+    events_tx: Arc<RwLock<Option<mpsc::Sender<AgentEvent>>>>,
 }
 
 impl CleminiToolService {
@@ -53,6 +61,30 @@ impl CleminiToolService {
             is_mcp_mode,
             allowed_paths,
             api_key,
+            events_tx: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    /// Set the events sender for the current interaction.
+    /// Call with `Some(tx)` before `run_interaction` and `None` after.
+    pub fn set_events_tx(&self, tx: Option<mpsc::Sender<AgentEvent>>) {
+        match self.events_tx.write() {
+            Ok(mut guard) => *guard = tx,
+            Err(poisoned) => {
+                tracing::warn!("events_tx lock was poisoned, recovering");
+                *poisoned.into_inner() = tx;
+            }
+        }
+    }
+
+    /// Get a clone of the current events sender for tools.
+    fn events_tx(&self) -> Option<mpsc::Sender<AgentEvent>> {
+        match self.events_tx.read() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => {
+                tracing::warn!("events_tx lock was poisoned, recovering");
+                poisoned.into_inner().clone()
+            }
         }
     }
 
@@ -81,23 +113,45 @@ impl ToolService for CleminiToolService {
     /// - `ask_user`: Ask the user a question
     /// - `todo_write`: Display a todo list
     fn tools(&self) -> Vec<Arc<dyn CallableFunction>> {
+        let events_tx = self.events_tx();
         vec![
-            Arc::new(ReadTool::new(self.cwd.clone(), self.allowed_paths.clone())),
-            Arc::new(WriteTool::new(self.cwd.clone(), self.allowed_paths.clone())),
-            Arc::new(EditTool::new(self.cwd.clone(), self.allowed_paths.clone())),
+            Arc::new(ReadTool::new(
+                self.cwd.clone(),
+                self.allowed_paths.clone(),
+                events_tx.clone(),
+            )),
+            Arc::new(WriteTool::new(
+                self.cwd.clone(),
+                self.allowed_paths.clone(),
+                events_tx.clone(),
+            )),
+            Arc::new(EditTool::new(
+                self.cwd.clone(),
+                self.allowed_paths.clone(),
+                events_tx.clone(),
+            )),
             Arc::new(BashTool::new(
                 self.cwd.clone(),
                 self.allowed_paths.clone(),
                 self.bash_timeout,
                 self.is_mcp_mode,
+                events_tx.clone(),
             )),
-            Arc::new(GlobTool::new(self.cwd.clone(), self.allowed_paths.clone())),
-            Arc::new(GrepTool::new(self.cwd.clone(), self.allowed_paths.clone())),
-            Arc::new(KillShellTool::new()),
-            Arc::new(WebFetchTool::new(self.api_key.clone())),
-            Arc::new(WebSearchTool::new()),
-            Arc::new(AskUserTool::new()),
-            Arc::new(TodoWriteTool::new()),
+            Arc::new(GlobTool::new(
+                self.cwd.clone(),
+                self.allowed_paths.clone(),
+                events_tx.clone(),
+            )),
+            Arc::new(GrepTool::new(
+                self.cwd.clone(),
+                self.allowed_paths.clone(),
+                events_tx.clone(),
+            )),
+            Arc::new(KillShellTool::new(events_tx.clone())),
+            Arc::new(WebFetchTool::new(self.api_key.clone(), events_tx.clone())),
+            Arc::new(WebSearchTool::new(events_tx.clone())),
+            Arc::new(AskUserTool::new(events_tx.clone())),
+            Arc::new(TodoWriteTool::new(events_tx.clone())),
         ]
     }
 }

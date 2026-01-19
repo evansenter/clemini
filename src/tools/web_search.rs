@@ -1,6 +1,9 @@
+use crate::agent::AgentEvent;
 use async_trait::async_trait;
+use colored::Colorize;
 use genai_rs::{CallableFunction, FunctionDeclaration, FunctionError, FunctionParameters};
 use serde_json::{Value, json};
+use tokio::sync::mpsc;
 use tracing::instrument;
 
 #[derive(Debug, PartialEq)]
@@ -10,12 +13,22 @@ struct SearchArgs {
     blocked_domains: Option<Vec<String>>,
 }
 
-#[derive(Default)]
-pub struct WebSearchTool {}
+pub struct WebSearchTool {
+    events_tx: Option<mpsc::Sender<AgentEvent>>,
+}
 
 impl WebSearchTool {
-    pub fn new() -> Self {
-        Self {}
+    pub fn new(events_tx: Option<mpsc::Sender<AgentEvent>>) -> Self {
+        Self { events_tx }
+    }
+
+    /// Emit tool output via events (if available) or fallback to log_event.
+    fn emit(&self, output: &str) {
+        if let Some(tx) = &self.events_tx {
+            let _ = tx.try_send(AgentEvent::ToolOutput(output.to_string()));
+        } else {
+            crate::logging::log_event(output);
+        }
     }
 
     fn parse_args(&self, args: Value) -> Result<SearchArgs, FunctionError> {
@@ -136,6 +149,12 @@ impl CallableFunction for WebSearchTool {
                             }
                         }
 
+                        let result_count = results.len();
+                        self.emit(&format!(
+                            "  {}",
+                            format!("{} results", result_count).dimmed()
+                        ));
+
                         Ok(json!({
                             "query": search_args.query,
                             "abstract": abstract_text,
@@ -192,7 +211,7 @@ mod tests {
 
     #[test]
     fn test_declaration() {
-        let tool = WebSearchTool::new();
+        let tool = WebSearchTool::new(None);
         let decl = tool.declaration();
 
         assert_eq!(decl.name(), "web_search");
@@ -213,7 +232,7 @@ mod tests {
 
     #[test]
     fn test_parse_args_success() {
-        let tool = WebSearchTool::new();
+        let tool = WebSearchTool::new(None);
         let args = json!({
             "query": "rust programming"
         });
@@ -224,7 +243,7 @@ mod tests {
 
     #[test]
     fn test_parse_args_missing_query() {
-        let tool = WebSearchTool::new();
+        let tool = WebSearchTool::new(None);
         let args = json!({});
 
         let result = tool.parse_args(args);
@@ -237,7 +256,7 @@ mod tests {
 
     #[test]
     fn test_parse_args_invalid_query_type() {
-        let tool = WebSearchTool::new();
+        let tool = WebSearchTool::new(None);
         let args = json!({
             "query": 123
         });
@@ -252,7 +271,7 @@ mod tests {
 
     #[test]
     fn test_parse_args_with_domains() {
-        let tool = WebSearchTool::new();
+        let tool = WebSearchTool::new(None);
         let args = json!({
             "query": "rust",
             "allowed_domains": ["github.com", "rust-lang.org"],
@@ -273,7 +292,7 @@ mod tests {
 
     #[test]
     fn test_should_include_allowed() {
-        let tool = WebSearchTool::new();
+        let tool = WebSearchTool::new(None);
         let args = SearchArgs {
             query: "rust".to_string(),
             allowed_domains: Some(vec!["github.com".to_string()]),
@@ -287,7 +306,7 @@ mod tests {
 
     #[test]
     fn test_should_include_blocked() {
-        let tool = WebSearchTool::new();
+        let tool = WebSearchTool::new(None);
         let args = SearchArgs {
             query: "rust".to_string(),
             allowed_domains: None,
@@ -301,7 +320,7 @@ mod tests {
 
     #[test]
     fn test_should_include_both() {
-        let tool = WebSearchTool::new();
+        let tool = WebSearchTool::new(None);
         let args = SearchArgs {
             query: "rust".to_string(),
             allowed_domains: Some(vec!["github.com".to_string()]),

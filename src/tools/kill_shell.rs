@@ -1,15 +1,28 @@
+use crate::agent::AgentEvent;
 use crate::tools::{error_codes, error_response};
 use async_trait::async_trait;
+use colored::Colorize;
 use genai_rs::{CallableFunction, FunctionDeclaration, FunctionError, FunctionParameters};
 use serde_json::{Value, json};
+use tokio::sync::mpsc;
 use tracing::instrument;
 
-#[derive(Default)]
-pub struct KillShellTool;
+pub struct KillShellTool {
+    events_tx: Option<mpsc::Sender<AgentEvent>>,
+}
 
 impl KillShellTool {
-    pub fn new() -> Self {
-        Self
+    pub fn new(events_tx: Option<mpsc::Sender<AgentEvent>>) -> Self {
+        Self { events_tx }
+    }
+
+    /// Emit tool output via events (if available) or fallback to log_event.
+    fn emit(&self, output: &str) {
+        if let Some(tx) = &self.events_tx {
+            let _ = tx.try_send(AgentEvent::ToolOutput(output.to_string()));
+        } else {
+            crate::logging::log_event(output);
+        }
     }
 }
 
@@ -47,7 +60,7 @@ impl CallableFunction for KillShellTool {
         if let Some(mut child) = child.take() {
             match child.kill().await {
                 Ok(_) => {
-                    crate::logging::log_event(&format!("[kill_shell] Killed task {}", task_id));
+                    self.emit(&format!("  {}", "killed".dimmed()));
                     Ok(json!({
                         "task_id": task_id,
                         "status": "killed",
@@ -84,6 +97,7 @@ mod tests {
             vec![dir.path().to_path_buf()],
             5,
             false,
+            None,
         );
 
         // Start a background task
@@ -98,7 +112,7 @@ mod tests {
         let task_id = bash_result["task_id"].as_str().unwrap();
 
         // Kill it
-        let kill_tool = KillShellTool::new();
+        let kill_tool = KillShellTool::new(None);
         let kill_result = kill_tool.call(json!({ "task_id": task_id })).await.unwrap();
 
         assert!(kill_result["success"].as_bool().unwrap());
@@ -111,7 +125,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_kill_shell_not_found() {
-        let kill_tool = KillShellTool::new();
+        let kill_tool = KillShellTool::new(None);
         let result = kill_tool
             .call(json!({ "task_id": "non-existent" }))
             .await

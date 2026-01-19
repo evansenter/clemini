@@ -161,6 +161,7 @@ impl EventHandler for McpEventHandler {
         if let Some(err_msg) = error_message {
             crate::logging::log_event(&format_error_detail(err_msg));
         }
+        crate::logging::log_event(""); // Blank line after tool result
         // Send MCP notification
         self.send_notification(create_tool_result_notification(
             name,
@@ -178,6 +179,11 @@ impl EventHandler for McpEventHandler {
         if let Some(rendered) = flush_streaming_buffer() {
             write_to_streaming_log(&rendered);
         }
+    }
+
+    fn on_tool_output(&mut self, output: &str) {
+        // Tool output is pre-formatted with ANSI codes, skip markdown rendering
+        crate::logging::log_event_raw(output);
     }
 }
 
@@ -406,7 +412,24 @@ impl McpServer {
                                 .and_then(|v| v.get("text"))
                                 .and_then(|v| v.as_str())
                         {
-                            resp_body.push_str(&format!("\n{}", text));
+                            // For clemini_chat, avoid duplicating streamed text
+                            let tool_name = request_clone
+                                .params
+                                .as_ref()
+                                .and_then(|p| p.get("name"))
+                                .and_then(|v| v.as_str());
+                            if tool_name == Some("clemini_chat") {
+                                // Check if this is a confirmation response (not streamed)
+                                let has_confirmation =
+                                    res.get("needs_confirmation").is_some_and(|v| !v.is_null());
+                                if has_confirmation {
+                                    // Confirmation text wasn't streamed, log it all
+                                    resp_body.push_str(&format!("\n{}", text));
+                                }
+                                // Normal responses: text was streamed, interaction_id is in OUT line - nothing more to log
+                            } else {
+                                resp_body.push_str(&format!("\n{}", text));
+                            }
                         }
                     } else if let Some(err) = &response.error
                         && let Some(msg) = err.get("message").and_then(|v| v.as_str())
@@ -631,12 +654,15 @@ impl McpServer {
 
         // Spawn task to handle AgentEvents via McpEventHandler
         let tx_clone = tx.clone();
-        tokio::spawn(async move {
+        let event_handler = tokio::spawn(async move {
             let mut handler = McpEventHandler::new(tx_clone);
             while let Some(event) = events_rx.recv().await {
                 crate::events::dispatch_event(&mut handler, &event);
             }
         });
+
+        // Set events_tx so tools emit ToolOutput events instead of calling log_event directly
+        self.tool_service.set_events_tx(Some(events_tx.clone()));
 
         let result = run_interaction(
             &self.client,
@@ -649,6 +675,14 @@ impl McpServer {
             cancellation_token,
         )
         .await?;
+
+        // Clear events_tx after interaction completes - this closes the channel
+        // which causes the event handler loop to exit
+        self.tool_service.set_events_tx(None);
+
+        // Wait for event handler to finish processing all events before continuing
+        // This ensures streaming output is fully flushed before we return the response
+        let _ = event_handler.await;
 
         // Include interaction_id and needs_confirmation in the content text so it's visible to the LLM
         // (MCP protocol only guarantees content array is surfaced, not extra fields)
@@ -796,6 +830,7 @@ mod tests {
             vec![cwd],
             "dummy-key".to_string(),
         ));
+        // Note: events_tx is left as None for tests (tools fall back to log_event)
         McpServer::new(
             client,
             tool_service,
@@ -942,6 +977,8 @@ mod tests {
 
     #[test]
     fn test_mcp_handler_text_delta_no_notification() {
+        crate::logging::disable_logging();
+
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
         let mut handler = McpEventHandler::new(tx);
 

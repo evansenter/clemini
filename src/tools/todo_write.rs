@@ -1,11 +1,14 @@
+use crate::agent::AgentEvent;
 use async_trait::async_trait;
 use colored::Colorize;
 use genai_rs::{CallableFunction, FunctionDeclaration, FunctionError, FunctionParameters};
 use serde_json::{Value, json};
+use tokio::sync::mpsc;
 use tracing::instrument;
 
-#[derive(Default)]
-pub struct TodoWriteTool;
+pub struct TodoWriteTool {
+    events_tx: Option<mpsc::Sender<AgentEvent>>,
+}
 
 #[derive(Debug, PartialEq, Clone)]
 struct TodoItem {
@@ -32,8 +35,17 @@ impl From<&str> for TodoStatus {
 }
 
 impl TodoWriteTool {
-    pub fn new() -> Self {
-        Self
+    pub fn new(events_tx: Option<mpsc::Sender<AgentEvent>>) -> Self {
+        Self { events_tx }
+    }
+
+    /// Emit tool output via events (if available) or fallback to log_event.
+    fn emit(&self, output: &str) {
+        if let Some(tx) = &self.events_tx {
+            let _ = tx.try_send(AgentEvent::ToolOutput(output.to_string()));
+        } else {
+            crate::logging::log_event(output);
+        }
     }
 
     fn parse_args(&self, args: Value) -> Result<Vec<TodoItem>, FunctionError> {
@@ -146,9 +158,8 @@ impl CallableFunction for TodoWriteTool {
     async fn call(&self, args: Value) -> Result<Value, FunctionError> {
         let todos = self.parse_args(args)?;
 
-        crate::logging::log_event(""); // Leading newline before list
         for todo in &todos {
-            crate::logging::log_event(&Self::render_todo(todo));
+            self.emit(&Self::render_todo(todo));
         }
 
         Ok(json!({
@@ -166,7 +177,7 @@ mod tests {
 
     #[test]
     fn test_declaration() {
-        let tool = TodoWriteTool::new();
+        let tool = TodoWriteTool::new(None);
         let decl = tool.declaration();
 
         assert_eq!(decl.name(), "todo_write");
@@ -201,7 +212,7 @@ mod tests {
 
     #[test]
     fn test_parse_args_success() {
-        let tool = TodoWriteTool::new();
+        let tool = TodoWriteTool::new(None);
         let args = json!({
             "todos": [
                 { "content": "Task 1", "activeForm": "Running Task 1", "status": "completed" },
@@ -240,7 +251,7 @@ mod tests {
 
     #[test]
     fn test_parse_args_missing_todos() {
-        let tool = TodoWriteTool::new();
+        let tool = TodoWriteTool::new(None);
         let args = json!({});
 
         let result = tool.parse_args(args);
@@ -253,7 +264,7 @@ mod tests {
 
     #[test]
     fn test_parse_args_empty_array() {
-        let tool = TodoWriteTool::new();
+        let tool = TodoWriteTool::new(None);
         let args = json!({ "todos": [] });
 
         let todos = tool.parse_args(args).unwrap();
@@ -262,7 +273,7 @@ mod tests {
 
     #[test]
     fn test_parse_args_invalid_status() {
-        let tool = TodoWriteTool::new();
+        let tool = TodoWriteTool::new(None);
         let args = json!({
             "todos": [
                 { "content": "Unknown status", "activeForm": "Doing something", "status": "something_else" }
@@ -310,7 +321,7 @@ mod tests {
 
     #[test]
     fn test_parse_args_all_empty_content_errors() {
-        let tool = TodoWriteTool::new();
+        let tool = TodoWriteTool::new(None);
         let args = json!({
             "todos": [
                 { "content": "", "activeForm": "", "status": "pending" },
@@ -331,7 +342,7 @@ mod tests {
 
     #[test]
     fn test_parse_args_skips_empty_content() {
-        let tool = TodoWriteTool::new();
+        let tool = TodoWriteTool::new(None);
         let args = json!({
             "todos": [
                 { "content": "Valid task", "activeForm": "Doing valid task", "status": "pending" },
@@ -349,7 +360,7 @@ mod tests {
 
     #[test]
     fn test_parse_args_trims_whitespace() {
-        let tool = TodoWriteTool::new();
+        let tool = TodoWriteTool::new(None);
         let args = json!({
             "todos": [
                 { "content": "  Task with spaces  ", "activeForm": "  Doing task  ", "status": "pending" }

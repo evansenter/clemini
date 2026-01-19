@@ -63,6 +63,10 @@ pub enum AgentEvent {
 
     /// Cancelled by user.
     Cancelled,
+
+    /// Tool output to display (emitted by tools, not the agent).
+    /// Tools emit this for visual output instead of calling log_event() directly.
+    ToolOutput(String),
 }
 
 /// Result of an interaction.
@@ -682,6 +686,7 @@ mod tests {
             vec![temp.path().to_path_buf()],
             "fake-key".to_string(),
         ));
+        // Note: events_tx is left as None for tests (tools fall back to log_event)
         let (tx, mut rx) = mpsc::channel(10);
         let token = CancellationToken::new();
         let mut tool_calls = Vec::new();
@@ -729,6 +734,7 @@ mod tests {
             vec![temp.path().to_path_buf()],
             "fake-key".to_string(),
         ));
+        // Note: events_tx is left as None for tests (tools fall back to log_event)
         let (tx, _rx) = mpsc::channel(10);
         let token = CancellationToken::new();
         let mut tool_calls = Vec::new();
@@ -758,6 +764,7 @@ mod tests {
             vec![temp.path().to_path_buf()],
             "fake-key".to_string(),
         ));
+        // Note: events_tx is left as None for tests (tools fall back to log_event)
         let (tx, mut rx) = mpsc::channel(10);
         let token = CancellationToken::new();
         let mut tool_calls = Vec::new();
@@ -809,6 +816,7 @@ mod tests {
             vec![temp.path().to_path_buf()],
             "fake-key".to_string(),
         ));
+        // Note: events_tx is left as None for tests (tools fall back to log_event)
         let (tx, mut rx) = mpsc::channel(10);
         let token = CancellationToken::new();
         let mut tool_calls = Vec::new();

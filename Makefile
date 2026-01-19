@@ -1,4 +1,4 @@
-.PHONY: check build release test clippy fmt logs
+.PHONY: check build release test test-all clippy fmt logs
 
 LOG_DIR = $(HOME)/.clemini/logs
 LOG_FILE = $(LOG_DIR)/clemini.log.$(shell date +%Y-%m-%d)
@@ -12,12 +12,15 @@ build:
 release:
 	cargo build --release
 
-# Run tests separately for clearer output when one type fails.
-# Integration tests (confirmation_tests) are ignored by default; use --include-ignored for live API tests.
+# Run unit tests only (fast, no API key required)
 test:
 	cargo test --lib
 	cargo test --bin clemini
-	cargo test --test confirmation_tests
+	cargo test --test event_ordering_tests
+
+# Run all tests including integration tests (requires GEMINI_API_KEY)
+test-all:
+	cargo nextest run --run-ignored all
 
 clippy:
 	cargo clippy -- -D warnings

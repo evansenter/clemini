@@ -1,15 +1,28 @@
+use crate::agent::AgentEvent;
 use async_trait::async_trait;
+use colored::Colorize;
 use genai_rs::{CallableFunction, FunctionDeclaration, FunctionError, FunctionParameters};
 use serde_json::{Value, json};
+use tokio::sync::mpsc;
 use tracing::instrument;
 
 pub struct WebFetchTool {
     api_key: String,
+    events_tx: Option<mpsc::Sender<AgentEvent>>,
 }
 
 impl WebFetchTool {
-    pub fn new(api_key: String) -> Self {
-        Self { api_key }
+    pub fn new(api_key: String, events_tx: Option<mpsc::Sender<AgentEvent>>) -> Self {
+        Self { api_key, events_tx }
+    }
+
+    /// Emit tool output via events (if available) or fallback to log_event.
+    fn emit(&self, output: &str) {
+        if let Some(tx) = &self.events_tx {
+            let _ = tx.try_send(AgentEvent::ToolOutput(output.to_string()));
+        } else {
+            crate::logging::log_event(output);
+        }
     }
 
     fn parse_args(&self, args: Value) -> Result<(String, Option<String>), FunctionError> {
@@ -73,6 +86,7 @@ impl CallableFunction for WebFetchTool {
                 match resp.text().await {
                     Ok(mut text) => {
                         let original_len = text.len();
+                        self.emit(&format!("  {}", format!("{} bytes", original_len).dimmed()));
 
                         if let Some(prompt) = prompt {
                             // Convert HTML to markdown
@@ -153,7 +167,7 @@ mod tests {
 
     #[test]
     fn test_declaration() {
-        let tool = WebFetchTool::new("test-key".to_string());
+        let tool = WebFetchTool::new("test-key".to_string(), None);
         let decl = tool.declaration();
 
         assert_eq!(decl.name(), "web_fetch");
@@ -173,7 +187,7 @@ mod tests {
 
     #[test]
     fn test_parse_args_success() {
-        let tool = WebFetchTool::new("test-key".to_string());
+        let tool = WebFetchTool::new("test-key".to_string(), None);
         let args = json!({
             "url": "https://example.com"
         });
@@ -185,7 +199,7 @@ mod tests {
 
     #[test]
     fn test_parse_args_with_prompt() {
-        let tool = WebFetchTool::new("test-key".to_string());
+        let tool = WebFetchTool::new("test-key".to_string(), None);
         let args = json!({
             "url": "https://example.com",
             "prompt": "summarize this"
@@ -198,7 +212,7 @@ mod tests {
 
     #[test]
     fn test_parse_args_missing_url() {
-        let tool = WebFetchTool::new("test-key".to_string());
+        let tool = WebFetchTool::new("test-key".to_string(), None);
         let args = json!({});
 
         let result = tool.parse_args(args);
@@ -211,7 +225,7 @@ mod tests {
 
     #[test]
     fn test_parse_args_invalid_url_type() {
-        let tool = WebFetchTool::new("test-key".to_string());
+        let tool = WebFetchTool::new("test-key".to_string(), None);
         let args = json!({
             "url": 123
         });

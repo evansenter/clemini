@@ -63,9 +63,12 @@ pub struct TerminalSink;
 
 impl OutputSink for TerminalSink {
     fn emit(&self, message: &str, render_markdown: bool) {
-        if render_markdown {
-            // term_text includes trailing newline, use eprint to avoid doubling
-            eprint!("{}", events::SKIN.term_text(message));
+        if message.is_empty() {
+            // Empty message = blank line
+            eprintln!();
+        } else if render_markdown {
+            // text_nowrap includes trailing newline, use eprint to avoid doubling
+            eprint!("{}", events::text_nowrap(message));
         } else {
             eprintln!("{}", message);
         }
@@ -135,9 +138,9 @@ fn log_event_to_file(message: &str, render_markdown: bool) {
 
     colored::control::set_override(true);
 
-    // Optionally render markdown (can wrap long lines)
+    // Optionally render markdown (no wrapping)
     let rendered = if render_markdown {
-        events::SKIN.term_text(message).to_string()
+        events::text_nowrap(message)
     } else {
         message.to_string()
     };
@@ -434,6 +437,7 @@ async fn main() -> Result<()> {
         allowed_paths,
         api_key.clone(),
     ));
+    // Note: events_tx is set per-interaction via tool_service.set_events_tx()
 
     let mut system_prompt = SYSTEM_PROMPT.to_string();
     if let Ok(claude_md) = std::fs::read_to_string(cwd.join("CLAUDE.md")) {
@@ -522,6 +526,9 @@ async fn main() -> Result<()> {
             }
         });
 
+        // Set events_tx for tools to emit output through the event system
+        tool_service.set_events_tx(Some(events_tx.clone()));
+
         let result = run_interaction(
             &client,
             &tool_service,
@@ -533,6 +540,9 @@ async fn main() -> Result<()> {
             cancellation_token,
         )
         .await?;
+
+        // Clear events_tx after interaction
+        tool_service.set_events_tx(None);
 
         // Wait for event handler to finish
         let _ = event_handler.await;
@@ -582,6 +592,7 @@ enum AppEvent {
     },
     InteractionComplete(Result<InteractionResult>),
     ContextWarning(String),
+    ToolOutput(String),
 }
 
 /// Convert AgentEvent to AppEvents for the TUI.
@@ -611,6 +622,7 @@ fn convert_agent_event_to_app_events(event: &AgentEvent) -> Vec<AppEvent> {
         }
         // Complete and Cancelled are handled differently (via join handle result)
         AgentEvent::Complete { .. } | AgentEvent::Cancelled => vec![],
+        AgentEvent::ToolOutput(output) => vec![AppEvent::ToolOutput(output.clone())],
     }
 }
 
@@ -665,6 +677,7 @@ impl events::EventHandler for TuiEventHandler {
         if let Some(err_msg) = error_message {
             logging::log_event(&events::format_error_detail(err_msg));
         }
+        logging::log_event(""); // Blank line after tool result
     }
 
     fn on_context_warning(&mut self, percentage: f64) {
@@ -681,6 +694,14 @@ impl events::EventHandler for TuiEventHandler {
                 .try_send(AppEvent::StreamChunk(rendered.clone()));
             events::write_to_streaming_log(&rendered);
         }
+    }
+
+    fn on_tool_output(&mut self, output: &str) {
+        let _ = self
+            .app_tx
+            .try_send(AppEvent::ToolOutput(output.to_string()));
+        // Tool output is pre-formatted with ANSI codes, skip markdown rendering
+        logging::log_event_raw(output);
     }
 }
 
@@ -783,6 +804,9 @@ async fn run_plain_repl(
             }
         });
 
+        // Set events_tx for tools to emit output through the event system
+        tool_service.set_events_tx(Some(events_tx.clone()));
+
         match run_interaction(
             client,
             tool_service,
@@ -807,6 +831,9 @@ async fn run_plain_repl(
                 eprintln!("\n{}", format!("[error: {e}]").bright_red());
             }
         }
+
+        // Clear events_tx after interaction
+        tool_service.set_events_tx(None);
 
         // Wait for event handler to finish
         let _ = event_handler.await;
@@ -1008,6 +1035,9 @@ async fn run_tui_event_loop(
                                     }
                                 });
 
+                                // Set events_tx for tools to emit output through the event system
+                                tool_service.set_events_tx(Some(events_tx.clone()));
+
                                 let result = run_interaction(
                                     &client,
                                     &tool_service,
@@ -1019,6 +1049,9 @@ async fn run_tui_event_loop(
                                     cancellation_token,
                                 )
                                 .await;
+
+                                // Clear events_tx after interaction
+                                tool_service.set_events_tx(None);
 
                                 let _ = tx.send(AppEvent::InteractionComplete(result)).await;
                             });
@@ -1106,6 +1139,9 @@ async fn run_tui_event_loop(
                         app.append_to_chat("");
                         app.append_to_chat(&msg.bright_red().bold().to_string());
                         app.append_to_chat("");
+                    }
+                    AppEvent::ToolOutput(output) => {
+                        app.append_to_chat(&output);
                     }
                 }
             }
@@ -1576,6 +1612,8 @@ mod event_handling_tests {
 
     #[tokio::test]
     async fn test_tui_handler_text_delta_sends_stream_chunk() {
+        logging::disable_logging();
+
         let (tx, mut rx) = mpsc::channel::<AppEvent>(10);
         let mut handler = TuiEventHandler::new(tx);
 
