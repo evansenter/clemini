@@ -8,6 +8,40 @@ import shutil
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+
+def check_exercises_dirty():
+    """Check if benchmark/exercises has uncommitted changes. Returns list of modified files."""
+    result = subprocess.run(
+        ["git", "status", "--porcelain", "benchmark/exercises/"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return []
+    # Filter to only modified tracked files (M or space+M), not untracked (??)
+    modified = []
+    for line in result.stdout.strip().split("\n"):
+        if line and not line.startswith("??"):
+            # Extract filename (after the status prefix)
+            modified.append(line[3:] if len(line) > 3 else line)
+    return [f for f in modified if f]
+
+
+def reset_exercises():
+    """Reset benchmark/exercises to clean state using git checkout."""
+    print("Resetting exercises to clean state...")
+    result = subprocess.run(
+        ["git", "checkout", "--", "benchmark/exercises/"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        print(f"Warning: git checkout failed: {result.stderr}")
+        return False
+    print("Exercises reset successfully.")
+    return True
+
+
 def run_clemini(prompt, cwd):
     """Call clemini via subprocess with the given prompt."""
     cmd = [
@@ -117,16 +151,39 @@ def main():
     parser = argparse.ArgumentParser(description="Run clemini benchmark on exercises.")
     parser.add_argument("--parallel", type=int, default=2, help="Number of exercises to run in parallel.")
     parser.add_argument("--time-limit", type=int, default=5, help="Time limit in minutes.")
+    parser.add_argument("--reset", action="store_true", help="Reset exercises to clean state before running.")
+    parser.add_argument("-y", "--yes", action="store_true", help="Skip confirmation prompts.")
     args = parser.parse_args()
 
     repo_root = Path(__file__).parent.parent.absolute()
     os.chdir(repo_root)
-    
+
     base_dir = Path("benchmark/exercises")
     if not base_dir.exists():
         print(f"Error: {base_dir} not found. Run setup.py first.")
         sys.exit(1)
-        
+
+    # Handle reset flag
+    if args.reset:
+        reset_exercises()
+    else:
+        # Check for dirty state and warn
+        dirty_files = check_exercises_dirty()
+        if dirty_files:
+            print(f"\n⚠️  Warning: {len(dirty_files)} exercise file(s) have uncommitted changes:")
+            for f in dirty_files[:10]:  # Show first 10
+                print(f"   {f}")
+            if len(dirty_files) > 10:
+                print(f"   ... and {len(dirty_files) - 10} more")
+            print("\nBenchmark results may be affected by previous runs.")
+            print("Use --reset to restore exercises to clean state.\n")
+
+            if not args.yes:
+                response = input("Continue anyway? [y/N] ").strip().lower()
+                if response not in ("y", "yes"):
+                    print("Aborted.")
+                    sys.exit(0)
+
     exercises = sorted([d.name for d in base_dir.iterdir() if d.is_dir()])
     random.shuffle(exercises)
     
