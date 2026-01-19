@@ -20,6 +20,38 @@ use tokio::sync::mpsc;
 
 use crate::agent::AgentEvent;
 
+// ============================================================================
+// ToolEmitter trait - unified output emission for tools
+// ============================================================================
+
+/// Trait for tools that emit output events.
+/// Provides default `emit()` and `emit_raw()` implementations that send through
+/// the event channel or fall back to logging.
+pub trait ToolEmitter {
+    /// Returns a reference to the tool's events sender.
+    fn events_tx(&self) -> &Option<mpsc::Sender<AgentEvent>>;
+
+    /// Emit tool output through event channel or fallback to log.
+    /// This default implementation handles the common pattern.
+    fn emit(&self, output: &str) {
+        if let Some(tx) = self.events_tx() {
+            let _ = tx.try_send(AgentEvent::ToolOutput(output.to_string()));
+        } else {
+            crate::logging::log_event(output);
+        }
+    }
+
+    /// Emit raw tool output (no markdown rendering in fallback).
+    /// Use this for output that contains ANSI codes (like diffs).
+    fn emit_raw(&self, output: &str) {
+        if let Some(tx) = self.events_tx() {
+            let _ = tx.try_send(AgentEvent::ToolOutput(output.to_string()));
+        } else {
+            crate::logging::log_event_raw(output);
+        }
+    }
+}
+
 pub use ask_user::AskUserTool;
 pub use bash::BashTool;
 pub use edit::EditTool;
@@ -87,16 +119,6 @@ impl CleminiToolService {
                 tracing::warn!("events_tx lock was poisoned, recovering");
                 poisoned.into_inner().clone()
             }
-        }
-    }
-
-    /// Emit tool output through event channel or fallback to log.
-    /// Tools call this instead of duplicating the emit pattern.
-    pub fn emit_output(&self, output: &str) {
-        if let Some(ref tx) = self.events_tx() {
-            let _ = tx.try_send(AgentEvent::ToolOutput(output.to_string()));
-        } else {
-            crate::logging::log_event(output);
         }
     }
 

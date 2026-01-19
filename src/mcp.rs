@@ -22,8 +22,7 @@ use tracing::instrument;
 
 use crate::agent::{AgentEvent, run_interaction};
 use crate::events::{
-    EventHandler, buffer_text, flush_text_buffer, format_context_warning, format_error_detail,
-    format_tool_executing, format_tool_result, write_to_streaming_log,
+    EventHandler, buffer_text, flush_text_buffer, format_context_warning, write_to_streaming_log,
 };
 use crate::tools::CleminiToolService;
 
@@ -140,10 +139,10 @@ impl EventHandler for McpEventHandler {
 
     fn on_tool_executing(&mut self, name: &str, args: &Value) {
         // Flush buffer before tool output (normalizes to \n\n for spacing)
+        // Logging is handled by dispatch_event() after this method returns
         if let Some(rendered) = flush_text_buffer() {
             write_to_streaming_log(&rendered);
         }
-        crate::logging::log_event(&format_tool_executing(name, args));
         // Send MCP notification
         self.send_notification(create_tool_executing_notification(name, args));
     }
@@ -152,16 +151,11 @@ impl EventHandler for McpEventHandler {
         &mut self,
         name: &str,
         duration: std::time::Duration,
-        tokens: u32,
-        has_error: bool,
-        error_message: Option<&str>,
+        _tokens: u32,
+        _has_error: bool,
+        _error_message: Option<&str>,
     ) {
-        // Log to human-readable log
-        crate::logging::log_event(&format_tool_result(name, duration, tokens, has_error));
-        if let Some(err_msg) = error_message {
-            crate::logging::log_event(&format_error_detail(err_msg));
-        }
-        crate::logging::log_event(""); // Blank line after tool result
+        // Logging is handled by dispatch_event() after this method returns
         // Send MCP notification
         self.send_notification(create_tool_result_notification(
             name,

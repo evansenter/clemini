@@ -640,6 +640,7 @@ impl events::EventHandler for TuiEventHandler {
 
     fn on_tool_executing(&mut self, name: &str, args: &serde_json::Value) {
         // Flush buffer before tool output (normalizes to \n\n for spacing)
+        // Logging is handled by dispatch_event() after this method returns
         if let Some(rendered) = events::flush_text_buffer() {
             let _ = self
                 .app_tx
@@ -650,7 +651,6 @@ impl events::EventHandler for TuiEventHandler {
             name: name.to_string(),
             args: args.clone(),
         });
-        logging::log_event(&events::format_tool_executing(name, args));
     }
 
     fn on_tool_result(
@@ -659,21 +659,15 @@ impl events::EventHandler for TuiEventHandler {
         duration: std::time::Duration,
         tokens: u32,
         has_error: bool,
-        error_message: Option<&str>,
+        _error_message: Option<&str>,
     ) {
+        // Logging is handled by dispatch_event() after this method returns
         let _ = self.app_tx.try_send(AppEvent::ToolCompleted {
             name: name.to_string(),
             duration_ms: duration.as_millis() as u64,
             tokens,
             has_error,
         });
-        logging::log_event(&events::format_tool_result(
-            name, duration, tokens, has_error,
-        ));
-        if let Some(err_msg) = error_message {
-            logging::log_event(&events::format_error_detail(err_msg));
-        }
-        logging::log_event(""); // Blank line after tool result
     }
 
     fn on_context_warning(&mut self, percentage: f64) {

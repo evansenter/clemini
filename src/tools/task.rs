@@ -7,6 +7,7 @@ use tokio::process::Command;
 use tokio::sync::mpsc;
 use tracing::instrument;
 
+use super::ToolEmitter;
 use super::bash::{BACKGROUND_TASKS, NEXT_TASK_ID};
 use crate::agent::AgentEvent;
 
@@ -15,17 +16,15 @@ pub struct TaskTool {
     events_tx: Option<mpsc::Sender<AgentEvent>>,
 }
 
+impl ToolEmitter for TaskTool {
+    fn events_tx(&self) -> &Option<mpsc::Sender<AgentEvent>> {
+        &self.events_tx
+    }
+}
+
 impl TaskTool {
     pub fn new(cwd: PathBuf, events_tx: Option<mpsc::Sender<AgentEvent>>) -> Self {
         Self { cwd, events_tx }
-    }
-
-    fn emit(&self, output: &str) {
-        if let Some(tx) = &self.events_tx {
-            let _ = tx.try_send(AgentEvent::ToolOutput(output.to_string()));
-        } else {
-            crate::logging::log_event(output);
-        }
     }
 
     /// Get the clemini executable path.

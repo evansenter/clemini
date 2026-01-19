@@ -1,4 +1,5 @@
 use crate::agent::AgentEvent;
+use crate::tools::ToolEmitter;
 use async_trait::async_trait;
 use genai_rs::{CallableFunction, FunctionDeclaration, FunctionError, FunctionParameters};
 use serde_json::{Value, json};
@@ -10,18 +11,15 @@ pub struct AskUserTool {
     events_tx: Option<mpsc::Sender<AgentEvent>>,
 }
 
+impl ToolEmitter for AskUserTool {
+    fn events_tx(&self) -> &Option<mpsc::Sender<AgentEvent>> {
+        &self.events_tx
+    }
+}
+
 impl AskUserTool {
     pub fn new(events_tx: Option<mpsc::Sender<AgentEvent>>) -> Self {
         Self { events_tx }
-    }
-
-    /// Emit tool output via events (if available) or fallback to log_event.
-    fn emit(&self, output: &str) {
-        if let Some(tx) = &self.events_tx {
-            let _ = tx.try_send(AgentEvent::ToolOutput(output.to_string()));
-        } else {
-            crate::logging::log_event(output);
-        }
     }
 
     /// Resolve user's answer - if they entered a number matching an option, return the option value

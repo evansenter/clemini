@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use tokio::sync::mpsc;
 use tracing::instrument;
 
-use super::{error_codes, error_response, resolve_and_validate_path};
+use super::{ToolEmitter, error_codes, error_response, resolve_and_validate_path};
 use crate::agent::AgentEvent;
 
 pub struct WriteTool {
@@ -27,14 +27,11 @@ impl WriteTool {
             events_tx,
         }
     }
+}
 
-    /// Emit tool output via events channel or fallback to log_event.
-    fn emit(&self, output: &str) {
-        if let Some(tx) = &self.events_tx {
-            let _ = tx.try_send(AgentEvent::ToolOutput(output.to_string()));
-        } else {
-            crate::logging::log_event(output);
-        }
+impl ToolEmitter for WriteTool {
+    fn events_tx(&self) -> &Option<mpsc::Sender<AgentEvent>> {
+        &self.events_tx
     }
 }
 

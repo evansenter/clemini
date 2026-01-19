@@ -1,5 +1,5 @@
 use crate::agent::AgentEvent;
-use crate::tools::{error_codes, error_response};
+use crate::tools::{ToolEmitter, error_codes, error_response};
 use async_trait::async_trait;
 use colored::Colorize;
 use genai_rs::{CallableFunction, FunctionDeclaration, FunctionError, FunctionParameters};
@@ -95,24 +95,6 @@ impl BashTool {
         }
     }
 
-    /// Emit tool output via events (if available) or fallback to log_event.
-    fn emit(&self, output: &str) {
-        if let Some(tx) = &self.events_tx {
-            let _ = tx.try_send(AgentEvent::ToolOutput(output.to_string()));
-        } else {
-            crate::logging::log_event(output);
-        }
-    }
-
-    /// Emit raw tool output (no newline handling) via events or fallback to log_event_raw.
-    fn emit_raw(&self, output: &str) {
-        if let Some(tx) = &self.events_tx {
-            let _ = tx.try_send(AgentEvent::ToolOutput(output.to_string()));
-        } else {
-            crate::logging::log_event_raw(output);
-        }
-    }
-
     fn is_blocked(command: &str) -> Option<String> {
         for pattern in BLOCKED_PATTERNS.iter() {
             if pattern.is_match(command) {
@@ -163,6 +145,12 @@ impl BashTool {
         } else {
             false
         }
+    }
+}
+
+impl ToolEmitter for BashTool {
+    fn events_tx(&self) -> &Option<mpsc::Sender<AgentEvent>> {
+        &self.events_tx
     }
 }
 

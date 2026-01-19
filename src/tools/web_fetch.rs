@@ -1,4 +1,5 @@
 use crate::agent::AgentEvent;
+use crate::tools::ToolEmitter;
 use async_trait::async_trait;
 use colored::Colorize;
 use genai_rs::{CallableFunction, FunctionDeclaration, FunctionError, FunctionParameters};
@@ -11,18 +12,15 @@ pub struct WebFetchTool {
     events_tx: Option<mpsc::Sender<AgentEvent>>,
 }
 
+impl ToolEmitter for WebFetchTool {
+    fn events_tx(&self) -> &Option<mpsc::Sender<AgentEvent>> {
+        &self.events_tx
+    }
+}
+
 impl WebFetchTool {
     pub fn new(api_key: String, events_tx: Option<mpsc::Sender<AgentEvent>>) -> Self {
         Self { api_key, events_tx }
-    }
-
-    /// Emit tool output via events (if available) or fallback to log_event.
-    fn emit(&self, output: &str) {
-        if let Some(tx) = &self.events_tx {
-            let _ = tx.try_send(AgentEvent::ToolOutput(output.to_string()));
-        } else {
-            crate::logging::log_event(output);
-        }
     }
 
     fn parse_args(&self, args: Value) -> Result<(String, Option<String>), FunctionError> {

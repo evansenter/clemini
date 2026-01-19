@@ -90,6 +90,13 @@ pub fn buffer_text(text: &str) {
     }
 }
 
+/// Clear the text buffer. Used by tests to ensure isolation.
+pub fn clear_text_buffer() {
+    if let Ok(mut buffer) = TEXT_BUFFER.lock() {
+        buffer.clear();
+    }
+}
+
 /// Flush buffered text with markdown rendering, normalized to `\n\n`.
 /// Returns rendered text, or None if buffer was empty.
 /// Call at event boundaries (before tool execution, on complete).
@@ -324,8 +331,9 @@ impl EventHandler for TerminalEventHandler {
         buffer_text(text);
     }
 
-    fn on_tool_executing(&mut self, name: &str, args: &Value) {
+    fn on_tool_executing(&mut self, _name: &str, _args: &Value) {
         // Flush buffer before tool output (normalizes to \n\n for spacing)
+        // Logging is handled by dispatch_event() after this method returns
         if let Some(rendered) = flush_text_buffer() {
             if self.stream_enabled {
                 print!("{}", rendered);
@@ -333,22 +341,17 @@ impl EventHandler for TerminalEventHandler {
             }
             write_to_streaming_log(&rendered);
         }
-        log_event(&format_tool_executing(name, args));
     }
 
     fn on_tool_result(
         &mut self,
-        name: &str,
-        duration: Duration,
-        tokens: u32,
-        has_error: bool,
-        error_message: Option<&str>,
+        _name: &str,
+        _duration: Duration,
+        _tokens: u32,
+        _has_error: bool,
+        _error_message: Option<&str>,
     ) {
-        log_event(&format_tool_result(name, duration, tokens, has_error));
-        if let Some(err_msg) = error_message {
-            log_event(&format_error_detail(err_msg));
-        }
-        log_event(""); // Blank line after tool result
+        // Logging is handled by dispatch_event() after this method returns
     }
 
     fn on_context_warning(&mut self, percentage: f64) {
@@ -370,8 +373,8 @@ impl EventHandler for TerminalEventHandler {
 
 /// Dispatch an AgentEvent to the appropriate handler method.
 ///
-/// This is a convenience function that matches on the event type and calls
-/// the corresponding handler method.
+/// This function handles logging centrally so handlers don't need to duplicate
+/// log_event calls. The order is: handler method first (to flush buffers), then log.
 pub fn dispatch_event<H: EventHandler>(handler: &mut H, event: &crate::agent::AgentEvent) {
     use crate::agent::AgentEvent;
 
@@ -380,6 +383,8 @@ pub fn dispatch_event<H: EventHandler>(handler: &mut H, event: &crate::agent::Ag
         AgentEvent::ToolExecuting(calls) => {
             for call in calls {
                 handler.on_tool_executing(&call.name, &call.args);
+                // Unified logging: after handler (so buffer flushes first)
+                log_event(&format_call(call));
             }
         }
         AgentEvent::ToolResult(result) => {
@@ -397,6 +402,12 @@ pub fn dispatch_event<H: EventHandler>(handler: &mut H, event: &crate::agent::Ag
                 has_error,
                 error_message,
             );
+            // Unified logging: after handler
+            log_event(&format_result(result));
+            if let Some(err_msg) = error_message {
+                log_event(&format_error_detail(err_msg));
+            }
+            log_event(""); // Blank line after tool result
         }
         AgentEvent::ContextWarning { percentage, .. } => {
             handler.on_context_warning(*percentage);
@@ -917,7 +928,7 @@ mod tests {
     #[test]
     fn test_buffer_text_accumulates() {
         // Clear buffer before test
-        TEXT_BUFFER.lock().unwrap().clear();
+        clear_text_buffer();
 
         // Buffer text chunks
         buffer_text("Hello ");
@@ -933,7 +944,7 @@ mod tests {
 
     #[test]
     fn test_flush_empty_buffer() {
-        TEXT_BUFFER.lock().unwrap().clear();
+        clear_text_buffer();
         let out = flush_text_buffer();
         assert!(out.is_none());
     }
@@ -944,7 +955,7 @@ mod tests {
         // This is critical for consistent spacing before tool calls
 
         // Case 1: Text with no trailing newline -> normalized to \n\n
-        TEXT_BUFFER.lock().unwrap().clear();
+        clear_text_buffer();
         TEXT_BUFFER.lock().unwrap().push_str("Hello world");
         let out = flush_text_buffer().unwrap();
         assert!(
@@ -955,7 +966,7 @@ mod tests {
         assert!(!out.ends_with("\n\n\n"), "Should not have triple newline");
 
         // Case 2: Text with single trailing newline -> normalized to \n\n
-        TEXT_BUFFER.lock().unwrap().clear();
+        clear_text_buffer();
         TEXT_BUFFER.lock().unwrap().push_str("Hello world\n");
         let out = flush_text_buffer().unwrap();
         assert!(
@@ -965,7 +976,7 @@ mod tests {
         );
 
         // Case 3: Text with double trailing newline -> stays \n\n
-        TEXT_BUFFER.lock().unwrap().clear();
+        clear_text_buffer();
         TEXT_BUFFER.lock().unwrap().push_str("Hello world\n\n");
         let out = flush_text_buffer().unwrap();
         assert!(
@@ -979,7 +990,7 @@ mod tests {
     #[test]
     fn test_flush_returns_none_for_whitespace_only() {
         // If buffer only contains whitespace/newlines, flush should return None
-        TEXT_BUFFER.lock().unwrap().clear();
+        clear_text_buffer();
         TEXT_BUFFER.lock().unwrap().push_str("\n\n");
         let out = flush_text_buffer();
         assert!(out.is_none(), "Whitespace-only buffer should return None");
