@@ -5,6 +5,7 @@ mod glob;
 mod grep;
 mod kill_shell;
 mod read;
+mod task;
 mod todo_write;
 mod web_fetch;
 mod web_search;
@@ -26,6 +27,7 @@ pub use glob::GlobTool;
 pub use grep::GrepTool;
 pub use kill_shell::KillShellTool;
 pub use read::ReadTool;
+pub use task::TaskTool;
 pub use todo_write::TodoWriteTool;
 pub use web_fetch::WebFetchTool;
 pub use web_search::WebSearchTool;
@@ -108,6 +110,8 @@ impl ToolService for CleminiToolService {
     /// - `bash`: Execute shell commands
     /// - `glob`: Find files by pattern
     /// - `grep`: Search for text in files
+    /// - `kill_shell`: Kill a background task
+    /// - `task`: Spawn a clemini subagent
     /// - `web_fetch`: Fetch web content
     /// - `web_search`: Search the web using DuckDuckGo
     /// - `ask_user`: Ask the user a question
@@ -148,6 +152,7 @@ impl ToolService for CleminiToolService {
                 events_tx.clone(),
             )),
             Arc::new(KillShellTool::new(events_tx.clone())),
+            Arc::new(TaskTool::new(self.cwd.clone(), events_tx.clone())),
             Arc::new(WebFetchTool::new(self.api_key.clone(), events_tx.clone())),
             Arc::new(WebSearchTool::new(events_tx.clone())),
             Arc::new(AskUserTool::new(events_tx.clone())),

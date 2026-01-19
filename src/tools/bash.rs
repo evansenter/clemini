@@ -19,7 +19,7 @@ use tracing::instrument;
 pub(crate) static BACKGROUND_TASKS: LazyLock<Mutex<HashMap<String, tokio::process::Child>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-static NEXT_TASK_ID: AtomicUsize = AtomicUsize::new(1);
+pub(crate) static NEXT_TASK_ID: AtomicUsize = AtomicUsize::new(1);
 
 /// Blocked command patterns that are always rejected.
 static BLOCKED_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
