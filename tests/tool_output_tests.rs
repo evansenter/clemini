@@ -33,14 +33,13 @@ fn create_test_tool_service(
     temp_dir: &tempfile::TempDir,
     api_key: &str,
 ) -> Arc<CleminiToolService> {
-    let service = Arc::new(CleminiToolService::new(
+    Arc::new(CleminiToolService::new(
         temp_dir.path().to_path_buf(),
         120,   // bash_timeout
         false, // mcp_mode = false for standard behavior
         vec![temp_dir.path().to_path_buf()],
         api_key.to_string(),
-    ));
-    service
+    ))
 }
 
 /// Helper to run an interaction and collect events

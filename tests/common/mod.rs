@@ -21,6 +21,7 @@ use tempfile::TempDir;
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Extended timeout for multi-turn interactions
+#[allow(dead_code)]
 pub const EXTENDED_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Creates a client from the GEMINI_API_KEY environment variable.
