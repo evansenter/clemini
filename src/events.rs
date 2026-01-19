@@ -57,6 +57,58 @@ pub fn text_nowrap(text: &str) -> String {
     FmtText::from(&SKIN, text, Some(10000)).to_string()
 }
 
+// ============================================================================
+// Text Buffer (shared across EventHandler implementations)
+// ============================================================================
+
+/// Buffer for accumulating streaming text until event boundaries.
+///
+/// Text is buffered via `push()` at each TextDelta event, then flushed with
+/// markdown rendering at event boundaries (tool executing, complete).
+/// The `flush()` method normalizes trailing newlines to exactly `\n\n`.
+#[derive(Debug, Default)]
+pub struct TextBuffer(String);
+
+impl TextBuffer {
+    /// Create a new empty text buffer.
+    pub fn new() -> Self {
+        Self(String::new())
+    }
+
+    /// Append text to the buffer.
+    pub fn push(&mut self, text: &str) {
+        self.0.push_str(text);
+    }
+
+    /// Flush buffered text with markdown rendering, normalized to `\n\n`.
+    /// Returns rendered text, or None if buffer was empty or whitespace-only.
+    pub fn flush(&mut self) -> Option<String> {
+        if self.0.is_empty() {
+            return None;
+        }
+
+        let text = std::mem::take(&mut self.0);
+        let rendered = text_nowrap(&text);
+
+        // Normalize trailing newlines to exactly \n\n
+        let trimmed = rendered.trim_end_matches('\n');
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(format!("{}\n\n", trimmed))
+        }
+    }
+
+    /// Check if the buffer is empty.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+// ============================================================================
+// File Logging
+// ============================================================================
+
 /// Write streaming text directly to a log file (no newline added).
 fn write_streaming_to_log_file(path: impl Into<PathBuf>, text: &str) -> std::io::Result<()> {
     let mut file = std::fs::OpenOptions::new()
@@ -68,7 +120,7 @@ fn write_streaming_to_log_file(path: impl Into<PathBuf>, text: &str) -> std::io:
 }
 
 /// Write rendered text to log files.
-/// Used by EventHandlers after flushing with `flush_text_buffer()`.
+/// Used by EventHandlers after flushing with `TextBuffer::flush()`.
 pub fn write_to_streaming_log(rendered: &str) {
     // Skip logging during tests unless explicitly enabled
     if !crate::logging::is_logging_enabled() {
@@ -251,54 +303,27 @@ pub trait EventHandler {
 /// Event handler for terminal output (plain REPL and non-interactive modes).
 pub struct TerminalEventHandler {
     stream_enabled: bool,
-    /// Per-handler text buffer for streaming text accumulation.
-    /// Text is buffered until event boundaries, then rendered with markdown.
-    text_buffer: String,
+    text_buffer: TextBuffer,
 }
 
 impl TerminalEventHandler {
     pub fn new(stream_enabled: bool) -> Self {
         Self {
             stream_enabled,
-            text_buffer: String::new(),
-        }
-    }
-
-    /// Buffer text for later rendering. Called at each TextDelta event.
-    fn buffer_text(&mut self, text: &str) {
-        self.text_buffer.push_str(text);
-    }
-
-    /// Flush buffered text with markdown rendering, normalized to `\n\n`.
-    /// Returns rendered text, or None if buffer was empty.
-    fn flush_buffer(&mut self) -> Option<String> {
-        if self.text_buffer.is_empty() {
-            return None;
-        }
-
-        let text = std::mem::take(&mut self.text_buffer);
-        let rendered = text_nowrap(&text);
-
-        // Normalize trailing newlines to exactly \n\n
-        let trimmed = rendered.trim_end_matches('\n');
-        if trimmed.is_empty() {
-            None
-        } else {
-            Some(format!("{}\n\n", trimmed))
+            text_buffer: TextBuffer::new(),
         }
     }
 }
 
 impl EventHandler for TerminalEventHandler {
     fn on_text_delta(&mut self, text: &str) {
-        // Buffer text until event boundary (full buffering architecture)
-        self.buffer_text(text);
+        self.text_buffer.push(text);
     }
 
     fn on_tool_executing(&mut self, _name: &str, _args: &Value) {
         // Flush buffer before tool output (normalizes to \n\n for spacing)
         // Logging is handled by dispatch_event() after this method returns
-        if let Some(rendered) = self.flush_buffer() {
+        if let Some(rendered) = self.text_buffer.flush() {
             if self.stream_enabled {
                 print!("{}", rendered);
                 let _ = io::stdout().flush();
@@ -325,7 +350,7 @@ impl EventHandler for TerminalEventHandler {
 
     fn on_complete(&mut self) {
         // Flush any remaining buffered text (normalizes to \n\n)
-        if let Some(rendered) = self.flush_buffer() {
+        if let Some(rendered) = self.text_buffer.flush() {
             if self.stream_enabled {
                 print!("{}", rendered);
                 let _ = io::stdout().flush();
@@ -886,42 +911,44 @@ mod tests {
     }
 
     // =========================================
-    // Per-handler text buffer tests
+    // TextBuffer tests
     // =========================================
 
     #[test]
-    fn test_terminal_handler_buffer_accumulates() {
-        let mut handler = TerminalEventHandler::new(false);
+    fn test_text_buffer_accumulates() {
+        let mut buffer = TextBuffer::new();
 
         // Buffer text chunks
-        handler.buffer_text("Hello ");
-        handler.buffer_text("world!");
+        buffer.push("Hello ");
+        buffer.push("world!");
 
         // Flush returns rendered content
-        let out = handler.flush_buffer();
+        let out = buffer.flush();
         assert!(out.is_some());
         assert!(out.unwrap().contains("Hello world!"));
 
         // Buffer is now empty
-        assert!(handler.flush_buffer().is_none());
+        assert!(buffer.flush().is_none());
+        assert!(buffer.is_empty());
     }
 
     #[test]
-    fn test_terminal_handler_flush_empty_buffer() {
-        let mut handler = TerminalEventHandler::new(false);
-        let out = handler.flush_buffer();
+    fn test_text_buffer_flush_empty() {
+        let mut buffer = TextBuffer::new();
+        assert!(buffer.is_empty());
+        let out = buffer.flush();
         assert!(out.is_none());
     }
 
     #[test]
-    fn test_terminal_handler_flush_normalizes_to_double_newline() {
-        // flush_buffer should normalize output to end with exactly \n\n
+    fn test_text_buffer_flush_normalizes_to_double_newline() {
+        // flush() should normalize output to end with exactly \n\n
         // This is critical for consistent spacing before tool calls
 
         // Case 1: Text with no trailing newline -> normalized to \n\n
-        let mut handler = TerminalEventHandler::new(false);
-        handler.buffer_text("Hello world");
-        let out = handler.flush_buffer().unwrap();
+        let mut buffer = TextBuffer::new();
+        buffer.push("Hello world");
+        let out = buffer.flush().unwrap();
         assert!(
             out.ends_with("\n\n"),
             "Should end with \\n\\n, got: {:?}",
@@ -930,9 +957,9 @@ mod tests {
         assert!(!out.ends_with("\n\n\n"), "Should not have triple newline");
 
         // Case 2: Text with single trailing newline -> normalized to \n\n
-        let mut handler = TerminalEventHandler::new(false);
-        handler.buffer_text("Hello world\n");
-        let out = handler.flush_buffer().unwrap();
+        let mut buffer = TextBuffer::new();
+        buffer.push("Hello world\n");
+        let out = buffer.flush().unwrap();
         assert!(
             out.ends_with("\n\n"),
             "Should end with \\n\\n, got: {:?}",
@@ -940,9 +967,9 @@ mod tests {
         );
 
         // Case 3: Text with double trailing newline -> stays \n\n
-        let mut handler = TerminalEventHandler::new(false);
-        handler.buffer_text("Hello world\n\n");
-        let out = handler.flush_buffer().unwrap();
+        let mut buffer = TextBuffer::new();
+        buffer.push("Hello world\n\n");
+        let out = buffer.flush().unwrap();
         assert!(
             out.ends_with("\n\n"),
             "Should end with \\n\\n, got: {:?}",
@@ -952,11 +979,18 @@ mod tests {
     }
 
     #[test]
-    fn test_terminal_handler_flush_returns_none_for_whitespace_only() {
+    fn test_text_buffer_flush_returns_none_for_whitespace_only() {
         // If buffer only contains whitespace/newlines, flush should return None
-        let mut handler = TerminalEventHandler::new(false);
-        handler.buffer_text("\n\n");
-        let out = handler.flush_buffer();
+        let mut buffer = TextBuffer::new();
+        buffer.push("\n\n");
+        let out = buffer.flush();
         assert!(out.is_none(), "Whitespace-only buffer should return None");
+    }
+
+    #[test]
+    fn test_text_buffer_default() {
+        // TextBuffer implements Default
+        let buffer = TextBuffer::default();
+        assert!(buffer.is_empty());
     }
 }

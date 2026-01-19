@@ -21,7 +21,7 @@ use tracing::instrument;
 // Note: info! macro goes to JSON logs only. For human-readable logs, use crate::logging::log_event()
 
 use crate::agent::{AgentEvent, run_interaction};
-use crate::events::{EventHandler, format_context_warning, text_nowrap, write_to_streaming_log};
+use crate::events::{EventHandler, TextBuffer, format_context_warning, write_to_streaming_log};
 use crate::tools::CleminiToolService;
 
 #[derive(Debug, Deserialize, Clone)]
@@ -115,15 +115,14 @@ fn create_tool_result_notification(name: &str, duration_ms: u64) -> Value {
 /// MCP-specific event handler that logs events and sends MCP progress notifications.
 struct McpEventHandler {
     notification_tx: mpsc::UnboundedSender<String>,
-    /// Per-handler text buffer for streaming text accumulation.
-    text_buffer: String,
+    text_buffer: TextBuffer,
 }
 
 impl McpEventHandler {
     fn new(notification_tx: mpsc::UnboundedSender<String>) -> Self {
         Self {
             notification_tx,
-            text_buffer: String::new(),
+            text_buffer: TextBuffer::new(),
         }
     }
 
@@ -132,40 +131,17 @@ impl McpEventHandler {
             let _ = self.notification_tx.send(format!("{}\n", s));
         }
     }
-
-    /// Buffer text for later rendering.
-    fn buffer_text(&mut self, text: &str) {
-        self.text_buffer.push_str(text);
-    }
-
-    /// Flush buffered text with markdown rendering, normalized to `\n\n`.
-    fn flush_buffer(&mut self) -> Option<String> {
-        if self.text_buffer.is_empty() {
-            return None;
-        }
-
-        let text = std::mem::take(&mut self.text_buffer);
-        let rendered = text_nowrap(&text);
-
-        let trimmed = rendered.trim_end_matches('\n');
-        if trimmed.is_empty() {
-            None
-        } else {
-            Some(format!("{}\n\n", trimmed))
-        }
-    }
 }
 
 impl EventHandler for McpEventHandler {
     fn on_text_delta(&mut self, text: &str) {
-        // Buffer text until event boundary (full buffering architecture)
-        self.buffer_text(text);
+        self.text_buffer.push(text);
     }
 
     fn on_tool_executing(&mut self, name: &str, args: &Value) {
         // Flush buffer before tool output (normalizes to \n\n for spacing)
         // Logging is handled by dispatch_event() after this method returns
-        if let Some(rendered) = self.flush_buffer() {
+        if let Some(rendered) = self.text_buffer.flush() {
             write_to_streaming_log(&rendered);
         }
         // Send MCP notification
@@ -195,7 +171,7 @@ impl EventHandler for McpEventHandler {
 
     fn on_complete(&mut self) {
         // Flush any remaining buffered text (normalizes to \n\n)
-        if let Some(rendered) = self.flush_buffer() {
+        if let Some(rendered) = self.text_buffer.flush() {
             write_to_streaming_log(&rendered);
         }
     }

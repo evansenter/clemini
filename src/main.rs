@@ -606,51 +606,27 @@ fn convert_agent_event_to_app_events(event: &AgentEvent) -> Vec<AppEvent> {
 /// Also logs events to file for `make logs` visibility.
 struct TuiEventHandler {
     app_tx: mpsc::Sender<AppEvent>,
-    /// Per-handler text buffer for streaming text accumulation.
-    text_buffer: String,
+    text_buffer: events::TextBuffer,
 }
 
 impl TuiEventHandler {
     fn new(app_tx: mpsc::Sender<AppEvent>) -> Self {
         Self {
             app_tx,
-            text_buffer: String::new(),
-        }
-    }
-
-    /// Buffer text for later rendering.
-    fn buffer_text(&mut self, text: &str) {
-        self.text_buffer.push_str(text);
-    }
-
-    /// Flush buffered text with markdown rendering, normalized to `\n\n`.
-    fn flush_buffer(&mut self) -> Option<String> {
-        if self.text_buffer.is_empty() {
-            return None;
-        }
-
-        let text = std::mem::take(&mut self.text_buffer);
-        let rendered = events::text_nowrap(&text);
-
-        let trimmed = rendered.trim_end_matches('\n');
-        if trimmed.is_empty() {
-            None
-        } else {
-            Some(format!("{}\n\n", trimmed))
+            text_buffer: events::TextBuffer::new(),
         }
     }
 }
 
 impl events::EventHandler for TuiEventHandler {
     fn on_text_delta(&mut self, text: &str) {
-        // Buffer text until event boundary (full buffering architecture)
-        self.buffer_text(text);
+        self.text_buffer.push(text);
     }
 
     fn on_tool_executing(&mut self, name: &str, args: &serde_json::Value) {
         // Flush buffer before tool output (normalizes to \n\n for spacing)
         // Logging is handled by dispatch_event() after this method returns
-        if let Some(rendered) = self.flush_buffer() {
+        if let Some(rendered) = self.text_buffer.flush() {
             let _ = self
                 .app_tx
                 .try_send(AppEvent::StreamChunk(rendered.clone()));
@@ -687,7 +663,7 @@ impl events::EventHandler for TuiEventHandler {
 
     fn on_complete(&mut self) {
         // Flush any remaining buffered text (normalizes to \n\n)
-        if let Some(rendered) = self.flush_buffer() {
+        if let Some(rendered) = self.text_buffer.flush() {
             let _ = self
                 .app_tx
                 .try_send(AppEvent::StreamChunk(rendered.clone()));
