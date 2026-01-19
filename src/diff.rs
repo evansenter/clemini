@@ -1,17 +1,17 @@
 //! Diff formatting utilities for visualizing text changes.
 
 use colored::Colorize;
-use once_cell::sync::Lazy;
 use similar::{ChangeTag, TextDiff};
+use std::sync::LazyLock;
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{Style, Theme, ThemeSet};
 use syntect::parsing::SyntaxSet;
 
 /// Syntax set for language detection and parsing.
-static SYNTAX_SET: Lazy<SyntaxSet> = Lazy::new(SyntaxSet::load_defaults_newlines);
+static SYNTAX_SET: LazyLock<SyntaxSet> = LazyLock::new(SyntaxSet::load_defaults_newlines);
 
 /// Catppuccin Mocha theme (bundled from catppuccin/bat).
-static CATPPUCCIN_MOCHA: Lazy<Theme> = Lazy::new(|| {
+static CATPPUCCIN_MOCHA: LazyLock<Theme> = LazyLock::new(|| {
     let theme_bytes = include_bytes!("../themes/catppuccin-mocha.tmTheme");
     let mut cursor = std::io::Cursor::new(theme_bytes);
     ThemeSet::load_from_reader(&mut cursor).expect("bundled theme should be valid")
@@ -170,17 +170,7 @@ fn format_line_content(
 ) -> String {
     match highlighter {
         Some(h) => highlight_line_with_bg(line, h, bg),
-        None => match bg {
-            Some(_) => {
-                // No syntax highlighting, use simple foreground color
-                if bg == Some(DELETE_BG) {
-                    line.red().to_string()
-                } else {
-                    line.green().to_string()
-                }
-            }
-            None => line.dimmed().to_string(),
-        },
+        None => fallback_color(line, bg),
     }
 }
 
