@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "clemini": {
+      "command": "/path/to/clemini/target/release/clemini",
+      "args": ["--mcp-server"],
+      "env": {
+        "GEMINI_API_KEY": "${GEMINI_API_KEY}"
+      }
+    }
+  }
+}

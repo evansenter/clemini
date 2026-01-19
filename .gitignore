@@ -17,6 +17,9 @@ Thumbs.db
 .env.local
 tmp/
 
+# MCP config (machine-specific paths)
+.mcp.json
+
 # Claude Code local settings
 .claude/settings.local.json
 
