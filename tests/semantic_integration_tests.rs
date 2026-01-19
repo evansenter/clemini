@@ -24,10 +24,12 @@ use tokio_util::sync::CancellationToken;
 
 const TEST_MODEL: &str = "gemini-3-flash-preview";
 
-const TEST_SYSTEM_PROMPT: &str = r#"You are a helpful coding assistant being tested.
+const TEST_SYSTEM_PROMPT: &str = r#"You are clemini, a helpful coding assistant.
 Execute requested tasks using the available tools.
 Be concise but complete in your responses.
-When you encounter errors, explain what went wrong and try alternative approaches."#;
+When you encounter errors, explain what went wrong and try alternative approaches.
+Use `ls` via the `bash` tool or use the `glob` tool to list files.
+Do not hallucinate tools that are not in your provided toolset."#;
 
 /// Helper to create a tool service for testing
 fn create_test_tool_service(

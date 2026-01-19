@@ -652,11 +652,15 @@ impl events::EventHandler for TuiEventHandler {
     fn on_tool_executing(&mut self, name: &str, args: &serde_json::Value) {
         // Flush streaming buffer before tool output (normalizes to \n\n)
         if let Some(rendered) = events::flush_streaming_buffer() {
-            let _ = self.app_tx.try_send(AppEvent::StreamChunk(rendered.clone()));
+            let _ = self
+                .app_tx
+                .try_send(AppEvent::StreamChunk(rendered.clone()));
             events::write_to_streaming_log(&rendered);
         } else {
             // No buffered content - add blank line for spacing
-            let _ = self.app_tx.try_send(AppEvent::StreamChunk("\n".to_string()));
+            let _ = self
+                .app_tx
+                .try_send(AppEvent::StreamChunk("\n".to_string()));
             logging::log_event("");
         }
         let _ = self.app_tx.try_send(AppEvent::ToolExecuting {
@@ -704,7 +708,9 @@ impl events::EventHandler for TuiEventHandler {
             events::write_to_streaming_log(&rendered);
         } else {
             // No buffered content - add blank line for spacing before OUT
-            let _ = self.app_tx.try_send(AppEvent::StreamChunk("\n".to_string()));
+            let _ = self
+                .app_tx
+                .try_send(AppEvent::StreamChunk("\n".to_string()));
             logging::log_event("");
         }
     }
