@@ -29,7 +29,7 @@ impl TaskTool {
     }
 
     /// Get the clemini executable path.
-    /// Tries current executable first, falls back to cargo run.
+    /// Tries current executable first, falls back to cargo run (development only).
     fn get_clemini_command() -> (String, Vec<String>) {
         // Try current executable first
         if let Ok(exe) = std::env::current_exe()
@@ -37,7 +37,11 @@ impl TaskTool {
         {
             return (exe.to_string_lossy().to_string(), vec![]);
         }
-        // Fallback to cargo run
+        // Fallback to cargo run - only useful during development
+        tracing::warn!(
+            "current_exe() failed or doesn't exist, falling back to 'cargo run'. \
+             This is expected during development but indicates an issue in production."
+        );
         (
             "cargo".to_string(),
             vec!["run".to_string(), "--quiet".to_string(), "--".to_string()],
@@ -52,7 +56,8 @@ impl CallableFunction for TaskTool {
             "task".to_string(),
             "Spawn a clemini subagent to handle a delegated task. Use for parallel work, \
              long-running operations, or breaking down complex tasks. \
-             Returns: {task_id, status} for background, {status, output, exit_code} for foreground."
+             Limitations: subagent cannot use interactive tools (ask_user) and has its own sandbox based on cwd. \
+             Returns: {task_id, status} for background, {status, stdout, stderr, exit_code} for foreground."
                 .to_string(),
             FunctionParameters::new(
                 "object".to_string(),
@@ -84,6 +89,8 @@ impl CallableFunction for TaskTool {
 
         let (cmd, mut cmd_args) = Self::get_clemini_command();
         cmd_args.extend(["-p".to_string(), prompt.to_string()]);
+        // Note: subagent gets its own sandbox based on cwd. It does not inherit the parent's
+        // allowed_paths - this is intentional as the subagent operates as an independent instance.
         cmd_args.extend(["--cwd".to_string(), self.cwd.to_string_lossy().to_string()]);
 
         if background {
