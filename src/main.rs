@@ -61,8 +61,8 @@ impl OutputSink for TerminalSink {
             // Empty message = blank line
             eprintln!();
         } else if render_markdown {
-            // text_nowrap includes trailing newline, use eprint to avoid doubling
-            eprint!("{}", events::text_nowrap(message));
+            // render_markdown_nowrap includes trailing newline, use eprint to avoid doubling
+            eprint!("{}", events::render_markdown_nowrap(message));
         } else {
             eprintln!("{}", message);
         }
@@ -114,7 +114,7 @@ fn log_event_to_file(message: &str, render_markdown: bool) {
 
     // Optionally render markdown (no wrapping)
     let rendered = if render_markdown {
-        events::text_nowrap(message)
+        events::render_markdown_nowrap(message)
     } else {
         message.to_string()
     };

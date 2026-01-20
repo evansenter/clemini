@@ -52,7 +52,7 @@ pub static SKIN: LazyLock<MadSkin> = LazyLock::new(|| {
 
 /// Render text with markdown formatting but without line wrapping.
 /// Uses a very large width to effectively disable termimad's wrapping.
-pub fn text_nowrap(text: &str) -> String {
+pub fn render_markdown_nowrap(text: &str) -> String {
     use termimad::FmtText;
     FmtText::from(&SKIN, text, Some(10000)).to_string()
 }
@@ -88,7 +88,7 @@ impl TextBuffer {
         }
 
         let text = std::mem::take(&mut self.0);
-        let rendered = text_nowrap(&text);
+        let rendered = render_markdown_nowrap(&text);
 
         // Normalize trailing newlines to exactly \n\n
         let trimmed = rendered.trim_end_matches('\n');
@@ -992,5 +992,26 @@ mod tests {
         // TextBuffer implements Default
         let buffer = TextBuffer::default();
         assert!(buffer.is_empty());
+    }
+
+    // =========================================
+    // EventHandler spacing tests
+    // =========================================
+
+    #[test]
+    fn test_terminal_event_handler_spacing_contract() {
+        // This specifically tests the spacing contract for TerminalEventHandler:
+        // when text is buffered and then a tool executes, the buffer must be flushed.
+        let mut handler = TerminalEventHandler::new(false); // stream disabled to avoid stdout pollution
+        handler.on_text_delta("Some text");
+
+        // At this point, text is in buffer.
+        assert!(!handler.text_buffer.is_empty());
+
+        // on_tool_executing should flush the buffer
+        handler.on_tool_executing("tool", &serde_json::json!({}));
+
+        // Buffer should be empty now
+        assert!(handler.text_buffer.is_empty());
     }
 }
