@@ -1,5 +1,5 @@
 use crate::agent::AgentEvent;
-use crate::tools::ToolEmitter;
+use crate::tools::{MAX_TOOL_OUTPUT_LEN, ToolEmitter};
 use async_trait::async_trait;
 use colored::Colorize;
 use genai_rs::{CallableFunction, FunctionDeclaration, FunctionError, FunctionParameters};
@@ -90,10 +90,12 @@ impl CallableFunction for WebFetchTool {
                             // Convert HTML to markdown
                             let markdown = html2md::parse_html(&text);
                             let mut truncated_md = markdown.clone();
-                            if truncated_md.len() > 50000 {
-                                truncated_md.truncate(50000);
-                                truncated_md
-                                    .push_str("\n\n[Content truncated to 50000 characters]");
+                            if truncated_md.len() > MAX_TOOL_OUTPUT_LEN {
+                                truncated_md.truncate(MAX_TOOL_OUTPUT_LEN);
+                                truncated_md.push_str(&format!(
+                                    "\n\n[Content truncated to {} characters]",
+                                    MAX_TOOL_OUTPUT_LEN
+                                ));
                             }
 
                             // Process with Gemini
@@ -121,11 +123,12 @@ impl CallableFunction for WebFetchTool {
                                 }
                                 Err(e) => {
                                     // If LLM fails, return raw content with a note
-                                    if text.len() > 50000 {
-                                        text.truncate(50000);
-                                        text.push_str(
-                                            "\n\n[Content truncated to 50000 characters]",
-                                        );
+                                    if text.len() > MAX_TOOL_OUTPUT_LEN {
+                                        text.truncate(MAX_TOOL_OUTPUT_LEN);
+                                        text.push_str(&format!(
+                                            "\n\n[Content truncated to {} characters]",
+                                            MAX_TOOL_OUTPUT_LEN
+                                        ));
                                     }
                                     return Ok(json!({
                                         "url": url,
@@ -137,9 +140,12 @@ impl CallableFunction for WebFetchTool {
                             }
                         }
 
-                        if text.len() > 50000 {
-                            text.truncate(50000);
-                            text.push_str("\n\n[Content truncated to 50000 characters]");
+                        if text.len() > MAX_TOOL_OUTPUT_LEN {
+                            text.truncate(MAX_TOOL_OUTPUT_LEN);
+                            text.push_str(&format!(
+                                "\n\n[Content truncated to {} characters]",
+                                MAX_TOOL_OUTPUT_LEN
+                            ));
                         }
                         Ok(json!({
                             "url": url,

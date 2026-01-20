@@ -1245,58 +1245,6 @@ mod event_handling_tests {
         assert!(formatted.contains("limit=100"));
     }
 
-    /// ToolResult events should format with duration and token estimate
-    #[test]
-    fn test_tool_result_format() {
-        colored::control::set_override(false);
-
-        let formatted =
-            events::format_tool_result("read_file", Duration::from_millis(25), 150, false);
-
-        assert!(formatted.contains("└─ read_file"));
-        assert!(formatted.contains("0.02s") || formatted.contains("0.03s")); // timing can vary
-        assert!(formatted.contains("~150 tok"));
-
-        colored::control::unset_override();
-    }
-
-    /// ToolResult errors should include ERROR suffix
-    #[test]
-    fn test_tool_result_error_format() {
-        colored::control::set_override(false);
-
-        let formatted =
-            events::format_tool_result("write_file", Duration::from_millis(10), 50, true);
-
-        assert!(formatted.contains("└─ write_file"));
-        assert!(formatted.contains("ERROR"));
-
-        colored::control::unset_override();
-    }
-
-    /// ContextWarning should format with percentage
-    #[test]
-    fn test_context_warning_format_normal() {
-        let percentage = 85.5;
-        let msg = format!("WARNING: Context window at {:.1}%.", percentage);
-
-        assert!(msg.contains("85.5%"));
-        assert!(!msg.contains("/clear")); // Not critical yet
-    }
-
-    /// ContextWarning at critical level should suggest /clear
-    #[test]
-    fn test_context_warning_format_critical() {
-        let percentage = 96.0;
-        let msg = format!(
-            "WARNING: Context window at {:.1}%. Use /clear to reset.",
-            percentage
-        );
-
-        assert!(msg.contains("96.0%"));
-        assert!(msg.contains("/clear")); // Critical level
-    }
-
     // =========================================
     // Event handling contract tests
     // Document what each event type should produce

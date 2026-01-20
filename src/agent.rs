@@ -32,12 +32,12 @@ fn calculate_backoff_delay(attempt: u32, base: Duration) -> Duration {
 
 /// Sleep for the given delay plus random jitter (up to 20%).
 async fn sleep_with_jitter(delay: Duration) {
-    let jitter = {
-        let mut rng = rand::thread_rng();
-        let jitter_factor: f64 = rng.gen_range(0.0..0.2);
-        delay.as_millis() as f64 * jitter_factor
+    // Scope rng to drop before await (ThreadRng is !Send)
+    let jitter_ms = {
+        let jitter_factor = rand::thread_rng().gen_range(0.0..0.2);
+        (delay.as_millis() as f64 * jitter_factor) as u64
     };
-    tokio::time::sleep(delay + Duration::from_millis(jitter as u64)).await;
+    tokio::time::sleep(delay + Duration::from_millis(jitter_ms)).await;
 }
 
 /// Context window limit for Gemini models (1M tokens).
@@ -111,7 +111,7 @@ pub enum AgentEvent {
         /// Maximum number of attempts.
         max_attempts: u32,
         /// Delay before next attempt.
-        delay: std::time::Duration,
+        delay: Duration,
         /// Error message that triggered the retry.
         error: String,
     },
@@ -123,14 +123,14 @@ pub struct RetryConfig {
     /// Maximum number of retry attempts.
     pub max_retries: u32,
     /// Base delay for exponential backoff.
-    pub retry_delay_base: std::time::Duration,
+    pub retry_delay_base: Duration,
 }
 
 impl Default for RetryConfig {
     fn default() -> Self {
         Self {
             max_retries: 3,
-            retry_delay_base: std::time::Duration::from_secs(1),
+            retry_delay_base: Duration::from_secs(1),
         }
     }
 }
