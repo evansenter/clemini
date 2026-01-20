@@ -1,24 +1,18 @@
 use anyhow::Result;
 use clap::Parser;
 use colored::Colorize;
-use crossterm::event::{Event, EventStream, KeyCode, KeyModifiers};
-use futures_util::StreamExt;
-use genai_rs::{Client, FunctionExecutionResult, OwnedFunctionCallInfo};
-use ratatui::DefaultTerminal;
+use genai_rs::Client;
 use serde::Deserialize;
-use serde_json::Value;
 use std::env;
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::PathBuf;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use tui_textarea::{Input, TextArea};
 
 mod mcp;
-mod tui;
 
-use clemini::agent::{self, AgentEvent, InteractionResult, run_interaction};
+use clemini::agent::{self, AgentEvent, run_interaction};
 use clemini::events;
 use clemini::logging::OutputSink;
 use clemini::tools::{self, CleminiToolService};
@@ -68,46 +62,11 @@ impl OutputSink for TerminalSink {
         log_event_to_file(message, true);
     }
     fn emit_line(&self, message: &str) {
-        // Print message without trailing blank line
+        // Print message without adding newline (message already contains its own newlines)
         if message.is_empty() {
             println!();
         } else {
-            println!("{}", message);
-        }
-        log_event_to_file(message, false);
-    }
-}
-
-/// Message types for TUI output channel
-#[derive(Debug)]
-pub enum TuiMessage {
-    /// Complete line/message (uses append_to_chat)
-    Line(String),
-}
-
-/// Channel for TUI output - global sender that TuiSink writes to
-static TUI_OUTPUT_TX: OnceLock<mpsc::UnboundedSender<TuiMessage>> = OnceLock::new();
-
-/// Set the TUI output channel sender
-pub fn set_tui_output_channel(tx: mpsc::UnboundedSender<TuiMessage>) {
-    let _ = TUI_OUTPUT_TX.set(tx);
-}
-
-/// Writes to TUI buffer (via channel) AND log files
-pub struct TuiSink;
-
-impl OutputSink for TuiSink {
-    fn emit(&self, message: &str) {
-        // Send to TUI via channel
-        if let Some(tx) = TUI_OUTPUT_TX.get() {
-            let _ = tx.send(TuiMessage::Line(message.to_string()));
-        }
-        log_event_to_file(message, true);
-    }
-    fn emit_line(&self, message: &str) {
-        // Send to TUI via channel (no difference in TUI, just log file)
-        if let Some(tx) = TUI_OUTPUT_TX.get() {
-            let _ = tx.send(TuiMessage::Line(message.to_string()));
+            print!("{}", message);
         }
         log_event_to_file(message, false);
     }
@@ -268,6 +227,129 @@ mod tests {
         assert_eq!(config.allowed_paths, vec!["/etc", "/var"]);
     }
 
+    #[test]
+    fn test_handle_builtin_command_basic() {
+        let cwd = PathBuf::from("/test/cwd");
+        let model = "test-model";
+
+        assert_eq!(
+            handle_builtin_command("/version", model, &cwd),
+            Some(format!("clemini v{} | {}", env!("CARGO_PKG_VERSION"), model))
+        );
+        assert_eq!(
+            handle_builtin_command("/v", model, &cwd),
+            Some(format!("clemini v{} | {}", env!("CARGO_PKG_VERSION"), model))
+        );
+        assert_eq!(
+            handle_builtin_command("/model", model, &cwd),
+            Some(model.to_string())
+        );
+        assert_eq!(
+            handle_builtin_command("/m", model, &cwd),
+            Some(model.to_string())
+        );
+        assert_eq!(
+            handle_builtin_command("/pwd", model, &cwd),
+            Some(cwd.display().to_string())
+        );
+        assert_eq!(
+            handle_builtin_command("/cwd", model, &cwd),
+            Some(cwd.display().to_string())
+        );
+        assert_eq!(handle_builtin_command("/unknown", model, &cwd), None);
+        assert_eq!(handle_builtin_command("not a command", model, &cwd), None);
+    }
+
+    #[test]
+    fn test_run_shell_command_capture() {
+        // Test successful command
+        let out = if cfg!(target_os = "windows") {
+            run_shell_command_capture("echo hello")
+        } else {
+            run_shell_command_capture("echo hello")
+        };
+        assert_eq!(out, "hello");
+
+        // Test failing command
+        let out = if cfg!(target_os = "windows") {
+            run_shell_command_capture("dir non_existent_file_12345")
+        } else {
+            run_shell_command_capture("ls non_existent_file_12345")
+        };
+        assert!(out.contains("exit code"));
+
+        // Test empty command
+        assert_eq!(handle_builtin_command("!", "model", &PathBuf::from(".")), None);
+        assert_eq!(handle_builtin_command("!  ", "model", &PathBuf::from(".")), None);
+    }
+
+    #[test]
+    fn test_run_git_command_capture() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let repo_path = temp_dir.path();
+
+        // Helper to run git in the temp repo
+        let run_git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(repo_path)
+                .status()
+                .unwrap();
+        };
+
+        // Initialize a git repo
+        run_git(&["init", "-b", "main"]);
+        run_git(&["config", "user.email", "test@example.com"]);
+        run_git(&["config", "user.name", "Test User"]);
+
+        // Test with no commits - git log returns error 128 on empty repo
+        let out = run_git_command_capture_in_dir(&["log", "--oneline"], "no commits", repo_path);
+        assert!(out.contains("error"));
+
+        // Test status on empty repo (should be success but empty with --short)
+        let out = run_git_command_capture_in_dir(&["status", "--short"], "clean working directory", repo_path);
+        assert_eq!(out, "[clean working directory]");
+
+        // Add a file and commit
+        std::fs::write(repo_path.join("test.txt"), "hello").unwrap();
+        run_git(&["add", "test.txt"]);
+        run_git(&["commit", "-m", "initial commit"]);
+
+        // Test with commits
+        let out = run_git_command_capture_in_dir(&["log", "--oneline"], "no commits", repo_path);
+        assert!(out.contains("initial commit"));
+
+        // Test diff
+        std::fs::write(repo_path.join("test.txt"), "world").unwrap();
+        let out = run_git_command_capture_in_dir(&["diff"], "no diff", repo_path);
+        assert!(out.contains("-hello"));
+        assert!(out.contains("+world"));
+    }
+
+    /// Helper for testing git commands in a specific directory
+    fn run_git_command_capture_in_dir(args: &[&str], empty_msg: &str, dir: &std::path::Path) -> String {
+        match std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+        {
+            Ok(o) => {
+                if o.status.success() {
+                    let stdout = String::from_utf8_lossy(&o.stdout);
+                    if stdout.is_empty() {
+                        format!("[{empty_msg}]")
+                    } else {
+                        stdout.trim().to_string()
+                    }
+                } else {
+                    let stderr = String::from_utf8_lossy(&o.stderr);
+                    format!("[git {} error: {}]", args[0], stderr.trim())
+                }
+            }
+            Err(e) => format!("[failed to run git {}: {}]", args[0], e),
+        }
+    }
+
     // Note: Logging tests moved to src/logging.rs since they test lib functionality
 }
 
@@ -307,10 +389,6 @@ struct Args {
     /// HTTP port for MCP server (requires --http)
     #[arg(long, default_value_t = 8080)]
     port: u16,
-
-    /// Disable TUI and use plain text mode
-    #[arg(long)]
-    no_tui: bool,
 }
 
 #[tokio::main]
@@ -469,19 +547,13 @@ async fn main() -> Result<()> {
         let _ = event_handler.await;
     } else {
         // Interactive REPL mode
-        // Use TUI if terminal and --no-tui not specified
-        let use_tui = !args.no_tui && io::stderr().is_terminal();
-        // Set output sink based on mode (TUI sets its own sink, plain REPL uses TerminalSink)
-        if !use_tui {
-            logging::set_output_sink(Arc::new(TerminalSink));
-        }
-        run_repl(
+        logging::set_output_sink(Arc::new(TerminalSink));
+        run_plain_repl(
             &client,
             &tool_service,
             cwd,
             &model,
             system_prompt,
-            use_tui,
             retry_config,
         )
         .await?;
@@ -490,195 +562,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Events from the async interaction task
-enum AppEvent {
-    StreamChunk(String),
-    ToolExecuting {
-        name: String,
-        args: Value,
-    },
-    ToolCompleted {
-        name: String,
-        duration_ms: u64,
-        tokens: u32,
-        has_error: bool,
-    },
-    InteractionComplete(Result<InteractionResult>),
-    ContextWarning(String),
-    ToolOutput(String),
-    Retry(String),
-}
-
-/// Convert AgentEvent to AppEvents for the TUI.
-/// Returns a Vec because ToolExecuting can produce multiple AppEvents.
-/// Note: This function is only used in tests; actual conversion happens in TuiEventHandler.
-#[cfg(test)]
-fn convert_agent_event_to_app_events(event: &AgentEvent) -> Vec<AppEvent> {
-    match event {
-        AgentEvent::TextDelta(text) => vec![AppEvent::StreamChunk(text.clone())],
-        AgentEvent::ToolExecuting(calls) => calls
-            .iter()
-            .map(|call| AppEvent::ToolExecuting {
-                name: call.name.clone(),
-                args: call.args.clone(),
-            })
-            .collect(),
-        AgentEvent::ToolResult(result) => vec![AppEvent::ToolCompleted {
-            name: result.name.clone(),
-            duration_ms: result.duration.as_millis() as u64,
-            tokens: events::compute_result_tokens(result),
-            has_error: result.is_error(),
-        }],
-        AgentEvent::ContextWarning(warning) => {
-            vec![AppEvent::ContextWarning(events::format_context_warning(
-                warning.percentage(),
-            ))]
-        }
-        // Complete and Cancelled are handled differently (via join handle result)
-        AgentEvent::Complete { .. } | AgentEvent::Cancelled => vec![],
-        AgentEvent::ToolOutput(output) => vec![AppEvent::ToolOutput(output.clone())],
-        AgentEvent::Retry {
-            attempt,
-            max_attempts,
-            delay,
-            error,
-        } => vec![AppEvent::Retry(events::format_retry(
-            *attempt,
-            *max_attempts,
-            *delay,
-            error,
-        ))],
-    }
-}
-
-/// TUI-specific event handler that sends AppEvents via channel.
-/// Also logs events to file for `make logs` visibility.
-struct TuiEventHandler {
-    app_tx: mpsc::Sender<AppEvent>,
-    text_buffer: events::TextBuffer,
-}
-
-impl TuiEventHandler {
-    fn new(app_tx: mpsc::Sender<AppEvent>) -> Self {
-        Self {
-            app_tx,
-            text_buffer: events::TextBuffer::new(),
-        }
-    }
-}
-
-impl events::EventHandler for TuiEventHandler {
-    fn on_text_delta(&mut self, text: &str) {
-        self.text_buffer.push(text);
-    }
-
-    fn on_tool_executing(&mut self, call: &OwnedFunctionCallInfo) {
-        // Flush buffer before tool output (normalizes to \n\n for spacing)
-        // Logging is handled by dispatch_event() after this method returns
-        if let Some(rendered) = self.text_buffer.flush() {
-            let _ = self
-                .app_tx
-                .try_send(AppEvent::StreamChunk(rendered.clone()));
-            log_to_file(&rendered);
-        }
-        let _ = self.app_tx.try_send(AppEvent::ToolExecuting {
-            name: call.name.clone(),
-            args: call.args.clone(),
-        });
-    }
-
-    fn on_tool_result(&mut self, result: &FunctionExecutionResult) {
-        // Logging is handled by dispatch_event() after this method returns
-        let tokens =
-            events::estimate_tokens(&result.args) + events::estimate_tokens(&result.result);
-        let _ = self.app_tx.try_send(AppEvent::ToolCompleted {
-            name: result.name.clone(),
-            duration_ms: result.duration.as_millis() as u64,
-            tokens,
-            has_error: result.is_error(),
-        });
-    }
-
-    fn on_context_warning(&mut self, warning: &clemini::agent::ContextWarning) {
-        let msg = events::format_context_warning(warning.percentage());
-        let _ = self.app_tx.try_send(AppEvent::ContextWarning(msg.clone()));
-        // Logging is handled by dispatch_event() after this method returns
-    }
-
-    fn on_complete(
-        &mut self,
-        _interaction_id: Option<&str>,
-        _response: &genai_rs::InteractionResponse,
-    ) {
-        // Flush any remaining buffered text (normalizes to \n\n)
-        if let Some(rendered) = self.text_buffer.flush() {
-            let _ = self
-                .app_tx
-                .try_send(AppEvent::StreamChunk(rendered.clone()));
-            log_to_file(&rendered);
-        }
-    }
-
-    fn on_tool_output(&mut self, output: &str) {
-        let _ = self
-            .app_tx
-            .try_send(AppEvent::ToolOutput(output.to_string()));
-        // Logging is handled by dispatch_event() after this method returns
-    }
-
-    fn on_retry(
-        &mut self,
-        attempt: u32,
-        max_attempts: u32,
-        delay: std::time::Duration,
-        error: &str,
-    ) {
-        // Flush buffer before retry message
-        if let Some(rendered) = self.text_buffer.flush() {
-            let _ = self
-                .app_tx
-                .try_send(AppEvent::StreamChunk(rendered.clone()));
-            log_to_file(&rendered);
-        }
-        let msg = events::format_retry(attempt, max_attempts, delay, error);
-        let _ = self.app_tx.try_send(AppEvent::Retry(msg));
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn run_repl(
-    client: &Client,
-    tool_service: &Arc<CleminiToolService>,
-    cwd: std::path::PathBuf,
-    model: &str,
-    system_prompt: String,
-    use_tui: bool,
-    retry_config: agent::RetryConfig,
-) -> Result<()> {
-    if use_tui {
-        run_tui_repl(
-            client,
-            tool_service,
-            cwd,
-            model,
-            system_prompt,
-            retry_config,
-        )
-        .await
-    } else {
-        run_plain_repl(
-            client,
-            tool_service,
-            cwd,
-            model,
-            system_prompt,
-            retry_config,
-        )
-        .await
-    }
-}
-
-/// Plain text REPL for non-TTY or --no-tui mode
+/// Plain text REPL
 async fn run_plain_repl(
     client: &Client,
     tool_service: &Arc<CleminiToolService>,
@@ -776,330 +660,6 @@ async fn run_plain_repl(
     Ok(())
 }
 
-/// TUI REPL with ratatui
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-async fn run_tui_repl(
-    client: &Client,
-    tool_service: &Arc<CleminiToolService>,
-    cwd: std::path::PathBuf,
-    model: &str,
-    system_prompt: String,
-    retry_config: agent::RetryConfig,
-) -> Result<()> {
-    let mut terminal = ratatui::init();
-    let result = run_tui_event_loop(
-        &mut terminal,
-        client,
-        tool_service,
-        cwd,
-        model,
-        system_prompt,
-        retry_config,
-    )
-    .await;
-    ratatui::restore();
-    result
-}
-
-/// Create a configured TextArea for TUI input
-fn create_textarea_with_content(content: Option<&str>) -> TextArea<'static> {
-    use ratatui::style::Style;
-    let mut textarea = match content {
-        Some(text) => TextArea::new(vec![text.to_string()]),
-        None => TextArea::default(),
-    };
-    textarea.set_block(
-        ratatui::widgets::Block::default()
-            .borders(ratatui::widgets::Borders::ALL)
-            .title(" Input (Enter to send, Ctrl-D to quit) "),
-    );
-    // Remove underline from cursor line (default has underline)
-    textarea.set_cursor_line_style(Style::default());
-    textarea
-}
-
-/// Create a configured TextArea for TUI input (empty)
-fn create_textarea() -> TextArea<'static> {
-    create_textarea_with_content(None)
-}
-
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-async fn run_tui_event_loop(
-    terminal: &mut DefaultTerminal,
-    client: &Client,
-    tool_service: &Arc<CleminiToolService>,
-    cwd: std::path::PathBuf,
-    model: &str,
-    system_prompt: String,
-    retry_config: agent::RetryConfig,
-) -> Result<()> {
-    // Set up TUI output channel (for OutputSink -> TUI)
-    let (tui_tx, mut tui_rx) = mpsc::unbounded_channel::<TuiMessage>();
-    set_tui_output_channel(tui_tx);
-    logging::set_output_sink(Arc::new(TuiSink));
-
-    let mut app = tui::App::new(model);
-    let mut textarea = create_textarea();
-
-    let mut event_stream = EventStream::new();
-    let (tx, mut rx) = mpsc::channel::<AppEvent>(100);
-
-    let mut last_interaction_id: Option<String> = None;
-    let mut history: Vec<String> = Vec::new();
-    let mut history_index: Option<usize> = None;
-
-    // Load history from file
-    if let Some(history_path) = home::home_dir().map(|p| p.join(".clemini_history"))
-        && let Ok(content) = std::fs::read_to_string(&history_path)
-    {
-        history = content.lines().map(String::from).collect();
-    }
-
-    loop {
-        // Render
-        terminal.draw(|frame| {
-            tui::render(frame, &app, textarea.lines().len() as u16);
-            let input_area = tui::ui::get_input_area(frame, textarea.lines().len() as u16);
-            frame.render_widget(&textarea, input_area);
-        })?;
-
-        // Handle events
-        tokio::select! {
-            // Keyboard input
-            Some(Ok(event)) = event_stream.next() => {
-                if let Event::Key(key) = event {
-                    // Check for quit
-                    if key.code == KeyCode::Char('d') && key.modifiers.contains(KeyModifiers::CONTROL) {
-                        break;
-                    }
-
-                    // Check for cancel during streaming
-                    if key.code == KeyCode::Esc && app.activity().is_busy() {
-                        app.cancel();
-                        app.append_to_chat(&"[cancelled]".yellow().to_string());
-                        app.set_activity(tui::Activity::Idle);
-                        continue;
-                    }
-
-                    // Handle Enter to submit
-                    if key.code == KeyCode::Enter && !app.activity().is_busy() {
-                        let input: String = textarea.lines().join("\n");
-                        let input = input.trim();
-
-                        if !input.is_empty() {
-                            // Add to history
-                            history.push(input.to_string());
-                            history_index = None;
-
-                            // Save to history file
-                            if let Some(history_path) = home::home_dir().map(|p| p.join(".clemini_history")) {
-                                let _ = std::fs::write(&history_path, history.join("\n"));
-                            }
-
-                            // Check for quit command
-                            if input == "/quit" || input == "/exit" || input == "/q" {
-                                break;
-                            }
-
-                            // Check for clear command
-                            if input == "/clear" || input == "/c" {
-                                last_interaction_id = None;
-                                app.clear_chat();
-                                app.estimated_tokens = 0;
-                                textarea = create_textarea();
-                                continue;
-                            }
-
-                            // Check for help command
-                            if input == "/help" || input == "/h" {
-                                app.append_to_chat(&get_help_text());
-                                textarea = create_textarea();
-                                continue;
-                            }
-
-                            // Handle other builtin commands
-                            if let Some(response) = handle_builtin_command(input, model, &cwd) {
-                                app.append_to_chat(&response);
-                                textarea = create_textarea();
-                                continue;
-                            }
-
-                            // Show user input in chat
-                            app.append_to_chat(&format!("> {}", input.cyan()));
-                            app.append_to_chat("");
-
-                            // Start interaction
-                            app.set_activity(tui::Activity::Streaming);
-                            app.reset_cancellation();
-
-                            let tx = tx.clone();
-                            let client = client.clone();
-                            let tool_service = tool_service.clone();
-                            let input = input.to_string();
-                            let prev_id = last_interaction_id.clone();
-                            let model = model.to_string();
-                            let system_prompt = system_prompt.clone();
-                            let cancellation_flag = app.cancellation_flag();
-
-                            tokio::spawn(async move {
-                                let cancellation_token = CancellationToken::new();
-                                let ct_clone = cancellation_token.clone();
-
-                                // Watch for cancellation flag
-                                let cancel_flag = cancellation_flag.clone();
-                                tokio::spawn(async move {
-                                    loop {
-                                        if cancel_flag.load(std::sync::atomic::Ordering::SeqCst) {
-                                            ct_clone.cancel();
-                                            break;
-                                        }
-                                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                                    }
-                                });
-
-                                // Create channel for agent events
-                                let (events_tx, mut events_rx) = mpsc::channel::<AgentEvent>(100);
-
-                                // Spawn task to handle AgentEvents via TuiEventHandler
-                                let app_tx = tx.clone();
-                                tokio::spawn(async move {
-                                    let mut handler = TuiEventHandler::new(app_tx);
-                                    while let Some(event) = events_rx.recv().await {
-                                        events::dispatch_event(&mut handler, &event);
-                                    }
-                                });
-
-                                // Set events_tx for tools to emit output through the event system
-                                tool_service.set_events_tx(Some(events_tx.clone()));
-
-                                let result = run_interaction(
-                                    &client,
-                                    &tool_service,
-                                    &input,
-                                    prev_id.as_deref(),
-                                    &model,
-                                    &system_prompt,
-                                    events_tx,
-                                    cancellation_token,
-                                    retry_config,
-                                )
-                                .await;
-
-                                // Clear events_tx after interaction
-                                tool_service.set_events_tx(None);
-
-                                let _ = tx.send(AppEvent::InteractionComplete(result)).await;
-                            });
-
-                            // Clear input
-                            textarea = create_textarea();
-                        }
-                        continue;
-                    }
-
-                    // History navigation
-                    if key.code == KeyCode::Up && !app.activity().is_busy() {
-                        if !history.is_empty() {
-                            let new_index = match history_index {
-                                None => history.len().saturating_sub(1),
-                                Some(i) => i.saturating_sub(1),
-                            };
-                            history_index = Some(new_index);
-                            textarea = create_textarea_with_content(Some(&history[new_index]));
-                        }
-                        continue;
-                    }
-
-                    if key.code == KeyCode::Down && !app.activity().is_busy() {
-                        if let Some(i) = history_index {
-                            if i + 1 < history.len() {
-                                history_index = Some(i + 1);
-                                textarea = create_textarea_with_content(Some(&history[i + 1]));
-                            } else {
-                                history_index = None;
-                                textarea = create_textarea();
-                            }
-                        }
-                        continue;
-                    }
-
-                    // Scroll chat with Page Up/Down
-                    if key.code == KeyCode::PageUp {
-                        app.scroll_up(10);
-                        continue;
-                    }
-                    if key.code == KeyCode::PageDown {
-                        app.scroll_down(10);
-                        continue;
-                    }
-
-                    // Pass other keys to textarea
-                    if !app.activity().is_busy() {
-                        textarea.input(Input::from(key));
-                    }
-                }
-            }
-
-            // Events from interaction task
-            Some(event) = rx.recv() => {
-                match event {
-                    AppEvent::StreamChunk(text) => {
-                        app.append_streaming(&text);
-                    }
-                    AppEvent::ToolExecuting { name, args } => {
-                        app.set_activity(tui::Activity::Executing(name.clone()));
-                        // Display tool call in chat - use same format as log output
-                        app.append_to_chat(&events::format_tool_executing(&name, &args));
-                    }
-                    AppEvent::ToolCompleted { name, duration_ms, tokens, has_error } => {
-                        // Tool completed - use same format as log output
-                        let duration = std::time::Duration::from_millis(duration_ms);
-                        let msg = events::format_tool_result(&name, duration, tokens, has_error);
-                        app.append_to_chat(&msg);
-                        app.append_to_chat(""); // Single blank line after tool completes
-                    }
-                    AppEvent::InteractionComplete(result) => {
-                        app.set_activity(tui::Activity::Idle);
-                        match result {
-                            Ok(result) => {
-                                last_interaction_id = result.id;
-                                app.update_stats(result.context_size, result.tool_calls.len());
-                            }
-                            Err(e) => {
-                                app.append_to_chat(&format!("[error: {}]", e).bright_red().to_string());
-                            }
-                        }
-                    }
-                    AppEvent::ContextWarning(msg) => {
-                        app.append_to_chat("");
-                        app.append_to_chat(&msg.bright_red().bold().to_string());
-                        app.append_to_chat("");
-                    }
-                    AppEvent::ToolOutput(output) => {
-                        app.append_to_chat(&output);
-                    }
-                    AppEvent::Retry(msg) => {
-                        app.append_to_chat(&msg);
-                    }
-                }
-            }
-
-            // TUI output messages from OutputSink (via TuiSink)
-            Some(message) = tui_rx.recv() => {
-                match message {
-                    TuiMessage::Line(text) => {
-                        app.append_to_chat(&text);
-                        // Add blank line after so streaming starts on new line
-                        app.append_to_chat("");
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(())
-}
-
 fn handle_builtin_command(input: &str, model: &str, cwd: &std::path::Path) -> Option<String> {
     match input {
         "/version" | "/v" => Some(format!(
@@ -1145,10 +705,8 @@ fn get_help_text() -> String {
         "  /b, /branch       Show git branches",
         "  /h, /help         Show this help message",
         "",
-        "Navigation:",
-        "  Up/Down           History navigation",
-        "  PageUp/PageDown   Scroll chat",
-        "  Esc               Cancel current operation",
+        "Controls:",
+        "  Ctrl-C            Cancel current operation",
         "  Ctrl-D            Quit",
         "",
         "Shell escape:",
@@ -1218,22 +776,13 @@ fn run_shell_command_capture(command: &str) -> String {
 }
 
 // =============================================================================
-// Tests for event handling consistency
+// Tests for output formatting and logging
 // =============================================================================
-// These tests document and verify how AgentEvents should be handled across
-// all UI modes (non-interactive, plain REPL, TUI).
 
 #[cfg(test)]
-mod event_handling_tests {
+mod output_tests {
     use super::*;
-    use crate::events::EventHandler;
     use serde_json::json;
-    use std::time::Duration;
-
-    // =========================================
-    // Event formatting tests
-    // These verify the formatting used across all UI modes
-    // =========================================
 
     /// ToolExecuting events should format as: ┌─ <tool_name> <args>
     #[test]
@@ -1244,362 +793,6 @@ mod event_handling_tests {
         // Args should be formatted as key=value pairs
         assert!(formatted.contains("file_path="));
         assert!(formatted.contains("limit=100"));
-    }
-
-    // =========================================
-    // Event handling contract tests
-    // Document what each event type should produce
-    // =========================================
-
-    /// TextDelta should use streaming output (append to current line)
-    /// NOT line-based output (which would break sentences)
-    #[test]
-    fn test_text_delta_requires_streaming() {
-        // This test documents the contract: TextDelta MUST use streaming/append
-        // because text arrives in chunks that form sentences.
-        //
-        // WRONG: append_to_chat("I'll") then append_to_chat(" search") = 2 lines
-        // RIGHT: append_streaming("I'll") then append_streaming(" search") = 1 line
-
-        let mut app = tui::App::new("test");
-        app.append_streaming("I'll");
-        app.append_streaming(" search");
-
-        assert_eq!(app.chat_lines().len(), 1);
-        assert_eq!(app.chat_lines()[0], "I'll search");
-    }
-
-    /// ToolExecuting should use line-based output (own line)
-    #[test]
-    fn test_tool_executing_requires_line_output() {
-        // Tool calls should appear on their own line, not appended to streaming text
-        let mut app = tui::App::new("test");
-
-        app.append_streaming("Let me search.\n"); // Creates 2 lines: "Let me search." and ""
-        app.append_to_chat("┌─ grep pattern=\"test\""); // Line-based, adds new line
-
-        assert_eq!(app.chat_lines().len(), 3);
-        assert_eq!(app.chat_lines()[0], "Let me search.");
-        assert_eq!(app.chat_lines()[1], ""); // empty from \n
-        assert!(app.chat_lines()[2].contains("grep"));
-    }
-
-    /// ToolResult should use line-based output (own line)
-    #[test]
-    fn test_tool_result_requires_line_output() {
-        let mut app = tui::App::new("test");
-
-        app.append_to_chat("┌─ read_file path=\"test.rs\"");
-        app.append_to_chat("[read_file] 0.02s, ~100 tok");
-
-        assert_eq!(app.chat_lines().len(), 2);
-        assert!(app.chat_lines()[1].contains("read_file"));
-    }
-
-    // =========================================
-    // Integration pattern tests
-    // Verify the full streaming → tool → streaming flow
-    // =========================================
-
-    /// Complete flow: streaming text, tool call, tool result, more streaming
-    #[test]
-    fn test_full_event_flow_pattern() {
-        let mut app = tui::App::new("test");
-
-        // Model starts streaming response
-        app.append_streaming("I'll search for ");
-        app.append_streaming("the function.\n\n");
-
-        // Tool executes (line-based)
-        app.append_to_chat("┌─ grep pattern=\"fn main\"");
-
-        // Tool result (line-based)
-        app.append_to_chat("[grep] 0.01s, ~50 tok");
-        app.append_to_chat(""); // Blank line after tool
-
-        // Model continues streaming
-        app.append_streaming("Found it in ");
-        app.append_streaming("src/main.rs");
-
-        // Verify structure
-        assert_eq!(app.chat_lines().len(), 7);
-        assert_eq!(app.chat_lines()[0], "I'll search for the function.");
-        assert_eq!(app.chat_lines()[1], ""); // from \n\n
-        assert_eq!(app.chat_lines()[2], ""); // from \n\n
-        assert_eq!(app.chat_lines()[3], "┌─ grep pattern=\"fn main\"");
-        assert_eq!(app.chat_lines()[4], "[grep] 0.01s, ~50 tok");
-        assert_eq!(app.chat_lines()[5], "");
-        assert_eq!(app.chat_lines()[6], "Found it in src/main.rs");
-    }
-
-    // =========================================
-    // AgentEvent to AppEvent conversion tests
-    // =========================================
-
-    #[test]
-    fn test_convert_text_delta() {
-        let event = AgentEvent::TextDelta("Hello world".to_string());
-        let app_events = convert_agent_event_to_app_events(&event);
-
-        assert_eq!(app_events.len(), 1);
-        match &app_events[0] {
-            AppEvent::StreamChunk(text) => assert_eq!(text, "Hello world"),
-            _ => panic!("Expected StreamChunk"),
-        }
-    }
-
-    #[test]
-    fn test_convert_tool_executing_single() {
-        use genai_rs::OwnedFunctionCallInfo;
-
-        let call = OwnedFunctionCallInfo {
-            id: Some("call-1".to_string()),
-            name: "read_file".to_string(),
-            args: json!({"file_path": "test.txt"}),
-        };
-        let event = AgentEvent::ToolExecuting(vec![call]);
-        let app_events = convert_agent_event_to_app_events(&event);
-
-        assert_eq!(app_events.len(), 1);
-        match &app_events[0] {
-            AppEvent::ToolExecuting { name, args } => {
-                assert_eq!(name, "read_file");
-                assert_eq!(args["file_path"], "test.txt");
-            }
-            _ => panic!("Expected ToolExecuting"),
-        }
-    }
-
-    #[test]
-    fn test_convert_tool_executing_multiple() {
-        use genai_rs::OwnedFunctionCallInfo;
-
-        let calls = vec![
-            OwnedFunctionCallInfo {
-                id: Some("call-1".to_string()),
-                name: "glob".to_string(),
-                args: json!({"pattern": "*.rs"}),
-            },
-            OwnedFunctionCallInfo {
-                id: Some("call-2".to_string()),
-                name: "grep".to_string(),
-                args: json!({"pattern": "fn main"}),
-            },
-        ];
-        let event = AgentEvent::ToolExecuting(calls);
-        let app_events = convert_agent_event_to_app_events(&event);
-
-        assert_eq!(app_events.len(), 2);
-        match &app_events[0] {
-            AppEvent::ToolExecuting { name, .. } => assert_eq!(name, "glob"),
-            _ => panic!("Expected ToolExecuting"),
-        }
-        match &app_events[1] {
-            AppEvent::ToolExecuting { name, .. } => assert_eq!(name, "grep"),
-            _ => panic!("Expected ToolExecuting"),
-        }
-    }
-
-    #[test]
-    fn test_convert_tool_result() {
-        use genai_rs::FunctionExecutionResult;
-
-        let result = FunctionExecutionResult::new(
-            "bash".to_string(),
-            "call-1".to_string(),
-            json!({"command": "ls"}),
-            json!({"output": "file.txt"}),
-            Duration::from_millis(150),
-        );
-        let event = AgentEvent::ToolResult(result);
-        let app_events = convert_agent_event_to_app_events(&event);
-
-        assert_eq!(app_events.len(), 1);
-        match &app_events[0] {
-            AppEvent::ToolCompleted {
-                name,
-                duration_ms,
-                tokens,
-                has_error,
-            } => {
-                assert_eq!(name, "bash");
-                assert_eq!(*duration_ms, 150);
-                assert!(*tokens > 0); // Should have some token estimate
-                assert!(!has_error); // Successful result
-            }
-            _ => panic!("Expected ToolCompleted"),
-        }
-    }
-
-    #[test]
-    fn test_convert_context_warning() {
-        let event =
-            AgentEvent::ContextWarning(clemini::agent::ContextWarning::new(900_000, 1_000_000));
-        let app_events = convert_agent_event_to_app_events(&event);
-
-        assert_eq!(app_events.len(), 1);
-        match &app_events[0] {
-            AppEvent::ContextWarning(msg) => {
-                assert!(msg.contains("90.0%"));
-            }
-            _ => panic!("Expected ContextWarning"),
-        }
-    }
-
-    #[test]
-    fn test_convert_complete_returns_empty() {
-        use genai_rs::{InteractionResponse, InteractionStatus};
-
-        let response = InteractionResponse {
-            id: Some("test-id".to_string()),
-            model: None,
-            agent: None,
-            input: vec![],
-            outputs: vec![],
-            status: InteractionStatus::Completed,
-            usage: None,
-            tools: None,
-            grounding_metadata: None,
-            url_context_metadata: None,
-            previous_interaction_id: None,
-            created: None,
-            updated: None,
-        };
-        let event = AgentEvent::Complete {
-            interaction_id: Some("test-id".to_string()),
-            response: Box::new(response),
-        };
-        let app_events = convert_agent_event_to_app_events(&event);
-
-        assert!(
-            app_events.is_empty(),
-            "Complete should not produce AppEvents"
-        );
-    }
-
-    #[test]
-    fn test_convert_cancelled_returns_empty() {
-        let event = AgentEvent::Cancelled;
-        let app_events = convert_agent_event_to_app_events(&event);
-
-        assert!(
-            app_events.is_empty(),
-            "Cancelled should not produce AppEvents"
-        );
-    }
-
-    // =========================================
-    // TuiEventHandler tests
-    // =========================================
-
-    #[tokio::test]
-    async fn test_tui_handler_text_delta_buffers_until_flush() {
-        logging::disable_logging();
-
-        let (tx, mut rx) = mpsc::channel::<AppEvent>(10);
-        let mut handler = TuiEventHandler::new(tx);
-
-        // Text is buffered until event boundary (tool executing, complete)
-        handler.on_text_delta("Hello\n");
-
-        // Nothing sent yet - text is buffered
-        assert!(rx.try_recv().is_err(), "Expected no event until flush");
-
-        // Flush happens at on_complete
-        use genai_rs::{InteractionResponse, InteractionStatus};
-        let response = InteractionResponse {
-            id: Some("test-id".to_string()),
-            model: None,
-            agent: None,
-            input: vec![],
-            outputs: vec![],
-            status: InteractionStatus::Completed,
-            usage: None,
-            tools: None,
-            grounding_metadata: None,
-            url_context_metadata: None,
-            previous_interaction_id: None,
-            created: None,
-            updated: None,
-        };
-        handler.on_complete(Some("test-id"), &response);
-
-        // Now the buffered text is sent
-        let event = rx.try_recv().unwrap();
-        match event {
-            AppEvent::StreamChunk(text) => assert!(text.contains("Hello")),
-            _ => panic!("Expected StreamChunk"),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_tui_handler_tool_executing_sends_app_event() {
-        let (tx, mut rx) = mpsc::channel::<AppEvent>(10);
-        let mut handler = TuiEventHandler::new(tx);
-
-        let call = OwnedFunctionCallInfo {
-            name: "read_file".to_string(),
-            args: json!({"file_path": "test.rs"}),
-            id: None,
-        };
-        handler.on_tool_executing(&call);
-
-        // With empty buffer, only ToolExecuting is sent (no blank line antipattern)
-        let event = rx.try_recv().unwrap();
-        match event {
-            AppEvent::ToolExecuting { name, args } => {
-                assert_eq!(name, "read_file");
-                assert_eq!(args["file_path"], "test.rs");
-            }
-            _ => panic!("Expected ToolExecuting"),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_tui_handler_tool_result_sends_app_event() {
-        let (tx, mut rx) = mpsc::channel::<AppEvent>(10);
-        let mut handler = TuiEventHandler::new(tx);
-
-        let result = FunctionExecutionResult::new(
-            "bash".to_string(),
-            "call-1".to_string(),
-            json!({"command": "ls"}),
-            json!({"output": "file.txt"}),
-            Duration::from_millis(150),
-        );
-        handler.on_tool_result(&result);
-
-        let event = rx.try_recv().unwrap();
-        match event {
-            AppEvent::ToolCompleted {
-                name,
-                duration_ms,
-                tokens,
-                has_error,
-            } => {
-                assert_eq!(name, "bash");
-                assert_eq!(duration_ms, 150);
-                assert!(tokens > 0); // tokens computed from args + result
-                assert!(!has_error);
-            }
-            _ => panic!("Expected ToolCompleted"),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_tui_handler_context_warning_sends_app_event() {
-        let (tx, mut rx) = mpsc::channel::<AppEvent>(10);
-        let mut handler = TuiEventHandler::new(tx);
-
-        handler.on_context_warning(&clemini::agent::ContextWarning::new(855_000, 1_000_000));
-
-        let event = rx.try_recv().unwrap();
-        match event {
-            AppEvent::ContextWarning(msg) => {
-                assert!(msg.contains("85.5%"));
-            }
-            _ => panic!("Expected ContextWarning"),
-        }
     }
 
     // =========================================

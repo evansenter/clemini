@@ -1,4 +1,4 @@
-.PHONY: check build release test test-all clippy fmt logs
+.PHONY: check build release run test test-all clippy fmt logs
 
 LOG_DIR = $(HOME)/.clemini/logs
 LOG_FILE = $(LOG_DIR)/clemini.log.$(shell date +%Y-%m-%d)
@@ -11,6 +11,9 @@ build:
 
 release:
 	cargo build --release
+
+run:
+	cargo run --
 
 # Run unit tests only (fast, no API key required)
 test:

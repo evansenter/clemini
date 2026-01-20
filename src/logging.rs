@@ -1,7 +1,7 @@
 //! Logging infrastructure for clemini.
 //!
 //! This module provides the core logging interfaces used throughout the crate.
-//! Concrete sink implementations (FileSink, TerminalSink, TuiSink) are provided
+//! Concrete sink implementations (FileSink, TerminalSink) are provided
 //! by main.rs since they have UI-specific dependencies.
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -14,6 +14,11 @@ static LOGGING_DISABLED: AtomicBool = AtomicBool::new(false);
 /// Disable logging to files. Call this in tests to prevent log writes.
 pub fn disable_logging() {
     LOGGING_DISABLED.store(true, Ordering::SeqCst);
+}
+
+/// Enable logging to files. Call this in tests to ensure log writes.
+pub fn enable_logging() {
+    LOGGING_DISABLED.store(false, Ordering::SeqCst);
 }
 
 /// Check if logging is enabled. Returns true unless explicitly disabled via `disable_logging()`.

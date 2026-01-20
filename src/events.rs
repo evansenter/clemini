@@ -1049,4 +1049,33 @@ mod tests {
         // Buffer should be empty now
         assert!(handler.text_buffer.is_empty());
     }
+
+    #[test]
+    fn test_terminal_event_handler_on_complete_flushes() {
+        crate::logging::disable_logging();
+
+        let mut handler = TerminalEventHandler::new();
+        handler.on_text_delta("Final thoughts");
+
+        assert!(!handler.text_buffer.is_empty());
+
+        let response = test_response("test-id");
+        handler.on_complete(Some("test-id"), &response);
+
+        assert!(handler.text_buffer.is_empty());
+    }
+
+    #[test]
+    fn test_terminal_event_handler_on_retry_flushes() {
+        crate::logging::disable_logging();
+
+        let mut handler = TerminalEventHandler::new();
+        handler.on_text_delta("Trying...");
+
+        assert!(!handler.text_buffer.is_empty());
+
+        handler.on_retry(1, 3, Duration::from_secs(1), "error");
+
+        assert!(handler.text_buffer.is_empty());
+    }
 }
