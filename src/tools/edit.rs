@@ -7,7 +7,7 @@ use strsim::normalized_levenshtein;
 use tokio::sync::mpsc;
 use tracing::instrument;
 
-use super::{error_codes, error_response, resolve_and_validate_path};
+use super::{ToolEmitter, error_codes, error_response, resolve_and_validate_path};
 
 pub struct EditTool {
     cwd: PathBuf,
@@ -27,14 +27,11 @@ impl EditTool {
             events_tx,
         }
     }
+}
 
-    /// Emit raw tool output via events (if available) or fallback to log_event_raw.
-    fn emit_raw(&self, output: &str) {
-        if let Some(tx) = &self.events_tx {
-            let _ = tx.try_send(AgentEvent::ToolOutput(output.to_string()));
-        } else {
-            crate::logging::log_event_raw(output);
-        }
+impl ToolEmitter for EditTool {
+    fn events_tx(&self) -> &Option<mpsc::Sender<AgentEvent>> {
+        &self.events_tx
     }
 }
 
@@ -308,7 +305,7 @@ impl CallableFunction for EditTool {
                 let diff_output =
                     crate::diff::format_diff(old_string, new_string, 2, Some(file_path));
                 if !diff_output.is_empty() {
-                    self.emit_raw(&diff_output);
+                    self.emit(&diff_output);
                 }
 
                 Ok(json!({

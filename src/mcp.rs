@@ -7,7 +7,7 @@ use axum::{
 };
 use colored::Colorize;
 use futures_util::stream::Stream;
-use genai_rs::Client;
+use genai_rs::{Client, FunctionExecutionResult, OwnedFunctionCallInfo};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::convert::Infallible;
@@ -21,10 +21,7 @@ use tracing::instrument;
 // Note: info! macro goes to JSON logs only. For human-readable logs, use crate::logging::log_event()
 
 use crate::agent::{AgentEvent, run_interaction};
-use crate::events::{
-    EventHandler, flush_streaming_buffer, format_context_warning, format_error_detail,
-    format_tool_executing, format_tool_result, render_streaming_chunk, write_to_streaming_log,
-};
+use crate::events::{EventHandler, TextBuffer, write_to_streaming_log};
 use crate::tools::CleminiToolService;
 
 #[derive(Debug, Deserialize, Clone)]
@@ -54,7 +51,8 @@ pub struct McpServer {
     notification_tx: broadcast::Sender<String>,
 }
 
-fn format_request_log(method: &str, params: &Option<Value>) -> (String, String) {
+/// Extract detail and message body from MCP request params.
+fn extract_request_parts(method: &str, params: &Option<Value>) -> (String, Option<String>) {
     let mut detail = String::new();
     let mut msg_body = String::new();
     if method == "tools/call"
@@ -78,7 +76,40 @@ fn format_request_log(method: &str, params: &Option<Value>) -> (String, String) 
             }
         }
     }
-    (detail, msg_body)
+    let body = if msg_body.is_empty() {
+        None
+    } else {
+        Some(msg_body)
+    };
+    (detail, body)
+}
+
+/// Format MCP request log block (IN line + optional body).
+/// Spacing between blocks is handled by write_to_log_file.
+fn format_mcp_request(method: &str, params: &Option<Value>) -> String {
+    let (detail, body) = extract_request_parts(method, params);
+    let mut output = format!("{} {}{}", "IN".green(), method.bold(), detail);
+    if let Some(msg) = body {
+        // Body with background for visibility
+        output.push_str(&format!("\n\n{}", msg.trim().on_bright_black()));
+    }
+    output
+}
+
+/// Format complete MCP response log block (OUT line + optional body with spacing).
+/// Body is included if non-empty.
+fn format_mcp_response(
+    method: &str,
+    status: &colored::ColoredString,
+    detail: &str,
+    body: &str,
+) -> String {
+    let mut output = format!("{} {} ({}){}", "OUT".cyan(), method.bold(), status, detail);
+    let trimmed = body.trim();
+    if !trimmed.is_empty() {
+        output.push_str(&format!("\n\n{}", trimmed));
+    }
+    output
 }
 
 fn format_status(response: &JsonRpcResponse) -> colored::ColoredString {
@@ -118,11 +149,15 @@ fn create_tool_result_notification(name: &str, duration_ms: u64) -> Value {
 /// MCP-specific event handler that logs events and sends MCP progress notifications.
 struct McpEventHandler {
     notification_tx: mpsc::UnboundedSender<String>,
+    text_buffer: TextBuffer,
 }
 
 impl McpEventHandler {
     fn new(notification_tx: mpsc::UnboundedSender<String>) -> Self {
-        Self { notification_tx }
+        Self {
+            notification_tx,
+            text_buffer: TextBuffer::new(),
+        }
     }
 
     fn send_notification(&self, notification: Value) {
@@ -134,65 +169,41 @@ impl McpEventHandler {
 
 impl EventHandler for McpEventHandler {
     fn on_text_delta(&mut self, text: &str) {
-        // Use unified streaming: buffer, render markdown, write to logs
-        // (MCP mode has no display output, only logging)
-        if let Some(rendered) = render_streaming_chunk(text) {
-            write_to_streaming_log(&rendered);
-        }
+        self.text_buffer.push(text);
     }
 
-    fn on_tool_executing(&mut self, name: &str, args: &Value) {
-        // Flush streaming buffer before tool output (normalizes to \n\n)
-        if let Some(rendered) = flush_streaming_buffer() {
+    fn on_tool_executing(&mut self, call: &OwnedFunctionCallInfo) {
+        // Flush buffer before tool output (normalizes to \n\n for spacing)
+        // Logging is handled by dispatch_event() after this method returns
+        if let Some(rendered) = self.text_buffer.flush() {
             write_to_streaming_log(&rendered);
-        } else {
-            // No buffered content - add blank line for spacing
-            crate::logging::log_event("");
         }
-        crate::logging::log_event(&format_tool_executing(name, args));
         // Send MCP notification
-        self.send_notification(create_tool_executing_notification(name, args));
+        self.send_notification(create_tool_executing_notification(&call.name, &call.args));
     }
 
-    fn on_tool_result(
-        &mut self,
-        name: &str,
-        duration: std::time::Duration,
-        tokens: u32,
-        has_error: bool,
-        error_message: Option<&str>,
-    ) {
-        // Log to human-readable log
-        crate::logging::log_event(&format_tool_result(name, duration, tokens, has_error));
-        if let Some(err_msg) = error_message {
-            crate::logging::log_event(&format_error_detail(err_msg));
-        }
-        crate::logging::log_event(""); // Blank line after tool result
+    fn on_tool_result(&mut self, result: &FunctionExecutionResult) {
+        // Logging is handled by dispatch_event() after this method returns
         // Send MCP notification
         self.send_notification(create_tool_result_notification(
-            name,
-            duration.as_millis() as u64,
+            &result.name,
+            result.duration.as_millis() as u64,
         ));
     }
 
-    fn on_context_warning(&mut self, percentage: f64) {
-        let msg = format_context_warning(percentage);
-        crate::logging::log_event(&msg);
+    fn on_context_warning(&mut self, _warning: &crate::agent::ContextWarning) {
+        // Logging is handled by dispatch_event() after this method returns
     }
 
-    fn on_complete(&mut self) {
-        // Flush any remaining buffered text with unified streaming (normalizes to \n\n)
-        if let Some(rendered) = flush_streaming_buffer() {
+    fn on_complete(
+        &mut self,
+        _interaction_id: Option<&str>,
+        _response: &genai_rs::InteractionResponse,
+    ) {
+        // Flush any remaining buffered text (normalizes to \n\n)
+        if let Some(rendered) = self.text_buffer.flush() {
             write_to_streaming_log(&rendered);
-        } else {
-            // No buffered content - add blank line for spacing before OUT
-            crate::logging::log_event("");
         }
-    }
-
-    fn on_tool_output(&mut self, output: &str) {
-        // Tool output is pre-formatted with ANSI codes, skip markdown rendering
-        crate::logging::log_event_raw(output);
     }
 }
 
@@ -201,20 +212,7 @@ async fn handle_post(
     State(server): State<Arc<McpServer>>,
     Json(request): Json<JsonRpcRequest>,
 ) -> Json<JsonRpcResponse> {
-    let (detail, msg_body) = format_request_log(&request.method, &request.params);
-    crate::logging::log_event("");
-    crate::logging::log_event(&format!(
-        "{} {}{}",
-        "IN".green(),
-        request.method.bold(),
-        detail,
-    ));
-    if !msg_body.is_empty() {
-        crate::logging::log_event("");
-        // User input with background for visibility
-        crate::logging::log_event(&msg_body.trim().on_bright_black().to_string());
-        crate::logging::log_event(""); // Blank line after user input
-    }
+    crate::logging::log_event(&format_mcp_request(&request.method, &request.params));
 
     // For HTTP, we use the server's broadcast channel for notifications
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
@@ -231,11 +229,11 @@ async fn handle_post(
         .await
     {
         Ok(response) => {
-            crate::logging::log_event(&format!(
-                "{} {} ({})",
-                "OUT".cyan(),
-                request.method.bold(),
-                format_status(&response)
+            crate::logging::log_event(&format_mcp_response(
+                &request.method,
+                &format_status(&response),
+                "",
+                "",
             ));
             Json(response)
         }
@@ -340,20 +338,7 @@ impl McpServer {
 
             let request: JsonRpcRequest = match serde_json::from_str::<JsonRpcRequest>(&line) {
                 Ok(req) => {
-                    let (detail, msg_body) = format_request_log(&req.method, &req.params);
-                    crate::logging::log_event("");
-                    crate::logging::log_event(&format!(
-                        "{} {}{}",
-                        "IN".green(),
-                        req.method.bold(),
-                        detail,
-                    ));
-                    if !msg_body.is_empty() {
-                        crate::logging::log_event("");
-                        // User input with background for visibility
-                        crate::logging::log_event(&msg_body.trim().on_bright_black().to_string());
-                        crate::logging::log_event(""); // Blank line after user input
-                    }
+                    crate::logging::log_event(&format_mcp_request(&req.method, &req.params));
                     req
                 }
                 Err(e) => {
@@ -449,18 +434,12 @@ impl McpServer {
                         resp_body.push_str(&format!("\n{}", msg.red()));
                     }
                     if let Ok(resp_str) = serde_json::to_string(&response) {
-                        // Use log_event_raw to avoid markdown wrapping long interaction IDs
-                        crate::logging::log_event_raw(&format!(
-                            "{} {} ({}){}",
-                            "OUT".cyan(),
-                            request_clone.method.bold(),
-                            format_status(&response),
-                            detail,
+                        crate::logging::log_event(&format_mcp_response(
+                            &request_clone.method,
+                            &format_status(&response),
+                            &detail,
+                            &resp_body,
                         ));
-                        if !resp_body.is_empty() {
-                            crate::logging::log_event("");
-                            crate::logging::log_event(resp_body.trim());
-                        }
                         let _ = tx_clone.send(format!("{}\n", resp_str));
                     }
                 });
@@ -474,11 +453,11 @@ impl McpServer {
                 .handle_request(request.clone(), tx.clone(), cancellation_token)
                 .await?;
             let resp_str = serde_json::to_string(&response)?;
-            crate::logging::log_event(&format!(
-                "{} {} ({})",
-                "OUT".cyan(),
-                request.method.bold(),
-                format_status(&response)
+            crate::logging::log_event(&format_mcp_response(
+                &request.method,
+                &format_status(&response),
+                "",
+                "",
             ));
             let _ = tx.send(format!("{}\n", resp_str));
         }
@@ -785,10 +764,10 @@ mod tests {
     }
 
     #[test]
-    fn test_format_request_log() {
-        let (detail, body) = format_request_log("tools/list", &None);
+    fn test_extract_request_parts() {
+        let (detail, body) = extract_request_parts("tools/list", &None);
         assert!(detail.is_empty());
-        assert!(body.is_empty());
+        assert!(body.is_none());
 
         let params = json!({
             "name": "clemini_chat",
@@ -797,12 +776,38 @@ mod tests {
                 "interaction_id": "test-id"
             }
         });
-        let (detail, body) = format_request_log("tools/call", &Some(params));
+        let (detail, body) = extract_request_parts("tools/call", &Some(params));
         assert!(detail.contains("clemini_chat"));
         assert!(detail.contains("interaction"));
         assert!(detail.contains("test-id"));
+        let body = body.unwrap();
         assert!(body.contains("hello"));
         assert!(body.contains("world"));
+    }
+
+    #[test]
+    fn test_format_mcp_request() {
+        colored::control::set_override(false);
+
+        // Simple request without body
+        let output = format_mcp_request("tools/list", &None);
+        assert!(output.starts_with("IN"));
+        assert!(output.contains("tools/list"));
+
+        // Request with body
+        let params = json!({
+            "name": "clemini_chat",
+            "arguments": {
+                "message": "hello world",
+                "interaction_id": "test-id"
+            }
+        });
+        let output = format_mcp_request("tools/call", &Some(params));
+        assert!(output.contains("IN"));
+        assert!(output.contains("clemini_chat"));
+        assert!(output.contains("hello world"));
+
+        colored::control::unset_override();
     }
 
     #[test]
@@ -953,7 +958,12 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
         let mut handler = McpEventHandler::new(tx);
 
-        handler.on_tool_executing("read_file", &json!({"file_path": "test.rs"}));
+        let call = OwnedFunctionCallInfo {
+            name: "read_file".to_string(),
+            args: json!({"file_path": "test.rs"}),
+            id: None,
+        };
+        handler.on_tool_executing(&call);
 
         let notification = rx.try_recv().unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&notification).unwrap();
@@ -968,13 +978,14 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
         let mut handler = McpEventHandler::new(tx);
 
-        handler.on_tool_result(
-            "bash",
+        let result = FunctionExecutionResult::new(
+            "bash".to_string(),
+            "call-1".to_string(),
+            json!({}),
+            json!({"output": "ok"}),
             std::time::Duration::from_millis(150),
-            100,
-            false,
-            None,
         );
+        handler.on_tool_result(&result);
 
         let notification = rx.try_recv().unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&notification).unwrap();
@@ -1005,7 +1016,7 @@ mod tests {
         let mut handler = McpEventHandler::new(tx);
 
         // Context warning should only log, not send notification
-        handler.on_context_warning(85.5);
+        handler.on_context_warning(&crate::agent::ContextWarning::new(855_000, 1_000_000));
 
         // No notification should be sent for context warnings
         assert!(rx.try_recv().is_err());

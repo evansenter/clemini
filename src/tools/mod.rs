@@ -20,6 +20,28 @@ use tokio::sync::mpsc;
 
 use crate::agent::AgentEvent;
 
+// ============================================================================
+// ToolEmitter trait - unified output emission for tools
+// ============================================================================
+
+/// Trait for tools that emit output events.
+/// Provides a default `emit()` implementation that sends through
+/// the event channel or falls back to logging.
+pub trait ToolEmitter {
+    /// Returns a reference to the tool's events sender.
+    fn events_tx(&self) -> &Option<mpsc::Sender<AgentEvent>>;
+
+    /// Emit tool output through event channel or fallback to log.
+    /// This default implementation handles the common pattern.
+    fn emit(&self, output: &str) {
+        if let Some(tx) = self.events_tx() {
+            let _ = tx.try_send(AgentEvent::ToolOutput(output.to_string()));
+        } else {
+            crate::logging::log_event(output);
+        }
+    }
+}
+
 pub use ask_user::AskUserTool;
 pub use bash::BashTool;
 pub use edit::EditTool;
@@ -366,6 +388,35 @@ mod tests {
                 make_relative(outside_path, &cwd),
                 outside_path.to_string_lossy()
             );
+        }
+    }
+
+    // ============================================================================
+    // ToolEmitter tests
+    // ============================================================================
+
+    #[tokio::test]
+    async fn test_tool_emitter_with_channel() {
+        struct MockTool {
+            events_tx: Option<mpsc::Sender<AgentEvent>>,
+        }
+        impl ToolEmitter for MockTool {
+            fn events_tx(&self) -> &Option<mpsc::Sender<AgentEvent>> {
+                &self.events_tx
+            }
+        }
+
+        let (tx, mut rx) = mpsc::channel(1);
+        let tool = MockTool {
+            events_tx: Some(tx),
+        };
+
+        tool.emit("test message");
+
+        if let Some(AgentEvent::ToolOutput(msg)) = rx.recv().await {
+            assert_eq!(msg, "test message");
+        } else {
+            panic!("Expected AgentEvent::ToolOutput");
         }
     }
 }

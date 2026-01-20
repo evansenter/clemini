@@ -3,7 +3,7 @@ use clap::Parser;
 use colored::Colorize;
 use crossterm::event::{Event, EventStream, KeyCode, KeyModifiers};
 use futures_util::StreamExt;
-use genai_rs::Client;
+use genai_rs::{Client, FunctionExecutionResult, OwnedFunctionCallInfo};
 use ratatui::DefaultTerminal;
 use serde::Deserialize;
 use serde_json::Value;
@@ -43,18 +43,15 @@ pub(crate) mod logging {
     pub use clemini::logging::*;
 }
 
-/// Writes to log files only (current behavior of log_event)
+/// Writes to log files only (for MCP mode)
 pub struct FileSink;
 
 impl OutputSink for FileSink {
-    fn emit(&self, message: &str, render_markdown: bool) {
-        log_event_to_file(message, render_markdown);
+    fn emit(&self, message: &str) {
+        log_event_to_file(message, true);
     }
-    fn emit_streaming(&self, text: &str) {
-        // No terminal to stream to, but still log for tail -f
-        if let Some(rendered) = events::render_streaming_chunk(text) {
-            events::write_to_streaming_log(&rendered);
-        }
+    fn emit_line(&self, message: &str) {
+        log_event_to_file(message, false);
     }
 }
 
@@ -62,25 +59,23 @@ impl OutputSink for FileSink {
 pub struct TerminalSink;
 
 impl OutputSink for TerminalSink {
-    fn emit(&self, message: &str, render_markdown: bool) {
+    fn emit(&self, message: &str) {
+        // Print message with blank line after for visual separation
         if message.is_empty() {
-            // Empty message = blank line
             eprintln!();
-        } else if render_markdown {
-            // text_nowrap includes trailing newline, use eprint to avoid doubling
-            eprint!("{}", events::text_nowrap(message));
+        } else {
+            eprintln!("{}\n", message);
+        }
+        log_event_to_file(message, true);
+    }
+    fn emit_line(&self, message: &str) {
+        // Print message without trailing blank line
+        if message.is_empty() {
+            eprintln!();
         } else {
             eprintln!("{}", message);
         }
-        log_event_to_file(message, render_markdown);
-    }
-    fn emit_streaming(&self, text: &str) {
-        print!("{text}");
-        let _ = io::stdout().flush();
-        // Also log for tail -f
-        if let Some(rendered) = events::render_streaming_chunk(text) {
-            events::write_to_streaming_log(&rendered);
-        }
+        log_event_to_file(message, false);
     }
 }
 
@@ -89,8 +84,6 @@ impl OutputSink for TerminalSink {
 pub enum TuiMessage {
     /// Complete line/message (uses append_to_chat)
     Line(String),
-    /// Streaming text chunk (uses append_streaming)
-    Streaming(String),
 }
 
 /// Channel for TUI output - global sender that TuiSink writes to
@@ -101,27 +94,23 @@ pub fn set_tui_output_channel(tx: mpsc::UnboundedSender<TuiMessage>) {
     let _ = TUI_OUTPUT_TX.set(tx);
 }
 
-/// Writes to TUI buffer (via channel) AND log files - no termimad, no stderr
+/// Writes to TUI buffer (via channel) AND log files
 pub struct TuiSink;
 
 impl OutputSink for TuiSink {
-    fn emit(&self, message: &str, _render_markdown: bool) {
-        // Send to TUI via channel (no termimad rendering - just plain text with ANSI colors)
+    fn emit(&self, message: &str) {
+        // Send to TUI via channel
         if let Some(tx) = TUI_OUTPUT_TX.get() {
             let _ = tx.send(TuiMessage::Line(message.to_string()));
         }
-        // Also log to file (without markdown rendering to avoid termimad formatting issues)
-        log_event_to_file(message, false);
+        log_event_to_file(message, true);
     }
-    fn emit_streaming(&self, text: &str) {
-        // Send streaming text to TUI via channel
+    fn emit_line(&self, message: &str) {
+        // Send to TUI via channel (no difference in TUI, just log file)
         if let Some(tx) = TUI_OUTPUT_TX.get() {
-            let _ = tx.send(TuiMessage::Streaming(text.to_string()));
+            let _ = tx.send(TuiMessage::Line(message.to_string()));
         }
-        // Also log for tail -f
-        if let Some(rendered) = events::render_streaming_chunk(text) {
-            events::write_to_streaming_log(&rendered);
-        }
+        log_event_to_file(message, false);
     }
 }
 
@@ -130,20 +119,13 @@ pub fn log_to_file(message: &str) {
     log_event_to_file(message, true);
 }
 
-fn log_event_to_file(message: &str, render_markdown: bool) {
+fn log_event_to_file(message: &str, with_block_separator: bool) {
     // Skip logging during tests unless explicitly enabled
     if !logging::is_logging_enabled() {
         return;
     }
 
     colored::control::set_override(true);
-
-    // Optionally render markdown (no wrapping)
-    let rendered = if render_markdown {
-        events::text_nowrap(message)
-    } else {
-        message.to_string()
-    };
 
     // Write to the stable log location: clemini.log.YYYY-MM-DD
     let log_dir = dirs::home_dir()
@@ -154,27 +136,35 @@ fn log_event_to_file(message: &str, render_markdown: bool) {
     let today = chrono::Local::now().format("%Y-%m-%d");
     let log_path = log_dir.join(format!("clemini.log.{}", today));
 
-    let _ = write_to_log_file(&log_path, &rendered);
+    let _ = write_to_log_file(&log_path, message, with_block_separator);
 
     // Also write to CLEMINI_LOG if set (backwards compat)
     if let Ok(path) = std::env::var("CLEMINI_LOG") {
-        let _ = write_to_log_file(PathBuf::from(path), &rendered);
+        let _ = write_to_log_file(PathBuf::from(path), message, with_block_separator);
     }
 }
 
-fn write_to_log_file(path: impl Into<PathBuf>, rendered: &str) -> std::io::Result<()> {
+fn write_to_log_file(
+    path: impl Into<PathBuf>,
+    rendered: &str,
+    with_block_separator: bool,
+) -> std::io::Result<()> {
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(path.into())?;
 
-    let rendered = rendered.trim_end();
+    // Write content lines
     if rendered.is_empty() {
         writeln!(file)?;
     } else {
         for line in rendered.lines() {
             writeln!(file, "{}", line)?;
         }
+    }
+    // Add blank line after for visual separation between blocks
+    if with_block_separator {
+        writeln!(file)?;
     }
     Ok(())
 }
@@ -612,12 +602,12 @@ fn convert_agent_event_to_app_events(event: &AgentEvent) -> Vec<AppEvent> {
         AgentEvent::ToolResult(result) => vec![AppEvent::ToolCompleted {
             name: result.name.clone(),
             duration_ms: result.duration.as_millis() as u64,
-            tokens: events::estimate_tokens(&result.args) + events::estimate_tokens(&result.result),
+            tokens: events::compute_result_tokens(result),
             has_error: result.is_error(),
         }],
-        AgentEvent::ContextWarning { percentage, .. } => {
+        AgentEvent::ContextWarning(warning) => {
             vec![AppEvent::ContextWarning(events::format_context_warning(
-                *percentage,
+                warning.percentage(),
             ))]
         }
         // Complete and Cancelled are handled differently (via join handle result)
@@ -630,88 +620,67 @@ fn convert_agent_event_to_app_events(event: &AgentEvent) -> Vec<AppEvent> {
 /// Also logs events to file for `make logs` visibility.
 struct TuiEventHandler {
     app_tx: mpsc::Sender<AppEvent>,
+    text_buffer: events::TextBuffer,
 }
 
 impl TuiEventHandler {
     fn new(app_tx: mpsc::Sender<AppEvent>) -> Self {
-        Self { app_tx }
+        Self {
+            app_tx,
+            text_buffer: events::TextBuffer::new(),
+        }
     }
 }
 
 impl events::EventHandler for TuiEventHandler {
     fn on_text_delta(&mut self, text: &str) {
-        // Use unified streaming: buffer, render markdown, then display + log
-        if let Some(rendered) = events::render_streaming_chunk(text) {
-            let _ = self
-                .app_tx
-                .try_send(AppEvent::StreamChunk(rendered.clone()));
-            events::write_to_streaming_log(&rendered);
-        }
+        self.text_buffer.push(text);
     }
 
-    fn on_tool_executing(&mut self, name: &str, args: &serde_json::Value) {
-        // Flush streaming buffer before tool output (normalizes to \n\n)
-        if let Some(rendered) = events::flush_streaming_buffer() {
+    fn on_tool_executing(&mut self, call: &OwnedFunctionCallInfo) {
+        // Flush buffer before tool output (normalizes to \n\n for spacing)
+        // Logging is handled by dispatch_event() after this method returns
+        if let Some(rendered) = self.text_buffer.flush() {
             let _ = self
                 .app_tx
                 .try_send(AppEvent::StreamChunk(rendered.clone()));
             events::write_to_streaming_log(&rendered);
-        } else {
-            // No buffered content - add blank line for spacing
-            let _ = self
-                .app_tx
-                .try_send(AppEvent::StreamChunk("\n".to_string()));
-            logging::log_event("");
         }
         let _ = self.app_tx.try_send(AppEvent::ToolExecuting {
-            name: name.to_string(),
-            args: args.clone(),
+            name: call.name.clone(),
+            args: call.args.clone(),
         });
-        logging::log_event(&events::format_tool_executing(name, args));
     }
 
-    fn on_tool_result(
-        &mut self,
-        name: &str,
-        duration: std::time::Duration,
-        tokens: u32,
-        has_error: bool,
-        error_message: Option<&str>,
-    ) {
+    fn on_tool_result(&mut self, result: &FunctionExecutionResult) {
+        // Logging is handled by dispatch_event() after this method returns
+        let tokens =
+            events::estimate_tokens(&result.args) + events::estimate_tokens(&result.result);
         let _ = self.app_tx.try_send(AppEvent::ToolCompleted {
-            name: name.to_string(),
-            duration_ms: duration.as_millis() as u64,
+            name: result.name.clone(),
+            duration_ms: result.duration.as_millis() as u64,
             tokens,
-            has_error,
+            has_error: result.is_error(),
         });
-        logging::log_event(&events::format_tool_result(
-            name, duration, tokens, has_error,
-        ));
-        if let Some(err_msg) = error_message {
-            logging::log_event(&events::format_error_detail(err_msg));
-        }
-        logging::log_event(""); // Blank line after tool result
     }
 
-    fn on_context_warning(&mut self, percentage: f64) {
-        let msg = events::format_context_warning(percentage);
+    fn on_context_warning(&mut self, warning: &clemini::agent::ContextWarning) {
+        let msg = events::format_context_warning(warning.percentage());
         let _ = self.app_tx.try_send(AppEvent::ContextWarning(msg.clone()));
-        logging::log_event(&msg);
+        // Logging is handled by dispatch_event() after this method returns
     }
 
-    fn on_complete(&mut self) {
-        // Flush any remaining buffered text with unified streaming (normalizes to \n\n)
-        if let Some(rendered) = events::flush_streaming_buffer() {
+    fn on_complete(
+        &mut self,
+        _interaction_id: Option<&str>,
+        _response: &genai_rs::InteractionResponse,
+    ) {
+        // Flush any remaining buffered text (normalizes to \n\n)
+        if let Some(rendered) = self.text_buffer.flush() {
             let _ = self
                 .app_tx
                 .try_send(AppEvent::StreamChunk(rendered.clone()));
             events::write_to_streaming_log(&rendered);
-        } else {
-            // No buffered content - add blank line for spacing before OUT
-            let _ = self
-                .app_tx
-                .try_send(AppEvent::StreamChunk("\n".to_string()));
-            logging::log_event("");
         }
     }
 
@@ -719,8 +688,7 @@ impl events::EventHandler for TuiEventHandler {
         let _ = self
             .app_tx
             .try_send(AppEvent::ToolOutput(output.to_string()));
-        // Tool output is pre-formatted with ANSI codes, skip markdown rendering
-        logging::log_event_raw(output);
+        // Logging is handled by dispatch_event() after this method returns
     }
 }
 
@@ -1173,7 +1141,6 @@ async fn run_tui_event_loop(
                         // Add blank line after so streaming starts on new line
                         app.append_to_chat("");
                     }
-                    TuiMessage::Streaming(text) => app.append_streaming(&text),
                 }
             }
         }
@@ -1567,11 +1534,8 @@ mod event_handling_tests {
 
     #[test]
     fn test_convert_context_warning() {
-        let event = AgentEvent::ContextWarning {
-            used: 900_000,
-            limit: 1_000_000,
-            percentage: 90.0,
-        };
+        let event =
+            AgentEvent::ContextWarning(clemini::agent::ContextWarning::new(900_000, 1_000_000));
         let app_events = convert_agent_event_to_app_events(&event);
 
         assert_eq!(app_events.len(), 1);
@@ -1630,15 +1594,38 @@ mod event_handling_tests {
     // =========================================
 
     #[tokio::test]
-    async fn test_tui_handler_text_delta_sends_stream_chunk() {
+    async fn test_tui_handler_text_delta_buffers_until_flush() {
         logging::disable_logging();
 
         let (tx, mut rx) = mpsc::channel::<AppEvent>(10);
         let mut handler = TuiEventHandler::new(tx);
 
-        // Text is buffered until newlines, then rendered with markdown
+        // Text is buffered until event boundary (tool executing, complete)
         handler.on_text_delta("Hello\n");
 
+        // Nothing sent yet - text is buffered
+        assert!(rx.try_recv().is_err(), "Expected no event until flush");
+
+        // Flush happens at on_complete
+        use genai_rs::{InteractionResponse, InteractionStatus};
+        let response = InteractionResponse {
+            id: Some("test-id".to_string()),
+            model: None,
+            agent: None,
+            input: vec![],
+            outputs: vec![],
+            status: InteractionStatus::Completed,
+            usage: None,
+            tools: None,
+            grounding_metadata: None,
+            url_context_metadata: None,
+            previous_interaction_id: None,
+            created: None,
+            updated: None,
+        };
+        handler.on_complete(Some("test-id"), &response);
+
+        // Now the buffered text is sent
         let event = rx.try_recv().unwrap();
         match event {
             AppEvent::StreamChunk(text) => assert!(text.contains("Hello")),
@@ -1651,18 +1638,16 @@ mod event_handling_tests {
         let (tx, mut rx) = mpsc::channel::<AppEvent>(10);
         let mut handler = TuiEventHandler::new(tx);
 
-        handler.on_tool_executing("read_file", &json!({"file_path": "test.rs"}));
+        let call = OwnedFunctionCallInfo {
+            name: "read_file".to_string(),
+            args: json!({"file_path": "test.rs"}),
+            id: None,
+        };
+        handler.on_tool_executing(&call);
 
-        // First event: StreamChunk for blank line (when flush returns None)
-        let event1 = rx.try_recv().unwrap();
-        assert!(
-            matches!(event1, AppEvent::StreamChunk(_)),
-            "Expected StreamChunk for spacing"
-        );
-
-        // Second event: ToolExecuting
-        let event2 = rx.try_recv().unwrap();
-        match event2 {
+        // With empty buffer, only ToolExecuting is sent (no blank line antipattern)
+        let event = rx.try_recv().unwrap();
+        match event {
             AppEvent::ToolExecuting { name, args } => {
                 assert_eq!(name, "read_file");
                 assert_eq!(args["file_path"], "test.rs");
@@ -1676,7 +1661,14 @@ mod event_handling_tests {
         let (tx, mut rx) = mpsc::channel::<AppEvent>(10);
         let mut handler = TuiEventHandler::new(tx);
 
-        handler.on_tool_result("bash", Duration::from_millis(150), 100, false, None);
+        let result = FunctionExecutionResult::new(
+            "bash".to_string(),
+            "call-1".to_string(),
+            json!({"command": "ls"}),
+            json!({"output": "file.txt"}),
+            Duration::from_millis(150),
+        );
+        handler.on_tool_result(&result);
 
         let event = rx.try_recv().unwrap();
         match event {
@@ -1688,7 +1680,7 @@ mod event_handling_tests {
             } => {
                 assert_eq!(name, "bash");
                 assert_eq!(duration_ms, 150);
-                assert_eq!(tokens, 100);
+                assert!(tokens > 0); // tokens computed from args + result
                 assert!(!has_error);
             }
             _ => panic!("Expected ToolCompleted"),
@@ -1700,7 +1692,7 @@ mod event_handling_tests {
         let (tx, mut rx) = mpsc::channel::<AppEvent>(10);
         let mut handler = TuiEventHandler::new(tx);
 
-        handler.on_context_warning(85.5);
+        handler.on_context_warning(&clemini::agent::ContextWarning::new(855_000, 1_000_000));
 
         let event = rx.try_recv().unwrap();
         match event {
@@ -1709,5 +1701,74 @@ mod event_handling_tests {
             }
             _ => panic!("Expected ContextWarning"),
         }
+    }
+
+    // =========================================
+    // Output spacing contract tests
+    // =========================================
+
+    /// write_to_log_file with with_block_separator=true adds trailing blank line
+    #[test]
+    fn test_write_to_log_file_with_blank_line() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let log_path = temp_dir.path().join("test.log");
+
+        write_to_log_file(&log_path, "hello", true).unwrap();
+
+        let content = std::fs::read_to_string(&log_path).unwrap();
+        assert_eq!(
+            content, "hello\n\n",
+            "emit() should add trailing blank line"
+        );
+    }
+
+    /// write_to_log_file with with_block_separator=false does NOT add trailing blank line
+    #[test]
+    fn test_write_to_log_file_without_blank_line() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let log_path = temp_dir.path().join("test.log");
+
+        write_to_log_file(&log_path, "hello", false).unwrap();
+
+        let content = std::fs::read_to_string(&log_path).unwrap();
+        assert_eq!(
+            content, "hello\n",
+            "emit_line() should NOT add trailing blank line"
+        );
+    }
+
+    /// Multiple emit_line calls produce consecutive lines without gaps
+    #[test]
+    fn test_emit_line_consecutive_calls() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let log_path = temp_dir.path().join("test.log");
+
+        write_to_log_file(&log_path, "line1", false).unwrap();
+        write_to_log_file(&log_path, "line2", false).unwrap();
+        write_to_log_file(&log_path, "line3", false).unwrap();
+
+        let content = std::fs::read_to_string(&log_path).unwrap();
+        assert_eq!(
+            content, "line1\nline2\nline3\n",
+            "consecutive emit_line() calls should not have gaps"
+        );
+    }
+
+    /// emit() after emit_line() creates proper block separation
+    #[test]
+    fn test_emit_after_emit_line_creates_separation() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let log_path = temp_dir.path().join("test.log");
+
+        // Simulate: tool executing (emit_line), tool output (emit_line), tool result (emit)
+        write_to_log_file(&log_path, "┌─ tool", false).unwrap(); // emit_line
+        write_to_log_file(&log_path, "  output", false).unwrap(); // emit_line
+        write_to_log_file(&log_path, "└─ tool", true).unwrap(); // emit (ends block)
+
+        let content = std::fs::read_to_string(&log_path).unwrap();
+        assert_eq!(
+            content, "┌─ tool\n  output\n└─ tool\n\n",
+            "tool block should end with blank line for separation"
+        );
     }
 }

@@ -11,5 +11,5 @@ pub mod tools;
 
 // Re-export commonly used types
 pub use agent::{AgentEvent, InteractionResult, run_interaction};
-pub use logging::{OutputSink, log_event, log_event_raw, set_output_sink};
+pub use logging::{OutputSink, log_event, set_output_sink};
 pub use tools::CleminiToolService;

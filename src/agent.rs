@@ -24,6 +24,27 @@ use crate::tools::CleminiToolService;
 /// Context window limit for Gemini models (1M tokens).
 const CONTEXT_WINDOW_LIMIT: u32 = 1_000_000;
 
+/// Context window usage warning (>80% or >95% usage).
+#[derive(Debug, Clone, Copy)]
+pub struct ContextWarning {
+    /// Tokens used in the context window.
+    pub used: u32,
+    /// Maximum tokens allowed in the context window.
+    pub limit: u32,
+}
+
+impl ContextWarning {
+    /// Create a new context warning.
+    pub fn new(used: u32, limit: u32) -> Self {
+        Self { used, limit }
+    }
+
+    /// Compute the percentage of context window used.
+    pub fn percentage(&self) -> f64 {
+        (self.used as f64 / self.limit as f64) * 100.0
+    }
+}
+
 /// Events emitted by the agent during interaction.
 ///
 /// UI layers receive these events and handle them appropriately:
@@ -55,11 +76,7 @@ pub enum AgentEvent {
     },
 
     /// Context window warning (>80% or >95% usage).
-    ContextWarning {
-        used: u32,
-        limit: u32,
-        percentage: f64,
-    },
+    ContextWarning(ContextWarning),
 
     /// Cancelled by user.
     Cancelled,
@@ -91,11 +108,10 @@ struct ToolExecutionResult {
 fn check_context_window(total_tokens: u32, events_tx: &mpsc::Sender<AgentEvent>) {
     let ratio = f64::from(total_tokens) / f64::from(CONTEXT_WINDOW_LIMIT);
     if ratio > 0.80 {
-        let _ = events_tx.try_send(AgentEvent::ContextWarning {
-            used: total_tokens,
-            limit: CONTEXT_WINDOW_LIMIT,
-            percentage: ratio * 100.0,
-        });
+        let _ = events_tx.try_send(AgentEvent::ContextWarning(ContextWarning::new(
+            total_tokens,
+            CONTEXT_WINDOW_LIMIT,
+        )));
     }
 }
 
@@ -433,14 +449,10 @@ mod tests {
 
         let event = rx.try_recv().expect("Should send warning at 85% usage");
         match event {
-            AgentEvent::ContextWarning {
-                used,
-                limit,
-                percentage,
-            } => {
-                assert_eq!(used, 850_000);
-                assert_eq!(limit, CONTEXT_WINDOW_LIMIT);
-                assert!((percentage - 85.0).abs() < 0.01);
+            AgentEvent::ContextWarning(warning) => {
+                assert_eq!(warning.used, 850_000);
+                assert_eq!(warning.limit, CONTEXT_WINDOW_LIMIT);
+                assert!((warning.percentage() - 85.0).abs() < 0.01);
             }
             _ => panic!("Expected ContextWarning event"),
         }
@@ -454,14 +466,10 @@ mod tests {
 
         let event = rx.try_recv().expect("Should send warning at 96% usage");
         match event {
-            AgentEvent::ContextWarning {
-                used,
-                limit,
-                percentage,
-            } => {
-                assert_eq!(used, 960_000);
-                assert_eq!(limit, CONTEXT_WINDOW_LIMIT);
-                assert!((percentage - 96.0).abs() < 0.01);
+            AgentEvent::ContextWarning(warning) => {
+                assert_eq!(warning.used, 960_000);
+                assert_eq!(warning.limit, CONTEXT_WINDOW_LIMIT);
+                assert!((warning.percentage() - 96.0).abs() < 0.01);
             }
             _ => panic!("Expected ContextWarning event"),
         }

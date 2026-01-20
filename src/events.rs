@@ -2,8 +2,7 @@
 //!
 //! This module is the canonical location for:
 //! - `EventHandler` trait - UI implementations handle `AgentEvent`s
-//! - Formatting functions - `format_tool_*`, `format_error_detail`, `format_context_warning`
-//! - Streaming text rendering - `render_streaming_chunk`, `flush_streaming_buffer`
+//! - Formatting functions - pure functions for formatting events
 //!
 //! # Design
 //!
@@ -14,19 +13,24 @@
 //! - TUI mode: Uses `AppEvent` internally (handled separately)
 //!
 //! All handlers use the shared formatting functions to ensure consistent output.
+//! Each handler owns its own text buffer for streaming text accumulation.
 //!
-//! # Future (#59)
+//! # Pure Formatters
 //!
-//! When we move to streaming-first architecture, the handler will consume
-//! `Stream<Item = AgentEvent>` instead of individual events, but the trait
-//! methods remain the same.
+//! Type-aligned pure formatters take genai-rs types directly:
+//! - `format_call()` - OwnedFunctionCallInfo → String
+//! - `format_result()` - FunctionExecutionResult → String
+//!
+//! Lower-level formatters for individual fields:
+//! - `format_tool_executing()`, `format_tool_result()`, etc.
 
 use std::io::{self, Write};
 use std::path::PathBuf;
-use std::sync::{LazyLock, Mutex};
+use std::sync::LazyLock;
 use std::time::Duration;
 
 use colored::Colorize;
+use genai_rs::{FunctionExecutionResult, OwnedFunctionCallInfo};
 use serde_json::Value;
 use termimad::MadSkin;
 
@@ -48,40 +52,62 @@ pub static SKIN: LazyLock<MadSkin> = LazyLock::new(|| {
 
 /// Render text with markdown formatting but without line wrapping.
 /// Uses a very large width to effectively disable termimad's wrapping.
-pub fn text_nowrap(text: &str) -> String {
+pub fn render_markdown_nowrap(text: &str) -> String {
     use termimad::FmtText;
     FmtText::from(&SKIN, text, Some(10000)).to_string()
 }
 
-/// Buffer for streaming text - accumulates until newlines, then renders with markdown
-static STREAMING_BUFFER: LazyLock<Mutex<String>> = LazyLock::new(|| Mutex::new(String::new()));
-
 // ============================================================================
-// Unified Streaming Text Rendering
+// Text Buffer (shared across EventHandler implementations)
 // ============================================================================
-//
-// These functions provide a unified approach to streaming text rendering.
-// All UI modes (Terminal, TUI, MCP) use these to ensure consistent behavior:
-//
-// 1. render_streaming_chunk() - Buffer text, render complete lines with markdown
-// 2. flush_streaming_buffer() - Flush remaining text at end of stream
-// 3. write_to_streaming_log() - Write rendered text to log files
-//
-// Usage pattern in EventHandler.on_text_delta():
-//   if let Some(rendered) = render_streaming_chunk(text) {
-//       // Display rendered text (mode-specific: print, channel, etc.)
-//       write_to_streaming_log(&rendered);
-//   }
 
-/// Split text at the last newline, returning (complete_lines, remainder).
-/// Returns None if there's no newline in the text.
-fn split_at_last_newline(text: &str) -> Option<(&str, &str)> {
-    text.rfind('\n').map(|pos| {
-        let complete = &text[..=pos];
-        let remaining = &text[pos + 1..];
-        (complete, remaining)
-    })
+/// Buffer for accumulating streaming text until event boundaries.
+///
+/// Text is buffered via `push()` at each TextDelta event, then flushed with
+/// markdown rendering at event boundaries (tool executing, complete).
+/// The `flush()` method normalizes trailing newlines to exactly `\n\n`.
+#[derive(Debug, Default)]
+pub struct TextBuffer(String);
+
+impl TextBuffer {
+    /// Create a new empty text buffer.
+    pub fn new() -> Self {
+        Self(String::new())
+    }
+
+    /// Append text to the buffer.
+    pub fn push(&mut self, text: &str) {
+        self.0.push_str(text);
+    }
+
+    /// Flush buffered text with markdown rendering, normalized to `\n\n`.
+    /// Returns rendered text, or None if buffer was empty or whitespace-only.
+    pub fn flush(&mut self) -> Option<String> {
+        if self.0.is_empty() {
+            return None;
+        }
+
+        let text = std::mem::take(&mut self.0);
+        let rendered = render_markdown_nowrap(&text);
+
+        // Normalize trailing newlines to exactly \n\n
+        let trimmed = rendered.trim_end_matches('\n');
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(format!("{}\n\n", trimmed))
+        }
+    }
+
+    /// Check if the buffer is empty.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
 }
+
+// ============================================================================
+// File Logging
+// ============================================================================
 
 /// Write streaming text directly to a log file (no newline added).
 fn write_streaming_to_log_file(path: impl Into<PathBuf>, text: &str) -> std::io::Result<()> {
@@ -93,57 +119,8 @@ fn write_streaming_to_log_file(path: impl Into<PathBuf>, text: &str) -> std::io:
     Ok(())
 }
 
-/// Buffer streaming text and render complete lines with markdown.
-/// Returns rendered text for complete lines, or None if still buffering.
-/// Call `flush_streaming_buffer()` when streaming completes.
-pub fn render_streaming_chunk(text: &str) -> Option<String> {
-    let Ok(mut buffer) = STREAMING_BUFFER.lock() else {
-        return None;
-    };
-
-    buffer.push_str(text);
-
-    // Find the last newline - everything before it can be rendered
-    let (complete, remaining) = split_at_last_newline(&buffer)?;
-    let complete = complete.to_string();
-    let remaining = remaining.to_string();
-    *buffer = remaining;
-
-    // Render complete lines with markdown
-    colored::control::set_override(true);
-    Some(text_nowrap(&complete))
-}
-
-/// Flush any remaining buffered streaming text with markdown rendering.
-/// Returns rendered text, or None if buffer was empty.
-/// Call this when streaming is complete (e.g., before tool execution or on_complete).
-/// Output is normalized to end with exactly `\n\n` for consistent spacing.
-pub fn flush_streaming_buffer() -> Option<String> {
-    let Ok(mut buffer) = STREAMING_BUFFER.lock() else {
-        return None;
-    };
-
-    if buffer.is_empty() {
-        return None;
-    }
-
-    let text = std::mem::take(&mut *buffer);
-
-    // Render with markdown
-    colored::control::set_override(true);
-    let rendered = text_nowrap(&text);
-
-    // Normalize trailing newlines to exactly \n\n
-    let trimmed = rendered.trim_end_matches('\n');
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(format!("{}\n\n", trimmed))
-    }
-}
-
-/// Write rendered streaming text to log files.
-/// Used by EventHandlers after rendering with `render_streaming_chunk()`.
+/// Write rendered text to log files.
+/// Used by EventHandlers after flushing with `TextBuffer::flush()`.
 pub fn write_to_streaming_log(rendered: &str) {
     // Skip logging during tests unless explicitly enabled
     if !crate::logging::is_logging_enabled() {
@@ -270,56 +247,94 @@ pub fn format_error_detail(error_message: &str) -> String {
     format!("  └─ error: {}", error_message.dimmed())
 }
 
+// ============================================================================
+// Type-aligned pure formatters (take genai-rs types directly)
+// ============================================================================
+
+/// Pure: Format a function call for display.
+/// Takes the genai-rs type directly for clean consumer API.
+pub fn format_call(call: &OwnedFunctionCallInfo) -> String {
+    format_tool_executing(&call.name, &call.args)
+}
+
+/// Compute token estimate for a function execution result (args + result).
+pub fn compute_result_tokens(result: &FunctionExecutionResult) -> u32 {
+    estimate_tokens(&result.args) + estimate_tokens(&result.result)
+}
+
+/// Pure: Format a function execution result for display.
+/// Takes the genai-rs type directly, computing tokens internally.
+pub fn format_result(result: &FunctionExecutionResult) -> String {
+    let tokens = compute_result_tokens(result);
+    let has_error = result.is_error();
+    format_tool_result(&result.name, result.duration, tokens, has_error)
+}
+
+/// Pure: Format tool result block (result line + optional error).
+/// Spacing between blocks is handled by write_to_log_file.
+pub fn format_result_block(result: &FunctionExecutionResult) -> String {
+    let mut output = format_result(result);
+    if let Some(err_msg) = result.error_message() {
+        output.push('\n');
+        output.push_str(&format_error_detail(err_msg));
+    }
+    output
+}
+
 /// Handler for agent events. UI modes implement this to process events.
 pub trait EventHandler {
     /// Handle streaming text (should append to current line, not create new line).
     fn on_text_delta(&mut self, text: &str);
 
     /// Handle tool starting execution.
-    fn on_tool_executing(&mut self, name: &str, args: &Value);
+    fn on_tool_executing(&mut self, call: &OwnedFunctionCallInfo);
 
     /// Handle tool completion.
-    fn on_tool_result(
-        &mut self,
-        name: &str,
-        duration: Duration,
-        tokens: u32,
-        has_error: bool,
-        error_message: Option<&str>,
-    );
+    fn on_tool_result(&mut self, result: &FunctionExecutionResult);
 
     /// Handle context window warning.
-    fn on_context_warning(&mut self, percentage: f64);
+    fn on_context_warning(&mut self, warning: &crate::agent::ContextWarning);
 
     /// Handle interaction complete (optional, default no-op).
-    fn on_complete(&mut self) {}
+    fn on_complete(
+        &mut self,
+        _interaction_id: Option<&str>,
+        _response: &genai_rs::InteractionResponse,
+    ) {
+    }
 
     /// Handle cancellation (optional, default no-op).
     fn on_cancelled(&mut self) {}
 
     /// Handle tool output (emitted by tools for visual display).
-    /// Default implementation logs the output.
-    fn on_tool_output(&mut self, output: &str) {
-        // Tool output is pre-formatted with ANSI codes, skip markdown rendering
-        crate::logging::log_event_raw(output);
-    }
+    /// Default implementation is no-op; logging is handled by dispatch_event.
+    fn on_tool_output(&mut self, _output: &str) {}
 }
 
 /// Event handler for terminal output (plain REPL and non-interactive modes).
 pub struct TerminalEventHandler {
     stream_enabled: bool,
+    text_buffer: TextBuffer,
 }
 
 impl TerminalEventHandler {
     pub fn new(stream_enabled: bool) -> Self {
-        Self { stream_enabled }
+        Self {
+            stream_enabled,
+            text_buffer: TextBuffer::new(),
+        }
     }
 }
 
 impl EventHandler for TerminalEventHandler {
     fn on_text_delta(&mut self, text: &str) {
-        // Use unified streaming: buffer, render markdown, then display + log
-        if let Some(rendered) = render_streaming_chunk(text) {
+        self.text_buffer.push(text);
+    }
+
+    fn on_tool_executing(&mut self, _call: &OwnedFunctionCallInfo) {
+        // Flush buffer before tool output (normalizes to \n\n for spacing)
+        // Logging is handled by dispatch_event() after this method returns
+        if let Some(rendered) = self.text_buffer.flush() {
             if self.stream_enabled {
                 print!("{}", rendered);
                 let _ = io::stdout().flush();
@@ -328,61 +343,34 @@ impl EventHandler for TerminalEventHandler {
         }
     }
 
-    fn on_tool_executing(&mut self, name: &str, args: &Value) {
-        // Flush streaming buffer before tool output (normalizes to \n\n)
-        if let Some(rendered) = flush_streaming_buffer() {
-            if self.stream_enabled {
-                print!("{}", rendered);
-                let _ = io::stdout().flush();
-            }
-            write_to_streaming_log(&rendered);
-        } else {
-            // No buffered content - add blank line for spacing
-            // (streaming may have written complete lines already)
-            log_event("");
-        }
-        log_event(&format_tool_executing(name, args));
+    fn on_tool_result(&mut self, _result: &FunctionExecutionResult) {
+        // Logging is handled by dispatch_event() after this method returns
     }
 
-    fn on_tool_result(
+    fn on_context_warning(&mut self, _warning: &crate::agent::ContextWarning) {
+        // Logging is handled by dispatch_event() after this method returns
+    }
+
+    fn on_complete(
         &mut self,
-        name: &str,
-        duration: Duration,
-        tokens: u32,
-        has_error: bool,
-        error_message: Option<&str>,
+        _interaction_id: Option<&str>,
+        _response: &genai_rs::InteractionResponse,
     ) {
-        log_event(&format_tool_result(name, duration, tokens, has_error));
-        if let Some(err_msg) = error_message {
-            log_event(&format_error_detail(err_msg));
-        }
-        log_event(""); // Blank line after tool result
-    }
-
-    fn on_context_warning(&mut self, percentage: f64) {
-        let msg = format_context_warning(percentage);
-        eprintln!("{}", msg.bright_red().bold());
-    }
-
-    fn on_complete(&mut self) {
-        // Flush any remaining buffered text with unified streaming (normalizes to \n\n)
-        if let Some(rendered) = flush_streaming_buffer() {
+        // Flush any remaining buffered text (normalizes to \n\n)
+        if let Some(rendered) = self.text_buffer.flush() {
             if self.stream_enabled {
                 print!("{}", rendered);
                 let _ = io::stdout().flush();
             }
             write_to_streaming_log(&rendered);
-        } else {
-            // No buffered content - add blank line for spacing before OUT
-            log_event("");
         }
     }
 }
 
 /// Dispatch an AgentEvent to the appropriate handler method.
 ///
-/// This is a convenience function that matches on the event type and calls
-/// the corresponding handler method.
+/// This function handles logging centrally so handlers don't need to duplicate
+/// log_event calls. The order is: handler method first (to flush buffers), then log.
 pub fn dispatch_event<H: EventHandler>(handler: &mut H, event: &crate::agent::AgentEvent) {
     use crate::agent::AgentEvent;
 
@@ -390,31 +378,34 @@ pub fn dispatch_event<H: EventHandler>(handler: &mut H, event: &crate::agent::Ag
         AgentEvent::TextDelta(text) => handler.on_text_delta(text),
         AgentEvent::ToolExecuting(calls) => {
             for call in calls {
-                handler.on_tool_executing(&call.name, &call.args);
+                handler.on_tool_executing(call);
+                // Tool executing is start of block - no trailing blank line
+                // (tool output and result will follow)
+                crate::logging::log_event_line(&format_call(call));
             }
         }
         AgentEvent::ToolResult(result) => {
-            let tokens = estimate_tokens(&result.args) + estimate_tokens(&result.result);
-            let has_error = result.is_error();
-            let error_message = if has_error {
-                result.error_message()
-            } else {
-                None
-            };
-            handler.on_tool_result(
-                &result.name,
-                result.duration,
-                tokens,
-                has_error,
-                error_message,
-            );
+            handler.on_tool_result(result);
+            // Unified logging: complete visual block
+            log_event(&format_result_block(result));
         }
-        AgentEvent::ContextWarning { percentage, .. } => {
-            handler.on_context_warning(*percentage);
+        AgentEvent::ContextWarning(warning) => {
+            handler.on_context_warning(warning);
+            // Unified logging: after handler
+            log_event(&format_context_warning(warning.percentage()));
         }
-        AgentEvent::Complete { .. } => handler.on_complete(),
+        AgentEvent::Complete {
+            interaction_id,
+            response,
+        } => {
+            handler.on_complete(interaction_id.as_deref(), response);
+        }
         AgentEvent::Cancelled => handler.on_cancelled(),
-        AgentEvent::ToolOutput(output) => handler.on_tool_output(output),
+        AgentEvent::ToolOutput(output) => {
+            handler.on_tool_output(output);
+            // Tool output lines don't get trailing blank line (they're part of a block)
+            crate::logging::log_event_line(output);
+        }
     }
 }
 
@@ -443,6 +434,25 @@ mod tests {
         }
     }
 
+    /// Create a minimal InteractionResponse for testing.
+    fn test_response(id: &str) -> genai_rs::InteractionResponse {
+        genai_rs::InteractionResponse {
+            id: Some(id.to_string()),
+            model: None,
+            agent: None,
+            input: vec![],
+            outputs: vec![],
+            status: genai_rs::InteractionStatus::Completed,
+            usage: None,
+            tools: None,
+            grounding_metadata: None,
+            url_context_metadata: None,
+            previous_interaction_id: None,
+            created: None,
+            updated: None,
+        }
+    }
+
     impl EventHandler for RecordingHandler {
         fn on_text_delta(&mut self, text: &str) {
             if self.stream_enabled {
@@ -452,37 +462,35 @@ mod tests {
             }
         }
 
-        fn on_tool_executing(&mut self, name: &str, args: &Value) {
+        fn on_tool_executing(&mut self, call: &OwnedFunctionCallInfo) {
             self.events
                 .borrow_mut()
-                .push(format!("tool_executing:{}:{}", name, args));
+                .push(format!("tool_executing:{}:{}", call.name, call.args));
         }
 
-        fn on_tool_result(
-            &mut self,
-            name: &str,
-            duration: Duration,
-            tokens: u32,
-            has_error: bool,
-            error_message: Option<&str>,
-        ) {
+        fn on_tool_result(&mut self, result: &FunctionExecutionResult) {
+            let tokens = estimate_tokens(&result.args) + estimate_tokens(&result.result);
             self.events.borrow_mut().push(format!(
                 "tool_result:{}:{}ms:{}tok:error={}:{}",
-                name,
-                duration.as_millis(),
+                result.name,
+                result.duration.as_millis(),
                 tokens,
-                has_error,
-                error_message.unwrap_or("")
+                result.is_error(),
+                result.error_message().unwrap_or("")
             ));
         }
 
-        fn on_context_warning(&mut self, percentage: f64) {
+        fn on_context_warning(&mut self, warning: &crate::agent::ContextWarning) {
             self.events
                 .borrow_mut()
-                .push(format!("context_warning:{:.1}", percentage));
+                .push(format!("context_warning:{:.1}", warning.percentage()));
         }
 
-        fn on_complete(&mut self) {
+        fn on_complete(
+            &mut self,
+            _interaction_id: Option<&str>,
+            _response: &genai_rs::InteractionResponse,
+        ) {
             self.events.borrow_mut().push("complete".to_string());
         }
 
@@ -518,8 +526,12 @@ mod tests {
     #[test]
     fn test_tool_executing_records_name_and_args() {
         let (mut handler, events) = RecordingHandler::new(true);
-        let args = serde_json::json!({"path": "test.rs"});
-        handler.on_tool_executing("read_file", &args);
+        let call = OwnedFunctionCallInfo {
+            name: "read_file".to_string(),
+            args: serde_json::json!({"path": "test.rs"}),
+            id: None,
+        };
+        handler.on_tool_executing(&call);
 
         assert_eq!(events.borrow().len(), 1);
         assert!(events.borrow()[0].contains("tool_executing:read_file"));
@@ -529,26 +541,33 @@ mod tests {
     #[test]
     fn test_tool_result_records_all_fields() {
         let (mut handler, events) = RecordingHandler::new(true);
-        handler.on_tool_result("write_file", Duration::from_millis(50), 100, false, None);
+        let result = FunctionExecutionResult::new(
+            "write_file".to_string(),
+            "call-1".to_string(),
+            serde_json::json!({}),
+            serde_json::json!({"success": true}),
+            Duration::from_millis(50),
+        );
+        handler.on_tool_result(&result);
 
         assert_eq!(events.borrow().len(), 1);
         let event = &events.borrow()[0];
         assert!(event.contains("tool_result:write_file"));
         assert!(event.contains("50ms"));
-        assert!(event.contains("100tok"));
         assert!(event.contains("error=false"));
     }
 
     #[test]
     fn test_tool_result_with_error() {
         let (mut handler, events) = RecordingHandler::new(true);
-        handler.on_tool_result(
-            "bash",
+        let result = FunctionExecutionResult::new(
+            "bash".to_string(),
+            "call-1".to_string(),
+            serde_json::json!({}),
+            serde_json::json!({"error": "permission denied"}),
             Duration::from_millis(10),
-            25,
-            true,
-            Some("permission denied"),
         );
+        handler.on_tool_result(&result);
 
         assert_eq!(events.borrow().len(), 1);
         let event = &events.borrow()[0];
@@ -559,7 +578,7 @@ mod tests {
     #[test]
     fn test_context_warning_records_percentage() {
         let (mut handler, events) = RecordingHandler::new(true);
-        handler.on_context_warning(85.5);
+        handler.on_context_warning(&crate::agent::ContextWarning::new(855_000, 1_000_000));
 
         assert_eq!(events.borrow().len(), 1);
         assert!(events.borrow()[0].contains("context_warning:85.5"));
@@ -604,11 +623,8 @@ mod tests {
         use crate::agent::AgentEvent;
 
         let (mut handler, events) = RecordingHandler::new(true);
-        let event = AgentEvent::ContextWarning {
-            used: 900_000,
-            limit: 1_000_000,
-            percentage: 90.0,
-        };
+        let event =
+            AgentEvent::ContextWarning(crate::agent::ContextWarning::new(900_000, 1_000_000));
         dispatch_event(&mut handler, &event);
 
         assert_eq!(events.borrow().len(), 1);
@@ -617,10 +633,9 @@ mod tests {
 
     #[test]
     fn test_dispatch_complete() {
-        // Test that on_complete is called - we verify via the handler trait method
-        // without needing to construct a full InteractionResponse
         let (mut handler, events) = RecordingHandler::new(true);
-        handler.on_complete();
+        let response = test_response("test-id");
+        handler.on_complete(Some("test-id"), &response);
 
         assert_eq!(events.borrow().len(), 1);
         assert_eq!(events.borrow()[0], "complete");
@@ -679,8 +694,9 @@ mod tests {
             &AgentEvent::TextDelta("Found it!".to_string()),
         );
 
-        // Complete (call directly to avoid constructing InteractionResponse)
-        handler.on_complete();
+        // Complete
+        let response = test_response("test-id");
+        handler.on_complete(Some("test-id"), &response);
 
         // Verify flow
         let events = events.borrow();
@@ -922,96 +938,44 @@ mod tests {
     }
 
     // =========================================
-    // Line buffering tests for streaming log
+    // TextBuffer tests
     // =========================================
 
     #[test]
-    fn test_split_at_last_newline_no_newline() {
-        assert!(split_at_last_newline("hello world").is_none());
+    fn test_text_buffer_accumulates() {
+        let mut buffer = TextBuffer::new();
+
+        // Buffer text chunks
+        buffer.push("Hello ");
+        buffer.push("world!");
+
+        // Flush returns rendered content
+        let out = buffer.flush();
+        assert!(out.is_some());
+        assert!(out.unwrap().contains("Hello world!"));
+
+        // Buffer is now empty
+        assert!(buffer.flush().is_none());
+        assert!(buffer.is_empty());
     }
 
     #[test]
-    fn test_split_at_last_newline_single_newline() {
-        let (complete, remaining) = split_at_last_newline("hello\n").unwrap();
-        assert_eq!(complete, "hello\n");
-        assert_eq!(remaining, "");
-    }
-
-    #[test]
-    fn test_split_at_last_newline_with_remainder() {
-        let (complete, remaining) = split_at_last_newline("hello\nworld").unwrap();
-        assert_eq!(complete, "hello\n");
-        assert_eq!(remaining, "world");
-    }
-
-    #[test]
-    fn test_split_at_last_newline_multiple_lines() {
-        let (complete, remaining) = split_at_last_newline("line1\nline2\npartial").unwrap();
-        assert_eq!(complete, "line1\nline2\n");
-        assert_eq!(remaining, "partial");
-    }
-
-    #[test]
-    fn test_split_at_last_newline_ends_with_newline() {
-        let (complete, remaining) = split_at_last_newline("line1\nline2\n").unwrap();
-        assert_eq!(complete, "line1\nline2\n");
-        assert_eq!(remaining, "");
-    }
-
-    #[test]
-    fn test_streaming_buffer_basic() {
-        // Clear buffer before test
-        STREAMING_BUFFER.lock().unwrap().clear();
-
-        // No newline: should buffer and return None
-        let out1 = render_streaming_chunk("Hello ");
-        assert!(out1.is_none());
-        assert_eq!(*STREAMING_BUFFER.lock().unwrap(), "Hello ");
-
-        // Newline: should render up to the newline
-        let out2 = render_streaming_chunk("world!\nNext line");
-        let rendered = out2.unwrap();
-        assert!(rendered.contains("Hello world!"));
-        assert!(rendered.ends_with('\n'));
-        assert_eq!(*STREAMING_BUFFER.lock().unwrap(), "Next line");
-
-        // Flush: should render remaining
-        let out3 = flush_streaming_buffer();
-        let flushed = out3.unwrap();
-        assert!(flushed.contains("Next line"));
-        assert!(STREAMING_BUFFER.lock().unwrap().is_empty());
-    }
-
-    #[test]
-    fn test_streaming_multiple_lines() {
-        STREAMING_BUFFER.lock().unwrap().clear();
-
-        let out = render_streaming_chunk("Line 1\nLine 2\nPartial");
-        let rendered = out.unwrap();
-        assert!(rendered.contains("Line 1"));
-        assert!(rendered.contains("Line 2"));
-        assert_eq!(*STREAMING_BUFFER.lock().unwrap(), "Partial");
-
-        let out2 = flush_streaming_buffer();
-        assert!(out2.unwrap().contains("Partial"));
-    }
-
-    #[test]
-    fn test_flush_empty_buffer() {
-        STREAMING_BUFFER.lock().unwrap().clear();
-        let out = flush_streaming_buffer();
+    fn test_text_buffer_flush_empty() {
+        let mut buffer = TextBuffer::new();
+        assert!(buffer.is_empty());
+        let out = buffer.flush();
         assert!(out.is_none());
     }
 
     #[test]
-    fn test_flush_normalizes_to_double_newline() {
-        // flush_streaming_buffer should normalize output to end with exactly \n\n
-        // This is critical for consistent spacing before tool calls and OUT lines
+    fn test_text_buffer_flush_normalizes_to_double_newline() {
+        // flush() should normalize output to end with exactly \n\n
+        // This is critical for consistent spacing before tool calls
 
         // Case 1: Text with no trailing newline -> normalized to \n\n
-        STREAMING_BUFFER.lock().unwrap().clear();
-        STREAMING_BUFFER.lock().unwrap().push_str("Hello world");
-        let out = flush_streaming_buffer().unwrap();
+        let mut buffer = TextBuffer::new();
+        buffer.push("Hello world");
+        let out = buffer.flush().unwrap();
         assert!(
             out.ends_with("\n\n"),
             "Should end with \\n\\n, got: {:?}",
@@ -1020,9 +984,9 @@ mod tests {
         assert!(!out.ends_with("\n\n\n"), "Should not have triple newline");
 
         // Case 2: Text with single trailing newline -> normalized to \n\n
-        STREAMING_BUFFER.lock().unwrap().clear();
-        STREAMING_BUFFER.lock().unwrap().push_str("Hello world\n");
-        let out = flush_streaming_buffer().unwrap();
+        let mut buffer = TextBuffer::new();
+        buffer.push("Hello world\n");
+        let out = buffer.flush().unwrap();
         assert!(
             out.ends_with("\n\n"),
             "Should end with \\n\\n, got: {:?}",
@@ -1030,9 +994,9 @@ mod tests {
         );
 
         // Case 3: Text with double trailing newline -> stays \n\n
-        STREAMING_BUFFER.lock().unwrap().clear();
-        STREAMING_BUFFER.lock().unwrap().push_str("Hello world\n\n");
-        let out = flush_streaming_buffer().unwrap();
+        let mut buffer = TextBuffer::new();
+        buffer.push("Hello world\n\n");
+        let out = buffer.flush().unwrap();
         assert!(
             out.ends_with("\n\n"),
             "Should end with \\n\\n, got: {:?}",
@@ -1042,44 +1006,46 @@ mod tests {
     }
 
     #[test]
-    fn test_flush_returns_none_for_whitespace_only() {
+    fn test_text_buffer_flush_returns_none_for_whitespace_only() {
         // If buffer only contains whitespace/newlines, flush should return None
-        STREAMING_BUFFER.lock().unwrap().clear();
-        STREAMING_BUFFER.lock().unwrap().push_str("\n\n");
-        let out = flush_streaming_buffer();
+        let mut buffer = TextBuffer::new();
+        buffer.push("\n\n");
+        let out = buffer.flush();
         assert!(out.is_none(), "Whitespace-only buffer should return None");
     }
 
-    // =========================================
-    // Spacing contract documentation tests
-    // =========================================
-
-    /// Documents the spacing contract for tool execution and completion.
-    ///
-    /// The handlers use this pattern:
-    /// - If flush_streaming_buffer() returns Some -> content normalized to \n\n -> no extra blank
-    /// - If flush_streaming_buffer() returns None -> add blank line manually
-    ///
-    /// This ensures exactly one blank line before tool calls and OUT lines regardless of
-    /// whether the model text ended with a newline (rendered immediately) or not (buffered).
     #[test]
-    fn test_spacing_contract_documentation() {
-        // This test documents the expected behavior, not the implementation.
-        // The actual handlers implement this logic.
+    fn test_text_buffer_default() {
+        // TextBuffer implements Default
+        let buffer = TextBuffer::default();
+        assert!(buffer.is_empty());
+    }
 
-        // Scenario 1: Model sends "I'll read the file" (no trailing newline)
-        // - Text is buffered
-        // - Tool starts, flush returns "I'll read the file\n\n"
-        // - No extra blank line needed
-        // Result: "I'll read the file\n\n┌─ read_file..."
+    // =========================================
+    // EventHandler spacing tests
+    // =========================================
 
-        // Scenario 2: Model sends "I'll read the file\n" (with trailing newline)
-        // - Text is rendered immediately by render_streaming_chunk
-        // - Buffer is empty
-        // - Tool starts, flush returns None
-        // - Handler adds blank line
-        // Result: "I'll read the file\n\n┌─ read_file..."
+    #[test]
+    fn test_terminal_event_handler_spacing_contract() {
+        crate::logging::disable_logging();
 
-        // Both scenarios produce the same visual output: one blank line before tool.
+        // This specifically tests the spacing contract for TerminalEventHandler:
+        // when text is buffered and then a tool executes, the buffer must be flushed.
+        let mut handler = TerminalEventHandler::new(false); // stream disabled to avoid stdout pollution
+        handler.on_text_delta("Some text");
+
+        // At this point, text is in buffer.
+        assert!(!handler.text_buffer.is_empty());
+
+        // on_tool_executing should flush the buffer
+        let call = OwnedFunctionCallInfo {
+            name: "tool".to_string(),
+            args: serde_json::json!({}),
+            id: None,
+        };
+        handler.on_tool_executing(&call);
+
+        // Buffer should be empty now
+        assert!(handler.text_buffer.is_empty());
     }
 }
