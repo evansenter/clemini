@@ -265,6 +265,18 @@ pub fn format_result(result: &FunctionExecutionResult) -> String {
     format_tool_result(&result.name, result.duration, tokens, has_error)
 }
 
+/// Pure: Format complete tool result block (result line + optional error + trailing spacing).
+/// Returns the complete visual block for a tool result.
+pub fn format_result_block(result: &FunctionExecutionResult) -> String {
+    let mut output = format_result(result);
+    if let Some(err_msg) = result.error_message() {
+        output.push('\n');
+        output.push_str(&format_error_detail(err_msg));
+    }
+    output.push_str("\n\n");
+    output
+}
+
 /// Handler for agent events. UI modes implement this to process events.
 pub trait EventHandler {
     /// Handle streaming text (should append to current line, not create new line).
@@ -369,12 +381,8 @@ pub fn dispatch_event<H: EventHandler>(handler: &mut H, event: &crate::agent::Ag
         }
         AgentEvent::ToolResult(result) => {
             handler.on_tool_result(result);
-            // Unified logging: after handler
-            log_event(&format_result(result));
-            if let Some(err_msg) = result.error_message() {
-                log_event(&format_error_detail(err_msg));
-            }
-            log_event(""); // Blank line after tool result
+            // Unified logging: complete visual block
+            log_event_raw(&format_result_block(result));
         }
         AgentEvent::ContextWarning(warning) => {
             handler.on_context_warning(warning);

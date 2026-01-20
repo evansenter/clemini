@@ -51,7 +51,8 @@ pub struct McpServer {
     notification_tx: broadcast::Sender<String>,
 }
 
-fn format_request_log(method: &str, params: &Option<Value>) -> (String, String) {
+/// Extract detail and message body from MCP request params.
+fn extract_request_parts(method: &str, params: &Option<Value>) -> (String, Option<String>) {
     let mut detail = String::new();
     let mut msg_body = String::new();
     if method == "tools/call"
@@ -75,7 +76,23 @@ fn format_request_log(method: &str, params: &Option<Value>) -> (String, String) 
             }
         }
     }
-    (detail, msg_body)
+    let body = if msg_body.is_empty() {
+        None
+    } else {
+        Some(msg_body)
+    };
+    (detail, body)
+}
+
+/// Format complete MCP request log block (leading spacing + IN line + optional body with spacing).
+fn format_mcp_request(method: &str, params: &Option<Value>) -> String {
+    let (detail, body) = extract_request_parts(method, params);
+    let mut output = format!("\n{} {}{}", "IN".green(), method.bold(), detail);
+    if let Some(msg) = body {
+        // Body with background for visibility, surrounded by blank lines
+        output.push_str(&format!("\n\n{}\n", msg.trim().on_bright_black()));
+    }
+    output
 }
 
 fn format_status(response: &JsonRpcResponse) -> colored::ColoredString {
@@ -178,20 +195,7 @@ async fn handle_post(
     State(server): State<Arc<McpServer>>,
     Json(request): Json<JsonRpcRequest>,
 ) -> Json<JsonRpcResponse> {
-    let (detail, msg_body) = format_request_log(&request.method, &request.params);
-    crate::logging::log_event("");
-    crate::logging::log_event(&format!(
-        "{} {}{}",
-        "IN".green(),
-        request.method.bold(),
-        detail,
-    ));
-    if !msg_body.is_empty() {
-        crate::logging::log_event("");
-        // User input with background for visibility
-        crate::logging::log_event(&msg_body.trim().on_bright_black().to_string());
-        crate::logging::log_event(""); // Blank line after user input
-    }
+    crate::logging::log_event_raw(&format_mcp_request(&request.method, &request.params));
 
     // For HTTP, we use the server's broadcast channel for notifications
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
@@ -317,20 +321,7 @@ impl McpServer {
 
             let request: JsonRpcRequest = match serde_json::from_str::<JsonRpcRequest>(&line) {
                 Ok(req) => {
-                    let (detail, msg_body) = format_request_log(&req.method, &req.params);
-                    crate::logging::log_event("");
-                    crate::logging::log_event(&format!(
-                        "{} {}{}",
-                        "IN".green(),
-                        req.method.bold(),
-                        detail,
-                    ));
-                    if !msg_body.is_empty() {
-                        crate::logging::log_event("");
-                        // User input with background for visibility
-                        crate::logging::log_event(&msg_body.trim().on_bright_black().to_string());
-                        crate::logging::log_event(""); // Blank line after user input
-                    }
+                    crate::logging::log_event_raw(&format_mcp_request(&req.method, &req.params));
                     req
                 }
                 Err(e) => {
@@ -762,10 +753,10 @@ mod tests {
     }
 
     #[test]
-    fn test_format_request_log() {
-        let (detail, body) = format_request_log("tools/list", &None);
+    fn test_extract_request_parts() {
+        let (detail, body) = extract_request_parts("tools/list", &None);
         assert!(detail.is_empty());
-        assert!(body.is_empty());
+        assert!(body.is_none());
 
         let params = json!({
             "name": "clemini_chat",
@@ -774,12 +765,39 @@ mod tests {
                 "interaction_id": "test-id"
             }
         });
-        let (detail, body) = format_request_log("tools/call", &Some(params));
+        let (detail, body) = extract_request_parts("tools/call", &Some(params));
         assert!(detail.contains("clemini_chat"));
         assert!(detail.contains("interaction"));
         assert!(detail.contains("test-id"));
+        let body = body.unwrap();
         assert!(body.contains("hello"));
         assert!(body.contains("world"));
+    }
+
+    #[test]
+    fn test_format_mcp_request() {
+        colored::control::set_override(false);
+
+        // Simple request without body
+        let output = format_mcp_request("tools/list", &None);
+        assert!(output.starts_with('\n'));
+        assert!(output.contains("IN"));
+        assert!(output.contains("tools/list"));
+
+        // Request with body
+        let params = json!({
+            "name": "clemini_chat",
+            "arguments": {
+                "message": "hello world",
+                "interaction_id": "test-id"
+            }
+        });
+        let output = format_mcp_request("tools/call", &Some(params));
+        assert!(output.contains("IN"));
+        assert!(output.contains("clemini_chat"));
+        assert!(output.contains("hello world"));
+
+        colored::control::unset_override();
     }
 
     #[test]
