@@ -654,7 +654,11 @@ impl events::EventHandler for TuiEventHandler {
         // Logging is handled by dispatch_event() after this method returns
     }
 
-    fn on_complete(&mut self, _interaction_id: Option<&str>, _response: &genai_rs::InteractionResponse) {
+    fn on_complete(
+        &mut self,
+        _interaction_id: Option<&str>,
+        _response: &genai_rs::InteractionResponse,
+    ) {
         // Flush any remaining buffered text (normalizes to \n\n)
         if let Some(rendered) = self.text_buffer.flush() {
             let _ = self
@@ -1514,7 +1518,8 @@ mod event_handling_tests {
 
     #[test]
     fn test_convert_context_warning() {
-        let event = AgentEvent::ContextWarning(clemini::agent::ContextWarning::new(900_000, 1_000_000));
+        let event =
+            AgentEvent::ContextWarning(clemini::agent::ContextWarning::new(900_000, 1_000_000));
         let app_events = convert_agent_event_to_app_events(&event);
 
         assert_eq!(app_events.len(), 1);

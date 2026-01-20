@@ -280,7 +280,12 @@ pub trait EventHandler {
     fn on_context_warning(&mut self, warning: &crate::agent::ContextWarning);
 
     /// Handle interaction complete (optional, default no-op).
-    fn on_complete(&mut self, _interaction_id: Option<&str>, _response: &genai_rs::InteractionResponse) {}
+    fn on_complete(
+        &mut self,
+        _interaction_id: Option<&str>,
+        _response: &genai_rs::InteractionResponse,
+    ) {
+    }
 
     /// Handle cancellation (optional, default no-op).
     fn on_cancelled(&mut self) {}
@@ -330,7 +335,11 @@ impl EventHandler for TerminalEventHandler {
         // Logging is handled by dispatch_event() after this method returns
     }
 
-    fn on_complete(&mut self, _interaction_id: Option<&str>, _response: &genai_rs::InteractionResponse) {
+    fn on_complete(
+        &mut self,
+        _interaction_id: Option<&str>,
+        _response: &genai_rs::InteractionResponse,
+    ) {
         // Flush any remaining buffered text (normalizes to \n\n)
         if let Some(rendered) = self.text_buffer.flush() {
             if self.stream_enabled {
@@ -372,7 +381,10 @@ pub fn dispatch_event<H: EventHandler>(handler: &mut H, event: &crate::agent::Ag
             // Unified logging: after handler
             log_event(&format_context_warning(warning.percentage()));
         }
-        AgentEvent::Complete { interaction_id, response } => {
+        AgentEvent::Complete {
+            interaction_id,
+            response,
+        } => {
             handler.on_complete(interaction_id.as_deref(), response);
         }
         AgentEvent::Cancelled => handler.on_cancelled(),
@@ -442,7 +454,11 @@ mod tests {
                 .push(format!("context_warning:{:.1}", warning.percentage()));
         }
 
-        fn on_complete(&mut self, _interaction_id: Option<&str>, _response: &genai_rs::InteractionResponse) {
+        fn on_complete(
+            &mut self,
+            _interaction_id: Option<&str>,
+            _response: &genai_rs::InteractionResponse,
+        ) {
             self.events.borrow_mut().push("complete".to_string());
         }
 
@@ -575,7 +591,8 @@ mod tests {
         use crate::agent::AgentEvent;
 
         let (mut handler, events) = RecordingHandler::new(true);
-        let event = AgentEvent::ContextWarning(crate::agent::ContextWarning::new(900_000, 1_000_000));
+        let event =
+            AgentEvent::ContextWarning(crate::agent::ContextWarning::new(900_000, 1_000_000));
         dispatch_event(&mut handler, &event);
 
         assert_eq!(events.borrow().len(), 1);

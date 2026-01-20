@@ -161,13 +161,16 @@ impl EventHandler for McpEventHandler {
         // Logging is handled by dispatch_event() after this method returns
     }
 
-    fn on_complete(&mut self, _interaction_id: Option<&str>, _response: &genai_rs::InteractionResponse) {
+    fn on_complete(
+        &mut self,
+        _interaction_id: Option<&str>,
+        _response: &genai_rs::InteractionResponse,
+    ) {
         // Flush any remaining buffered text (normalizes to \n\n)
         if let Some(rendered) = self.text_buffer.flush() {
             write_to_streaming_log(&rendered);
         }
     }
-
 }
 
 #[instrument(skip(server, request))]
