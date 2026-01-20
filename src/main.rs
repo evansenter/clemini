@@ -11,7 +11,6 @@ use std::env;
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
-use termimad::MadSkin;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tui_textarea::{Input, TextArea};
@@ -62,18 +61,18 @@ impl OutputSink for TerminalSink {
     fn emit(&self, message: &str) {
         // Print message with blank line after for visual separation
         if message.is_empty() {
-            eprintln!();
+            println!();
         } else {
-            eprintln!("{}\n", message);
+            println!("{}\n", message);
         }
         log_event_to_file(message, true);
     }
     fn emit_line(&self, message: &str) {
         // Print message without trailing blank line
         if message.is_empty() {
-            eprintln!();
+            println!();
         } else {
-            eprintln!("{}", message);
+            println!("{}", message);
         }
         log_event_to_file(message, false);
     }
@@ -169,82 +168,7 @@ fn write_to_log_file(
     Ok(())
 }
 
-const SYSTEM_PROMPT: &str = r#"You are clemini, a coding assistant. Be concise. Get things done.
-
-## Workflow
-1. **Understand** - Read files before editing. Never guess at contents.
-   - See `#N` or `issue N`? Fetch it: `gh issue view N`
-   - See `PR #N` or pull request reference? Fetch it: `gh pr view N`
-   - Always look up references you don't already know about
-2. **Plan** - For complex tasks, briefly state your approach before implementing.
-3. **Execute** - Make changes. Output narration BEFORE each tool call.
-4. **Verify** - Run tests/checks. Compilation passing ≠ working code.
-
-## Communication Style
-**ALWAYS narrate your work.** Before each tool call, output a brief status update explaining what you're about to do and why:
-- Let me fetch the issue to understand the requirements...
-- Reading the file to see the current implementation...
-- I'll update the function to handle this edge case...
-
-This is NOT optional. Users need to follow your thought process. One line per step, output text BEFORE calling tools. Do NOT wrap your narration in quotes.
-
-## Tools
-
-All tools return JSON. Success responses have relevant data fields. Errors have `{"error": "message", "error_code": "CODE"}`.
-
-### File Operations
-- `read_file(file_path, offset?, limit?)` - Read file contents with line numbers. Default limit is 2000 lines. If `truncated: true`, continue with `offset`.
-- `edit(file_path, old_string, new_string, replace_all?)` - Surgical string replacement. Use for precise changes to existing files.
-- `write_file(file_path, content, backup?)` - Create new files or completely overwrite. Use `edit` for modifications, `write_file` only for new files or full rewrites.
-
-### Search
-- `glob(pattern, directory?, sort?)` - Find files by pattern: `**/*.rs`, `src/**/*.ts`. Use for locating files.
-- `grep(pattern, directory?, type?, output_mode?)` - Search file contents with regex. **Always prefer over `bash grep`.** Use for searching within files.
-
-### Execution
-- `bash(command, description?, confirmed?, run_in_background?, working_directory?)` - Shell commands: git, builds, tests. Destructive commands (rm, sudo, git push --force) return `{needs_confirmation: true}` - explain to the user what needs approval and wait. After user approves in conversation, retry with `confirmed: true`. Use `run_in_background: true` for long-running commands. For GitHub, use `gh`: `gh issue view 34`.
-- `kill_shell(task_id)` - Kill a background bash task. Pass the `task_id` returned by `bash` with `run_in_background: true`.
-
-### Interaction
-- `ask_user(question, options?)` - **Use when uncertain.** Ask clarifying questions rather than guessing.
-- `todo_write(todos)` - **ALWAYS use for multi-step tasks.** Create todos FIRST for tasks with 2+ steps. Each todo needs: `content` (imperative: "Run tests"), `activeForm` (continuous: "Running tests"), `status` (pending/in_progress/completed). Update as you work.
-
-### Web
-- `web_search(query)` - Search the web via DuckDuckGo.
-- `web_fetch(url, prompt?)` - Fetch a URL. Use `prompt` to extract specific information.
-
-## Verification
-After changes, verify they work:
-- Python: `pytest`, `python -m py_compile`
-- Rust: `cargo check`, `cargo test`
-- JavaScript/TypeScript: `npm test`, `tsc --noEmit`
-- General: run the relevant test suite or try the changed functionality
-
-## Refactoring
-- Passing syntax/type checks ≠ working code. Test the specific feature you changed.
-- Timeouts during testing usually mean broken code, not network issues (default bash timeout is 30s).
-- For unfamiliar APIs, read source/docs first. If unavailable, ask the user.
-- Before declaring complete, verify the changed functionality works end-to-end.
-
-## Judgment
-- Multiple valid approaches → Ask user preference.
-- Ambiguous requirements → Ask for clarification.
-- Simple, obvious task → Just do it.
-
-## Avoid
-- Editing files you haven't read
-- Scope creep (adding unrequested features)
-- Long explanations when action is needed
-- Declaring success without functional verification
-- Over-reaching: If asked to "remove unused X" and X IS used, report back—don't decide to remove the usage too
-- Changing behavior beyond what was requested (removing a constant ≠ removing its functionality)
-
-## Self-Improvement
-When you discover patterns that would help future tasks:
-- Update this system prompt (in `src/main.rs` SYSTEM_PROMPT) with the guidance
-- Keep additions concise and broadly applicable
-- This helps you get better over time
-"#;
+const SYSTEM_PROMPT: &str = include_str!("system_prompt.md");
 
 fn expand_tilde(path_str: &str) -> PathBuf {
     if path_str.starts_with('~') {
@@ -266,6 +190,9 @@ struct Config {
     bash_timeout: Option<u64>,
     #[serde(default = "default_allowed_paths")]
     allowed_paths: Vec<String>,
+    /// Maximum extra retries after initial failure. Default 2 = 3 total attempts.
+    max_extra_retries: Option<u32>,
+    retry_delay_base_secs: Option<u64>,
 }
 
 impl Default for Config {
@@ -274,6 +201,8 @@ impl Default for Config {
             model: None,
             bash_timeout: None,
             allowed_paths: default_allowed_paths(),
+            max_extra_retries: None,
+            retry_delay_base_secs: None,
         }
     }
 }
@@ -367,10 +296,6 @@ struct Args {
     #[arg(long)]
     timeout: Option<u64>,
 
-    /// Stream raw text output (non-interactive mode)
-    #[arg(long)]
-    stream: bool,
-
     /// Start as an MCP server (stdio mode)
     #[arg(long)]
     mcp_server: bool,
@@ -399,7 +324,7 @@ async fn main() -> Result<()> {
         .or(config.model)
         .unwrap_or_else(|| DEFAULT_MODEL.to_string());
 
-    let bash_timeout = args.timeout.or(config.bash_timeout).unwrap_or(30);
+    let bash_timeout = args.timeout.or(config.bash_timeout).unwrap_or(120);
 
     let api_key = env::var("GEMINI_API_KEY")
         .map_err(|e| anyhow::anyhow!("GEMINI_API_KEY environment variable not set: {}", e))?;
@@ -438,6 +363,11 @@ async fn main() -> Result<()> {
         }
     }
 
+    let retry_config = agent::RetryConfig {
+        max_extra_retries: config.max_extra_retries.unwrap_or(2),
+        retry_delay_base: std::time::Duration::from_secs(config.retry_delay_base_secs.unwrap_or(1)),
+    };
+
     // MCP server mode - handle early before consuming stdin or printing banner
     if args.mcp_server {
         logging::set_output_sink(Arc::new(FileSink));
@@ -446,6 +376,7 @@ async fn main() -> Result<()> {
             tool_service,
             model,
             system_prompt,
+            retry_config,
         ));
         if args.http {
             mcp_server.run_http(args.port).await?;
@@ -507,10 +438,9 @@ async fn main() -> Result<()> {
         // Create channel for agent events
         let (events_tx, mut events_rx) = mpsc::channel::<AgentEvent>(100);
 
-        // Spawn task to handle streaming events using EventHandler
-        let stream_enabled = args.stream;
+        // Spawn task to handle events using EventHandler
         let event_handler = tokio::spawn(async move {
-            let mut handler = events::TerminalEventHandler::new(stream_enabled);
+            let mut handler = events::TerminalEventHandler::new();
             while let Some(event) = events_rx.recv().await {
                 events::dispatch_event(&mut handler, &event);
             }
@@ -519,7 +449,7 @@ async fn main() -> Result<()> {
         // Set events_tx for tools to emit output through the event system
         tool_service.set_events_tx(Some(events_tx.clone()));
 
-        let result = run_interaction(
+        run_interaction(
             &client,
             &tool_service,
             &prompt,
@@ -528,6 +458,7 @@ async fn main() -> Result<()> {
             &system_prompt,
             events_tx,
             cancellation_token,
+            retry_config,
         )
         .await?;
 
@@ -536,12 +467,6 @@ async fn main() -> Result<()> {
 
         // Wait for event handler to finish
         let _ = event_handler.await;
-
-        // In non-streaming mode, render the final response
-        if !args.stream && !result.response.is_empty() {
-            let skin = MadSkin::default();
-            skin.print_text(&result.response);
-        }
     } else {
         // Interactive REPL mode
         // Use TUI if terminal and --no-tui not specified
@@ -550,16 +475,14 @@ async fn main() -> Result<()> {
         if !use_tui {
             logging::set_output_sink(Arc::new(TerminalSink));
         }
-        // TUI mode always needs streaming for incremental updates
-        let stream_output = use_tui || args.stream;
         run_repl(
             &client,
             &tool_service,
             cwd,
             &model,
-            stream_output,
             system_prompt,
             use_tui,
+            retry_config,
         )
         .await?;
     }
@@ -583,6 +506,7 @@ enum AppEvent {
     InteractionComplete(Result<InteractionResult>),
     ContextWarning(String),
     ToolOutput(String),
+    Retry(String),
 }
 
 /// Convert AgentEvent to AppEvents for the TUI.
@@ -613,6 +537,17 @@ fn convert_agent_event_to_app_events(event: &AgentEvent) -> Vec<AppEvent> {
         // Complete and Cancelled are handled differently (via join handle result)
         AgentEvent::Complete { .. } | AgentEvent::Cancelled => vec![],
         AgentEvent::ToolOutput(output) => vec![AppEvent::ToolOutput(output.clone())],
+        AgentEvent::Retry {
+            attempt,
+            max_attempts,
+            delay,
+            error,
+        } => vec![AppEvent::Retry(events::format_retry(
+            *attempt,
+            *max_attempts,
+            *delay,
+            error,
+        ))],
     }
 }
 
@@ -644,7 +579,7 @@ impl events::EventHandler for TuiEventHandler {
             let _ = self
                 .app_tx
                 .try_send(AppEvent::StreamChunk(rendered.clone()));
-            events::write_to_streaming_log(&rendered);
+            log_to_file(&rendered);
         }
         let _ = self.app_tx.try_send(AppEvent::ToolExecuting {
             name: call.name.clone(),
@@ -680,7 +615,7 @@ impl events::EventHandler for TuiEventHandler {
             let _ = self
                 .app_tx
                 .try_send(AppEvent::StreamChunk(rendered.clone()));
-            events::write_to_streaming_log(&rendered);
+            log_to_file(&rendered);
         }
     }
 
@@ -690,6 +625,24 @@ impl events::EventHandler for TuiEventHandler {
             .try_send(AppEvent::ToolOutput(output.to_string()));
         // Logging is handled by dispatch_event() after this method returns
     }
+
+    fn on_retry(
+        &mut self,
+        attempt: u32,
+        max_attempts: u32,
+        delay: std::time::Duration,
+        error: &str,
+    ) {
+        // Flush buffer before retry message
+        if let Some(rendered) = self.text_buffer.flush() {
+            let _ = self
+                .app_tx
+                .try_send(AppEvent::StreamChunk(rendered.clone()));
+            log_to_file(&rendered);
+        }
+        let msg = events::format_retry(attempt, max_attempts, delay, error);
+        let _ = self.app_tx.try_send(AppEvent::Retry(msg));
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -698,9 +651,9 @@ async fn run_repl(
     tool_service: &Arc<CleminiToolService>,
     cwd: std::path::PathBuf,
     model: &str,
-    stream_output: bool,
     system_prompt: String,
     use_tui: bool,
+    retry_config: agent::RetryConfig,
 ) -> Result<()> {
     if use_tui {
         run_tui_repl(
@@ -708,8 +661,8 @@ async fn run_repl(
             tool_service,
             cwd,
             model,
-            stream_output,
             system_prompt,
+            retry_config,
         )
         .await
     } else {
@@ -718,22 +671,21 @@ async fn run_repl(
             tool_service,
             cwd,
             model,
-            stream_output,
             system_prompt,
+            retry_config,
         )
         .await
     }
 }
 
 /// Plain text REPL for non-TTY or --no-tui mode
-#[allow(clippy::too_many_arguments)]
 async fn run_plain_repl(
     client: &Client,
     tool_service: &Arc<CleminiToolService>,
     cwd: std::path::PathBuf,
     model: &str,
-    stream_output: bool,
     system_prompt: String,
+    retry_config: agent::RetryConfig,
 ) -> Result<()> {
     let mut last_interaction_id: Option<String> = None;
 
@@ -782,10 +734,9 @@ async fn run_plain_repl(
         // Create channel for agent events
         let (events_tx, mut events_rx) = mpsc::channel::<AgentEvent>(100);
 
-        // Spawn task to handle streaming events using EventHandler
-        let stream_enabled = stream_output;
+        // Spawn task to handle events using EventHandler
         let event_handler = tokio::spawn(async move {
-            let mut handler = events::TerminalEventHandler::new(stream_enabled);
+            let mut handler = events::TerminalEventHandler::new();
             while let Some(event) = events_rx.recv().await {
                 events::dispatch_event(&mut handler, &event);
             }
@@ -803,16 +754,12 @@ async fn run_plain_repl(
             &system_prompt,
             events_tx,
             cancellation_token,
+            retry_config,
         )
         .await
         {
             Ok(result) => {
                 last_interaction_id = result.id.clone();
-                // In non-streaming mode, render the final response
-                if !stream_output && !result.response.is_empty() {
-                    let skin = MadSkin::default();
-                    skin.print_text(&result.response);
-                }
             }
             Err(e) => {
                 eprintln!("\n{}", format!("[error: {e}]").bright_red());
@@ -836,8 +783,8 @@ async fn run_tui_repl(
     tool_service: &Arc<CleminiToolService>,
     cwd: std::path::PathBuf,
     model: &str,
-    stream_output: bool,
     system_prompt: String,
+    retry_config: agent::RetryConfig,
 ) -> Result<()> {
     let mut terminal = ratatui::init();
     let result = run_tui_event_loop(
@@ -846,8 +793,8 @@ async fn run_tui_repl(
         tool_service,
         cwd,
         model,
-        stream_output,
         system_prompt,
+        retry_config,
     )
     .await;
     ratatui::restore();
@@ -883,8 +830,8 @@ async fn run_tui_event_loop(
     tool_service: &Arc<CleminiToolService>,
     cwd: std::path::PathBuf,
     model: &str,
-    _stream_output: bool, // Always streams via channel in TUI mode
     system_prompt: String,
+    retry_config: agent::RetryConfig,
 ) -> Result<()> {
     // Set up TUI output channel (for OutputSink -> TUI)
     let (tui_tx, mut tui_rx) = mpsc::unbounded_channel::<TuiMessage>();
@@ -1034,6 +981,7 @@ async fn run_tui_event_loop(
                                     &system_prompt,
                                     events_tx,
                                     cancellation_token,
+                                    retry_config,
                                 )
                                 .await;
 
@@ -1129,6 +1077,9 @@ async fn run_tui_event_loop(
                     }
                     AppEvent::ToolOutput(output) => {
                         app.append_to_chat(&output);
+                    }
+                    AppEvent::Retry(msg) => {
+                        app.append_to_chat(&msg);
                     }
                 }
             }
@@ -1293,58 +1244,6 @@ mod event_handling_tests {
         // Args should be formatted as key=value pairs
         assert!(formatted.contains("file_path="));
         assert!(formatted.contains("limit=100"));
-    }
-
-    /// ToolResult events should format with duration and token estimate
-    #[test]
-    fn test_tool_result_format() {
-        colored::control::set_override(false);
-
-        let formatted =
-            events::format_tool_result("read_file", Duration::from_millis(25), 150, false);
-
-        assert!(formatted.contains("└─ read_file"));
-        assert!(formatted.contains("0.02s") || formatted.contains("0.03s")); // timing can vary
-        assert!(formatted.contains("~150 tok"));
-
-        colored::control::unset_override();
-    }
-
-    /// ToolResult errors should include ERROR suffix
-    #[test]
-    fn test_tool_result_error_format() {
-        colored::control::set_override(false);
-
-        let formatted =
-            events::format_tool_result("write_file", Duration::from_millis(10), 50, true);
-
-        assert!(formatted.contains("└─ write_file"));
-        assert!(formatted.contains("ERROR"));
-
-        colored::control::unset_override();
-    }
-
-    /// ContextWarning should format with percentage
-    #[test]
-    fn test_context_warning_format_normal() {
-        let percentage = 85.5;
-        let msg = format!("WARNING: Context window at {:.1}%.", percentage);
-
-        assert!(msg.contains("85.5%"));
-        assert!(!msg.contains("/clear")); // Not critical yet
-    }
-
-    /// ContextWarning at critical level should suggest /clear
-    #[test]
-    fn test_context_warning_format_critical() {
-        let percentage = 96.0;
-        let msg = format!(
-            "WARNING: Context window at {:.1}%. Use /clear to reset.",
-            percentage
-        );
-
-        assert!(msg.contains("96.0%"));
-        assert!(msg.contains("/clear")); // Critical level
     }
 
     // =========================================

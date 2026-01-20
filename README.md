@@ -82,12 +82,12 @@ make logs                # Tail human-readable logs
 Optional config file at `~/.clemini/config.toml`:
 ```toml
 model = "gemini-3-flash-preview"
-bash_timeout = 30
+bash_timeout = 120
 allowed_paths = ["~/Documents/projects", "/tmp"]
 ```
 
 - `model`: Gemini model to use (default: `gemini-3-flash-preview`)
-- `bash_timeout`: Timeout in seconds for bash commands (default: 30)
+- `bash_timeout`: Timeout in seconds for bash commands (default: 120)
 - `allowed_paths`: Additional paths tools can access beyond cwd (default: none)
 
 Logs are stored in `~/.clemini/logs/` with daily rotation.

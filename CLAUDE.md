@@ -5,9 +5,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Important Distinction
 
 - **This file (CLAUDE.md)** guides Claude Code when working on clemini's codebase
-- **SYSTEM_PROMPT in src/main.rs** guides clemini itself (what Gemini sees)
+- **System prompt in src/system_prompt.md** guides clemini itself (what Gemini sees)
 
-When updating clemini's behavior, modify `SYSTEM_PROMPT` in main.rs. This file is for codebase conventions and development process.
+When updating clemini's behavior, modify `src/system_prompt.md`. This file is for codebase conventions and development process.
 
 ## Project Overview
 
@@ -37,10 +37,13 @@ The CLI has three modes: single-prompt (`-p "prompt"`), interactive REPL, and MC
 ```
 src/
 ├── main.rs          # CLI entry, UI loops (TUI/REPL), MCP server startup
+├── lib.rs           # Library crate exposing core types for integration tests
 ├── agent.rs         # Core interaction logic, AgentEvent enum
 ├── diff.rs          # Diff formatting for edit tool output
 ├── events.rs        # EventHandler trait, TerminalEventHandler
+├── logging.rs       # OutputSink trait, log_event functions
 ├── mcp.rs           # MCP server implementation
+├── system_prompt.md # System prompt for Gemini (included at compile time)
 ├── tui/             # TUI mode (ratatui)
 └── tools/           # Tool implementations (bash, read_file, etc.)
 ```
@@ -148,6 +151,7 @@ Don't skip tests. If a test is flaky or legitimately broken by your change, fix 
 - `confirmation_tests.rs` - Confirmation flow for destructive commands
 - `tool_output_tests.rs` - Tool output events and model interpretation
 - `semantic_integration_tests.rs` - Multi-turn state, error recovery, code analysis
+- `event_ordering_tests.rs` - Tool output event ordering (no API key required)
 
 Run locally with: `cargo test --test <name> -- --include-ignored --nocapture`
 

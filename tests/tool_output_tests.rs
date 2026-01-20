@@ -64,6 +64,7 @@ async fn run_test_interaction(
         TEST_SYSTEM_PROMPT,
         events_tx,
         cancellation,
+        clemini::RetryConfig::default(),
     )
     .await
     .expect("Interaction failed");

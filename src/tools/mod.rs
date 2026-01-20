@@ -56,6 +56,7 @@ pub use web_search::WebSearchTool;
 pub use write::WriteTool;
 
 pub const DEFAULT_EXCLUDES: &[&str] = &[".git", "node_modules", "target", "__pycache__", ".venv"];
+pub const MAX_TOOL_OUTPUT_LEN: usize = 50_000;
 
 /// Tool service that provides file and command execution capabilities.
 pub struct CleminiToolService {

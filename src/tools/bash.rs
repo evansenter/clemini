@@ -1,5 +1,5 @@
 use crate::agent::AgentEvent;
-use crate::tools::{ToolEmitter, error_codes, error_response};
+use crate::tools::{MAX_TOOL_OUTPUT_LEN, ToolEmitter, error_codes, error_response};
 use async_trait::async_trait;
 use colored::Colorize;
 use genai_rs::{CallableFunction, FunctionDeclaration, FunctionError, FunctionParameters};
@@ -431,7 +431,7 @@ impl CallableFunction for BashTool {
         let success = exit_status_final.map(|s| s.success()).unwrap_or(false);
 
         // Truncate very long output
-        let max_len = 50000;
+        let max_len = MAX_TOOL_OUTPUT_LEN;
         let stdout_truncated = Self::truncate_output(captured_stdout, max_len);
         let stderr_truncated = Self::truncate_output(captured_stderr, max_len);
 

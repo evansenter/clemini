@@ -270,18 +270,18 @@ Response text from the model is rendered using `termimad`:
 
 ### Logging
 
-Response text is logged via `events::render_streaming_chunk()` which:
+Response text is logged via `TextBuffer::push()` which:
 - Buffers text until complete lines are available
 - Renders complete lines with termimad markdown styling
-- Flushes remaining text when streaming completes via `events::flush_streaming_buffer()`
+- Flushes remaining text when streaming completes via `TextBuffer::flush()`
 
 This ensures `tail -f` shows streaming text naturally while still applying markdown formatting.
 
 ## Spacing Guidelines
 
 1. **After streaming text (before tool execution or OUT)**: Exactly one blank line.
-   - If `flush_streaming_buffer()` returns `Some` → content normalized to `\n\n` → no extra blank needed
-   - If `flush_streaming_buffer()` returns `None` → handler adds blank line manually
+   - If `TextBuffer::flush()` returns `Some` → content normalized to `\n\n` → no extra blank needed
+   - If `TextBuffer::flush()` returns `None` → handler adds blank line manually
    - This handles both cases: model sends text with trailing `\n` (rendered immediately) or without (buffered)
 2. **After tool result**: Single blank line (added by `on_tool_result`)
 3. **After user input**: Single blank line

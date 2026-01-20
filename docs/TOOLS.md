@@ -310,6 +310,7 @@ Execute shell commands.
 | command | string | yes | Command to run (e.g., `cargo test`, `gh issue view 42`) |
 | description | string | no | What this command does (for logging) |
 | working_directory | string | no | Directory to run in. (default: cwd) |
+| timeout_seconds | integer | no | Maximum time to wait for the command. (default: 120) |
 | confirmed | boolean | no | Skip confirmation for destructive commands. (default: false) |
 | run_in_background | boolean | no | Return immediately with task_id. (default: false) |
 
