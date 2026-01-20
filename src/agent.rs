@@ -22,10 +22,16 @@ use tokio_util::sync::CancellationToken;
 
 use crate::tools::CleminiToolService;
 
-async fn sleep_with_backoff(attempt: u32, base: Duration) {
-    let factor = 2u32.pow(attempt - 1);
-    let delay = base * factor;
-    // Add jitter (up to 20%)
+/// Calculate exponential backoff delay with saturation to prevent overflow.
+fn calculate_backoff_delay(attempt: u32, base: Duration) -> Duration {
+    // Cap exponent at 31 to prevent overflow (2^31 is ~2.1 billion)
+    let exponent = attempt.saturating_sub(1).min(31);
+    let factor = 2u32.saturating_pow(exponent);
+    base.saturating_mul(factor)
+}
+
+/// Sleep for the given delay plus random jitter (up to 20%).
+async fn sleep_with_jitter(delay: Duration) {
     let jitter = {
         let mut rng = rand::thread_rng();
         let jitter_factor: f64 = rng.gen_range(0.0..0.2);
@@ -363,10 +369,9 @@ pub async fn run_interaction(
                 Err(e) if e.is_retryable() && attempt < retry_config.max_retries => {
                     attempt += 1;
 
-                    let retry_after = e.retry_after();
-                    let delay = retry_after.unwrap_or_else(|| {
-                        let factor = 2u32.pow(attempt - 1);
-                        retry_config.retry_delay_base * factor
+                    // Use server-suggested delay if available, otherwise exponential backoff
+                    let delay = e.retry_after().unwrap_or_else(|| {
+                        calculate_backoff_delay(attempt, retry_config.retry_delay_base)
                     });
 
                     let _ = events_tx.try_send(AgentEvent::Retry {
@@ -376,11 +381,7 @@ pub async fn run_interaction(
                         error: e.to_string(),
                     });
 
-                    if let Some(delay) = retry_after {
-                        tokio::time::sleep(delay).await;
-                    } else {
-                        sleep_with_backoff(attempt, retry_config.retry_delay_base).await;
-                    }
+                    sleep_with_jitter(delay).await;
 
                     // If we had some response, clear it for the retry to avoid duplication
                     // (Note: TextDelta events were already sent, so UI might still show them)

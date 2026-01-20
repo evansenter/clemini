@@ -1002,6 +1002,27 @@ mod tests {
     }
 
     // =========================================
+    // Retry formatting tests
+    // =========================================
+
+    #[test]
+    fn test_format_retry() {
+        colored::control::set_override(false);
+
+        let msg = format_retry(1, 3, Duration::from_secs(2), "rate limit exceeded");
+        assert!(msg.contains("rate limit exceeded"));
+        assert!(msg.contains("2s"));
+        assert!(msg.contains("1/3"));
+
+        let msg = format_retry(2, 5, Duration::from_secs(10), "connection reset");
+        assert!(msg.contains("connection reset"));
+        assert!(msg.contains("10s"));
+        assert!(msg.contains("2/5"));
+
+        colored::control::unset_override();
+    }
+
+    // =========================================
     // EventHandler spacing tests
     // =========================================
 
