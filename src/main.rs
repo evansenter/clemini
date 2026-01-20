@@ -48,7 +48,10 @@ pub struct FileSink;
 
 impl OutputSink for FileSink {
     fn emit(&self, message: &str) {
-        log_event_to_file(message);
+        log_event_to_file(message, true);
+    }
+    fn emit_line(&self, message: &str) {
+        log_event_to_file(message, false);
     }
 }
 
@@ -57,12 +60,22 @@ pub struct TerminalSink;
 
 impl OutputSink for TerminalSink {
     fn emit(&self, message: &str) {
+        // Print message with blank line after for visual separation
+        if message.is_empty() {
+            eprintln!();
+        } else {
+            eprintln!("{}\n", message);
+        }
+        log_event_to_file(message, true);
+    }
+    fn emit_line(&self, message: &str) {
+        // Print message without trailing blank line
         if message.is_empty() {
             eprintln!();
         } else {
             eprintln!("{}", message);
         }
-        log_event_to_file(message);
+        log_event_to_file(message, false);
     }
 }
 
@@ -90,16 +103,23 @@ impl OutputSink for TuiSink {
         if let Some(tx) = TUI_OUTPUT_TX.get() {
             let _ = tx.send(TuiMessage::Line(message.to_string()));
         }
-        log_event_to_file(message);
+        log_event_to_file(message, true);
+    }
+    fn emit_line(&self, message: &str) {
+        // Send to TUI via channel (no difference in TUI, just log file)
+        if let Some(tx) = TUI_OUTPUT_TX.get() {
+            let _ = tx.send(TuiMessage::Line(message.to_string()));
+        }
+        log_event_to_file(message, false);
     }
 }
 
 /// Log to file only (skip terminal output even with TerminalSink)
 pub fn log_to_file(message: &str) {
-    log_event_to_file(message);
+    log_event_to_file(message, true);
 }
 
-fn log_event_to_file(message: &str) {
+fn log_event_to_file(message: &str, add_blank_line: bool) {
     // Skip logging during tests unless explicitly enabled
     if !logging::is_logging_enabled() {
         return;
@@ -116,26 +136,35 @@ fn log_event_to_file(message: &str) {
     let today = chrono::Local::now().format("%Y-%m-%d");
     let log_path = log_dir.join(format!("clemini.log.{}", today));
 
-    let _ = write_to_log_file(&log_path, message);
+    let _ = write_to_log_file(&log_path, message, add_blank_line);
 
     // Also write to CLEMINI_LOG if set (backwards compat)
     if let Ok(path) = std::env::var("CLEMINI_LOG") {
-        let _ = write_to_log_file(PathBuf::from(path), message);
+        let _ = write_to_log_file(PathBuf::from(path), message, add_blank_line);
     }
 }
 
-fn write_to_log_file(path: impl Into<PathBuf>, rendered: &str) -> std::io::Result<()> {
+fn write_to_log_file(
+    path: impl Into<PathBuf>,
+    rendered: &str,
+    add_blank_line: bool,
+) -> std::io::Result<()> {
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(path.into())?;
 
+    // Write content lines
     if rendered.is_empty() {
         writeln!(file)?;
     } else {
         for line in rendered.lines() {
             writeln!(file, "{}", line)?;
         }
+    }
+    // Add blank line after for visual separation between blocks
+    if add_blank_line {
+        writeln!(file)?;
     }
     Ok(())
 }

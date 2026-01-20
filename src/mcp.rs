@@ -84,13 +84,14 @@ fn extract_request_parts(method: &str, params: &Option<Value>) -> (String, Optio
     (detail, body)
 }
 
-/// Format complete MCP request log block (leading spacing + IN line + optional body with spacing).
+/// Format MCP request log block (IN line + optional body).
+/// Spacing between blocks is handled by write_to_log_file.
 fn format_mcp_request(method: &str, params: &Option<Value>) -> String {
     let (detail, body) = extract_request_parts(method, params);
-    let mut output = format!("\n{} {}{}", "IN".green(), method.bold(), detail);
+    let mut output = format!("{} {}{}", "IN".green(), method.bold(), detail);
     if let Some(msg) = body {
-        // Body with background for visibility, surrounded by blank lines
-        output.push_str(&format!("\n\n{}\n\n", msg.trim().on_bright_black()));
+        // Body with background for visibility
+        output.push_str(&format!("\n\n{}", msg.trim().on_bright_black()));
     }
     output
 }
@@ -793,8 +794,7 @@ mod tests {
 
         // Simple request without body
         let output = format_mcp_request("tools/list", &None);
-        assert!(output.starts_with('\n'));
-        assert!(output.contains("IN"));
+        assert!(output.starts_with("IN"));
         assert!(output.contains("tools/list"));
 
         // Request with body

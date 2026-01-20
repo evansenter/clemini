@@ -265,15 +265,14 @@ pub fn format_result(result: &FunctionExecutionResult) -> String {
     format_tool_result(&result.name, result.duration, tokens, has_error)
 }
 
-/// Pure: Format complete tool result block (result line + optional error + trailing spacing).
-/// Returns the complete visual block for a tool result.
+/// Pure: Format tool result block (result line + optional error).
+/// Spacing between blocks is handled by write_to_log_file.
 pub fn format_result_block(result: &FunctionExecutionResult) -> String {
     let mut output = format_result(result);
     if let Some(err_msg) = result.error_message() {
         output.push('\n');
         output.push_str(&format_error_detail(err_msg));
     }
-    output.push_str("\n\n");
     output
 }
 
@@ -375,8 +374,9 @@ pub fn dispatch_event<H: EventHandler>(handler: &mut H, event: &crate::agent::Ag
         AgentEvent::ToolExecuting(calls) => {
             for call in calls {
                 handler.on_tool_executing(call);
-                // Unified logging: after handler (so buffer flushes first)
-                log_event(&format_call(call));
+                // Tool executing is start of block - no trailing blank line
+                // (tool output and result will follow)
+                crate::logging::log_event_line(&format_call(call));
             }
         }
         AgentEvent::ToolResult(result) => {
@@ -398,8 +398,8 @@ pub fn dispatch_event<H: EventHandler>(handler: &mut H, event: &crate::agent::Ag
         AgentEvent::Cancelled => handler.on_cancelled(),
         AgentEvent::ToolOutput(output) => {
             handler.on_tool_output(output);
-            // Unified logging: tool output is pre-formatted with ANSI codes
-            log_event(output);
+            // Tool output lines don't get trailing blank line (they're part of a block)
+            crate::logging::log_event_line(output);
         }
     }
 }

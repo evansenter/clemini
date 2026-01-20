@@ -23,8 +23,10 @@ pub fn is_logging_enabled() -> bool {
 
 /// Trait for output sinks that handle logging and display.
 pub trait OutputSink: Send + Sync {
-    /// Emit a complete message/line.
+    /// Emit a complete block with trailing blank line for visual separation.
     fn emit(&self, message: &str);
+    /// Emit a line without trailing blank line (for multi-line tool output).
+    fn emit_line(&self, message: &str);
 }
 
 static OUTPUT_SINK: OnceLock<Arc<dyn OutputSink>> = OnceLock::new();
@@ -39,14 +41,20 @@ pub fn get_output_sink() -> Option<&'static Arc<dyn OutputSink>> {
     OUTPUT_SINK.get()
 }
 
-/// Log to human-readable file with ANSI colors preserved.
-/// Uses same naming as rolling::daily: clemini.log.YYYY-MM-DD
+/// Log a complete block with trailing blank line for visual separation.
 pub fn log_event(message: &str) {
     if let Some(sink) = OUTPUT_SINK.get() {
         sink.emit(message);
     }
     // No fallback - OUTPUT_SINK is always set in production before logging.
     // Skipping prevents test pollution of shared log files.
+}
+
+/// Log a line without trailing blank line (for multi-line tool output).
+pub fn log_event_line(message: &str) {
+    if let Some(sink) = OUTPUT_SINK.get() {
+        sink.emit_line(message);
+    }
 }
 
 #[cfg(test)]
