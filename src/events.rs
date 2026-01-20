@@ -34,7 +34,7 @@ use genai_rs::{FunctionExecutionResult, OwnedFunctionCallInfo};
 use serde_json::Value;
 use termimad::MadSkin;
 
-use crate::logging::log_event;
+use crate::logging::{log_event, log_event_raw};
 
 // ============================================================================
 // Markdown Rendering Infrastructure
@@ -271,33 +271,23 @@ pub trait EventHandler {
     fn on_text_delta(&mut self, text: &str);
 
     /// Handle tool starting execution.
-    fn on_tool_executing(&mut self, name: &str, args: &Value);
+    fn on_tool_executing(&mut self, call: &OwnedFunctionCallInfo);
 
     /// Handle tool completion.
-    fn on_tool_result(
-        &mut self,
-        name: &str,
-        duration: Duration,
-        tokens: u32,
-        has_error: bool,
-        error_message: Option<&str>,
-    );
+    fn on_tool_result(&mut self, result: &FunctionExecutionResult);
 
     /// Handle context window warning.
-    fn on_context_warning(&mut self, percentage: f64);
+    fn on_context_warning(&mut self, warning: &crate::agent::ContextWarning);
 
     /// Handle interaction complete (optional, default no-op).
-    fn on_complete(&mut self) {}
+    fn on_complete(&mut self, _interaction_id: Option<&str>, _response: &genai_rs::InteractionResponse) {}
 
     /// Handle cancellation (optional, default no-op).
     fn on_cancelled(&mut self) {}
 
     /// Handle tool output (emitted by tools for visual display).
-    /// Default implementation logs the output.
-    fn on_tool_output(&mut self, output: &str) {
-        // Tool output is pre-formatted with ANSI codes, skip markdown rendering
-        crate::logging::log_event_raw(output);
-    }
+    /// Default implementation is no-op; logging is handled by dispatch_event.
+    fn on_tool_output(&mut self, _output: &str) {}
 }
 
 /// Event handler for terminal output (plain REPL and non-interactive modes).
@@ -320,7 +310,7 @@ impl EventHandler for TerminalEventHandler {
         self.text_buffer.push(text);
     }
 
-    fn on_tool_executing(&mut self, _name: &str, _args: &Value) {
+    fn on_tool_executing(&mut self, _call: &OwnedFunctionCallInfo) {
         // Flush buffer before tool output (normalizes to \n\n for spacing)
         // Logging is handled by dispatch_event() after this method returns
         if let Some(rendered) = self.text_buffer.flush() {
@@ -332,23 +322,15 @@ impl EventHandler for TerminalEventHandler {
         }
     }
 
-    fn on_tool_result(
-        &mut self,
-        _name: &str,
-        _duration: Duration,
-        _tokens: u32,
-        _has_error: bool,
-        _error_message: Option<&str>,
-    ) {
+    fn on_tool_result(&mut self, _result: &FunctionExecutionResult) {
         // Logging is handled by dispatch_event() after this method returns
     }
 
-    fn on_context_warning(&mut self, percentage: f64) {
-        let msg = format_context_warning(percentage);
-        eprintln!("{}", msg.bright_red().bold());
+    fn on_context_warning(&mut self, _warning: &crate::agent::ContextWarning) {
+        // Logging is handled by dispatch_event() after this method returns
     }
 
-    fn on_complete(&mut self) {
+    fn on_complete(&mut self, _interaction_id: Option<&str>, _response: &genai_rs::InteractionResponse) {
         // Flush any remaining buffered text (normalizes to \n\n)
         if let Some(rendered) = self.text_buffer.flush() {
             if self.stream_enabled {
@@ -371,39 +353,34 @@ pub fn dispatch_event<H: EventHandler>(handler: &mut H, event: &crate::agent::Ag
         AgentEvent::TextDelta(text) => handler.on_text_delta(text),
         AgentEvent::ToolExecuting(calls) => {
             for call in calls {
-                handler.on_tool_executing(&call.name, &call.args);
+                handler.on_tool_executing(call);
                 // Unified logging: after handler (so buffer flushes first)
                 log_event(&format_call(call));
             }
         }
         AgentEvent::ToolResult(result) => {
-            let tokens = estimate_tokens(&result.args) + estimate_tokens(&result.result);
-            let has_error = result.is_error();
-            let error_message = if has_error {
-                result.error_message()
-            } else {
-                None
-            };
-            handler.on_tool_result(
-                &result.name,
-                result.duration,
-                tokens,
-                has_error,
-                error_message,
-            );
+            handler.on_tool_result(result);
             // Unified logging: after handler
             log_event(&format_result(result));
-            if let Some(err_msg) = error_message {
+            if let Some(err_msg) = result.error_message() {
                 log_event(&format_error_detail(err_msg));
             }
             log_event(""); // Blank line after tool result
         }
-        AgentEvent::ContextWarning { percentage, .. } => {
-            handler.on_context_warning(*percentage);
+        AgentEvent::ContextWarning(warning) => {
+            handler.on_context_warning(warning);
+            // Unified logging: after handler
+            log_event(&format_context_warning(warning.percentage()));
         }
-        AgentEvent::Complete { .. } => handler.on_complete(),
+        AgentEvent::Complete { interaction_id, response } => {
+            handler.on_complete(interaction_id.as_deref(), response);
+        }
         AgentEvent::Cancelled => handler.on_cancelled(),
-        AgentEvent::ToolOutput(output) => handler.on_tool_output(output),
+        AgentEvent::ToolOutput(output) => {
+            handler.on_tool_output(output);
+            // Unified logging: tool output is pre-formatted with ANSI codes
+            log_event_raw(output);
+        }
     }
 }
 
@@ -441,37 +418,31 @@ mod tests {
             }
         }
 
-        fn on_tool_executing(&mut self, name: &str, args: &Value) {
+        fn on_tool_executing(&mut self, call: &OwnedFunctionCallInfo) {
             self.events
                 .borrow_mut()
-                .push(format!("tool_executing:{}:{}", name, args));
+                .push(format!("tool_executing:{}:{}", call.name, call.args));
         }
 
-        fn on_tool_result(
-            &mut self,
-            name: &str,
-            duration: Duration,
-            tokens: u32,
-            has_error: bool,
-            error_message: Option<&str>,
-        ) {
+        fn on_tool_result(&mut self, result: &FunctionExecutionResult) {
+            let tokens = estimate_tokens(&result.args) + estimate_tokens(&result.result);
             self.events.borrow_mut().push(format!(
                 "tool_result:{}:{}ms:{}tok:error={}:{}",
-                name,
-                duration.as_millis(),
+                result.name,
+                result.duration.as_millis(),
                 tokens,
-                has_error,
-                error_message.unwrap_or("")
+                result.is_error(),
+                result.error_message().unwrap_or("")
             ));
         }
 
-        fn on_context_warning(&mut self, percentage: f64) {
+        fn on_context_warning(&mut self, warning: &crate::agent::ContextWarning) {
             self.events
                 .borrow_mut()
-                .push(format!("context_warning:{:.1}", percentage));
+                .push(format!("context_warning:{:.1}", warning.percentage()));
         }
 
-        fn on_complete(&mut self) {
+        fn on_complete(&mut self, _interaction_id: Option<&str>, _response: &genai_rs::InteractionResponse) {
             self.events.borrow_mut().push("complete".to_string());
         }
 
@@ -507,8 +478,12 @@ mod tests {
     #[test]
     fn test_tool_executing_records_name_and_args() {
         let (mut handler, events) = RecordingHandler::new(true);
-        let args = serde_json::json!({"path": "test.rs"});
-        handler.on_tool_executing("read_file", &args);
+        let call = OwnedFunctionCallInfo {
+            name: "read_file".to_string(),
+            args: serde_json::json!({"path": "test.rs"}),
+            id: None,
+        };
+        handler.on_tool_executing(&call);
 
         assert_eq!(events.borrow().len(), 1);
         assert!(events.borrow()[0].contains("tool_executing:read_file"));
@@ -518,26 +493,33 @@ mod tests {
     #[test]
     fn test_tool_result_records_all_fields() {
         let (mut handler, events) = RecordingHandler::new(true);
-        handler.on_tool_result("write_file", Duration::from_millis(50), 100, false, None);
+        let result = FunctionExecutionResult::new(
+            "write_file".to_string(),
+            "call-1".to_string(),
+            serde_json::json!({}),
+            serde_json::json!({"success": true}),
+            Duration::from_millis(50),
+        );
+        handler.on_tool_result(&result);
 
         assert_eq!(events.borrow().len(), 1);
         let event = &events.borrow()[0];
         assert!(event.contains("tool_result:write_file"));
         assert!(event.contains("50ms"));
-        assert!(event.contains("100tok"));
         assert!(event.contains("error=false"));
     }
 
     #[test]
     fn test_tool_result_with_error() {
         let (mut handler, events) = RecordingHandler::new(true);
-        handler.on_tool_result(
-            "bash",
+        let result = FunctionExecutionResult::new(
+            "bash".to_string(),
+            "call-1".to_string(),
+            serde_json::json!({}),
+            serde_json::json!({"error": "permission denied"}),
             Duration::from_millis(10),
-            25,
-            true,
-            Some("permission denied"),
         );
+        handler.on_tool_result(&result);
 
         assert_eq!(events.borrow().len(), 1);
         let event = &events.borrow()[0];
@@ -548,7 +530,7 @@ mod tests {
     #[test]
     fn test_context_warning_records_percentage() {
         let (mut handler, events) = RecordingHandler::new(true);
-        handler.on_context_warning(85.5);
+        handler.on_context_warning(&crate::agent::ContextWarning::new(855_000, 1_000_000));
 
         assert_eq!(events.borrow().len(), 1);
         assert!(events.borrow()[0].contains("context_warning:85.5"));
@@ -593,11 +575,7 @@ mod tests {
         use crate::agent::AgentEvent;
 
         let (mut handler, events) = RecordingHandler::new(true);
-        let event = AgentEvent::ContextWarning {
-            used: 900_000,
-            limit: 1_000_000,
-            percentage: 90.0,
-        };
+        let event = AgentEvent::ContextWarning(crate::agent::ContextWarning::new(900_000, 1_000_000));
         dispatch_event(&mut handler, &event);
 
         assert_eq!(events.borrow().len(), 1);
@@ -606,10 +584,25 @@ mod tests {
 
     #[test]
     fn test_dispatch_complete() {
-        // Test that on_complete is called - we verify via the handler trait method
-        // without needing to construct a full InteractionResponse
+        use genai_rs::{InteractionResponse, InteractionStatus};
+
         let (mut handler, events) = RecordingHandler::new(true);
-        handler.on_complete();
+        let response = InteractionResponse {
+            id: Some("test-id".to_string()),
+            model: None,
+            agent: None,
+            input: vec![],
+            outputs: vec![],
+            status: InteractionStatus::Completed,
+            usage: None,
+            tools: None,
+            grounding_metadata: None,
+            url_context_metadata: None,
+            previous_interaction_id: None,
+            created: None,
+            updated: None,
+        };
+        handler.on_complete(Some("test-id"), &response);
 
         assert_eq!(events.borrow().len(), 1);
         assert_eq!(events.borrow()[0], "complete");
@@ -668,8 +661,24 @@ mod tests {
             &AgentEvent::TextDelta("Found it!".to_string()),
         );
 
-        // Complete (call directly to avoid constructing InteractionResponse)
-        handler.on_complete();
+        // Complete
+        use genai_rs::{InteractionResponse, InteractionStatus};
+        let response = InteractionResponse {
+            id: Some("test-id".to_string()),
+            model: None,
+            agent: None,
+            input: vec![],
+            outputs: vec![],
+            status: InteractionStatus::Completed,
+            usage: None,
+            tools: None,
+            grounding_metadata: None,
+            url_context_metadata: None,
+            previous_interaction_id: None,
+            created: None,
+            updated: None,
+        };
+        handler.on_complete(Some("test-id"), &response);
 
         // Verify flow
         let events = events.borrow();
@@ -1009,7 +1018,12 @@ mod tests {
         assert!(!handler.text_buffer.is_empty());
 
         // on_tool_executing should flush the buffer
-        handler.on_tool_executing("tool", &serde_json::json!({}));
+        let call = OwnedFunctionCallInfo {
+            name: "tool".to_string(),
+            args: serde_json::json!({}),
+            id: None,
+        };
+        handler.on_tool_executing(&call);
 
         // Buffer should be empty now
         assert!(handler.text_buffer.is_empty());

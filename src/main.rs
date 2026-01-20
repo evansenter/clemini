@@ -3,7 +3,7 @@ use clap::Parser;
 use colored::Colorize;
 use crossterm::event::{Event, EventStream, KeyCode, KeyModifiers};
 use futures_util::StreamExt;
-use genai_rs::Client;
+use genai_rs::{Client, FunctionExecutionResult, OwnedFunctionCallInfo};
 use ratatui::DefaultTerminal;
 use serde::Deserialize;
 use serde_json::Value;
@@ -589,9 +589,9 @@ fn convert_agent_event_to_app_events(event: &AgentEvent) -> Vec<AppEvent> {
             tokens: events::estimate_tokens(&result.args) + events::estimate_tokens(&result.result),
             has_error: result.is_error(),
         }],
-        AgentEvent::ContextWarning { percentage, .. } => {
+        AgentEvent::ContextWarning(warning) => {
             vec![AppEvent::ContextWarning(events::format_context_warning(
-                *percentage,
+                warning.percentage(),
             ))]
         }
         // Complete and Cancelled are handled differently (via join handle result)
@@ -621,7 +621,7 @@ impl events::EventHandler for TuiEventHandler {
         self.text_buffer.push(text);
     }
 
-    fn on_tool_executing(&mut self, name: &str, args: &serde_json::Value) {
+    fn on_tool_executing(&mut self, call: &OwnedFunctionCallInfo) {
         // Flush buffer before tool output (normalizes to \n\n for spacing)
         // Logging is handled by dispatch_event() after this method returns
         if let Some(rendered) = self.text_buffer.flush() {
@@ -631,35 +631,30 @@ impl events::EventHandler for TuiEventHandler {
             events::write_to_streaming_log(&rendered);
         }
         let _ = self.app_tx.try_send(AppEvent::ToolExecuting {
-            name: name.to_string(),
-            args: args.clone(),
+            name: call.name.clone(),
+            args: call.args.clone(),
         });
     }
 
-    fn on_tool_result(
-        &mut self,
-        name: &str,
-        duration: std::time::Duration,
-        tokens: u32,
-        has_error: bool,
-        _error_message: Option<&str>,
-    ) {
+    fn on_tool_result(&mut self, result: &FunctionExecutionResult) {
         // Logging is handled by dispatch_event() after this method returns
+        let tokens =
+            events::estimate_tokens(&result.args) + events::estimate_tokens(&result.result);
         let _ = self.app_tx.try_send(AppEvent::ToolCompleted {
-            name: name.to_string(),
-            duration_ms: duration.as_millis() as u64,
+            name: result.name.clone(),
+            duration_ms: result.duration.as_millis() as u64,
             tokens,
-            has_error,
+            has_error: result.is_error(),
         });
     }
 
-    fn on_context_warning(&mut self, percentage: f64) {
-        let msg = events::format_context_warning(percentage);
+    fn on_context_warning(&mut self, warning: &clemini::agent::ContextWarning) {
+        let msg = events::format_context_warning(warning.percentage());
         let _ = self.app_tx.try_send(AppEvent::ContextWarning(msg.clone()));
-        logging::log_event(&msg);
+        // Logging is handled by dispatch_event() after this method returns
     }
 
-    fn on_complete(&mut self) {
+    fn on_complete(&mut self, _interaction_id: Option<&str>, _response: &genai_rs::InteractionResponse) {
         // Flush any remaining buffered text (normalizes to \n\n)
         if let Some(rendered) = self.text_buffer.flush() {
             let _ = self
@@ -673,8 +668,7 @@ impl events::EventHandler for TuiEventHandler {
         let _ = self
             .app_tx
             .try_send(AppEvent::ToolOutput(output.to_string()));
-        // Tool output is pre-formatted with ANSI codes, skip markdown rendering
-        logging::log_event_raw(output);
+        // Logging is handled by dispatch_event() after this method returns
     }
 }
 
@@ -1520,11 +1514,7 @@ mod event_handling_tests {
 
     #[test]
     fn test_convert_context_warning() {
-        let event = AgentEvent::ContextWarning {
-            used: 900_000,
-            limit: 1_000_000,
-            percentage: 90.0,
-        };
+        let event = AgentEvent::ContextWarning(clemini::agent::ContextWarning::new(900_000, 1_000_000));
         let app_events = convert_agent_event_to_app_events(&event);
 
         assert_eq!(app_events.len(), 1);
@@ -1596,7 +1586,23 @@ mod event_handling_tests {
         assert!(rx.try_recv().is_err(), "Expected no event until flush");
 
         // Flush happens at on_complete
-        handler.on_complete();
+        use genai_rs::{InteractionResponse, InteractionStatus};
+        let response = InteractionResponse {
+            id: Some("test-id".to_string()),
+            model: None,
+            agent: None,
+            input: vec![],
+            outputs: vec![],
+            status: InteractionStatus::Completed,
+            usage: None,
+            tools: None,
+            grounding_metadata: None,
+            url_context_metadata: None,
+            previous_interaction_id: None,
+            created: None,
+            updated: None,
+        };
+        handler.on_complete(Some("test-id"), &response);
 
         // Now the buffered text is sent
         let event = rx.try_recv().unwrap();
@@ -1611,7 +1617,12 @@ mod event_handling_tests {
         let (tx, mut rx) = mpsc::channel::<AppEvent>(10);
         let mut handler = TuiEventHandler::new(tx);
 
-        handler.on_tool_executing("read_file", &json!({"file_path": "test.rs"}));
+        let call = OwnedFunctionCallInfo {
+            name: "read_file".to_string(),
+            args: json!({"file_path": "test.rs"}),
+            id: None,
+        };
+        handler.on_tool_executing(&call);
 
         // With empty buffer, only ToolExecuting is sent (no blank line antipattern)
         let event = rx.try_recv().unwrap();
@@ -1629,7 +1640,14 @@ mod event_handling_tests {
         let (tx, mut rx) = mpsc::channel::<AppEvent>(10);
         let mut handler = TuiEventHandler::new(tx);
 
-        handler.on_tool_result("bash", Duration::from_millis(150), 100, false, None);
+        let result = FunctionExecutionResult::new(
+            "bash".to_string(),
+            "call-1".to_string(),
+            json!({"command": "ls"}),
+            json!({"output": "file.txt"}),
+            Duration::from_millis(150),
+        );
+        handler.on_tool_result(&result);
 
         let event = rx.try_recv().unwrap();
         match event {
@@ -1641,7 +1659,7 @@ mod event_handling_tests {
             } => {
                 assert_eq!(name, "bash");
                 assert_eq!(duration_ms, 150);
-                assert_eq!(tokens, 100);
+                assert!(tokens > 0); // tokens computed from args + result
                 assert!(!has_error);
             }
             _ => panic!("Expected ToolCompleted"),
@@ -1653,7 +1671,7 @@ mod event_handling_tests {
         let (tx, mut rx) = mpsc::channel::<AppEvent>(10);
         let mut handler = TuiEventHandler::new(tx);
 
-        handler.on_context_warning(85.5);
+        handler.on_context_warning(&clemini::agent::ContextWarning::new(855_000, 1_000_000));
 
         let event = rx.try_recv().unwrap();
         match event {

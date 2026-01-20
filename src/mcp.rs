@@ -7,7 +7,7 @@ use axum::{
 };
 use colored::Colorize;
 use futures_util::stream::Stream;
-use genai_rs::Client;
+use genai_rs::{Client, FunctionExecutionResult, OwnedFunctionCallInfo};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::convert::Infallible;
@@ -21,7 +21,7 @@ use tracing::instrument;
 // Note: info! macro goes to JSON logs only. For human-readable logs, use crate::logging::log_event()
 
 use crate::agent::{AgentEvent, run_interaction};
-use crate::events::{EventHandler, TextBuffer, format_context_warning, write_to_streaming_log};
+use crate::events::{EventHandler, TextBuffer, write_to_streaming_log};
 use crate::tools::CleminiToolService;
 
 #[derive(Debug, Deserialize, Clone)]
@@ -138,48 +138,36 @@ impl EventHandler for McpEventHandler {
         self.text_buffer.push(text);
     }
 
-    fn on_tool_executing(&mut self, name: &str, args: &Value) {
+    fn on_tool_executing(&mut self, call: &OwnedFunctionCallInfo) {
         // Flush buffer before tool output (normalizes to \n\n for spacing)
         // Logging is handled by dispatch_event() after this method returns
         if let Some(rendered) = self.text_buffer.flush() {
             write_to_streaming_log(&rendered);
         }
         // Send MCP notification
-        self.send_notification(create_tool_executing_notification(name, args));
+        self.send_notification(create_tool_executing_notification(&call.name, &call.args));
     }
 
-    fn on_tool_result(
-        &mut self,
-        name: &str,
-        duration: std::time::Duration,
-        _tokens: u32,
-        _has_error: bool,
-        _error_message: Option<&str>,
-    ) {
+    fn on_tool_result(&mut self, result: &FunctionExecutionResult) {
         // Logging is handled by dispatch_event() after this method returns
         // Send MCP notification
         self.send_notification(create_tool_result_notification(
-            name,
-            duration.as_millis() as u64,
+            &result.name,
+            result.duration.as_millis() as u64,
         ));
     }
 
-    fn on_context_warning(&mut self, percentage: f64) {
-        let msg = format_context_warning(percentage);
-        crate::logging::log_event(&msg);
+    fn on_context_warning(&mut self, _warning: &crate::agent::ContextWarning) {
+        // Logging is handled by dispatch_event() after this method returns
     }
 
-    fn on_complete(&mut self) {
+    fn on_complete(&mut self, _interaction_id: Option<&str>, _response: &genai_rs::InteractionResponse) {
         // Flush any remaining buffered text (normalizes to \n\n)
         if let Some(rendered) = self.text_buffer.flush() {
             write_to_streaming_log(&rendered);
         }
     }
 
-    fn on_tool_output(&mut self, output: &str) {
-        // Tool output is pre-formatted with ANSI codes, skip markdown rendering
-        crate::logging::log_event_raw(output);
-    }
 }
 
 #[instrument(skip(server, request))]
@@ -939,7 +927,12 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
         let mut handler = McpEventHandler::new(tx);
 
-        handler.on_tool_executing("read_file", &json!({"file_path": "test.rs"}));
+        let call = OwnedFunctionCallInfo {
+            name: "read_file".to_string(),
+            args: json!({"file_path": "test.rs"}),
+            id: None,
+        };
+        handler.on_tool_executing(&call);
 
         let notification = rx.try_recv().unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&notification).unwrap();
@@ -954,13 +947,14 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
         let mut handler = McpEventHandler::new(tx);
 
-        handler.on_tool_result(
-            "bash",
+        let result = FunctionExecutionResult::new(
+            "bash".to_string(),
+            "call-1".to_string(),
+            json!({}),
+            json!({"output": "ok"}),
             std::time::Duration::from_millis(150),
-            100,
-            false,
-            None,
         );
+        handler.on_tool_result(&result);
 
         let notification = rx.try_recv().unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&notification).unwrap();
@@ -991,7 +985,7 @@ mod tests {
         let mut handler = McpEventHandler::new(tx);
 
         // Context warning should only log, not send notification
-        handler.on_context_warning(85.5);
+        handler.on_context_warning(&crate::agent::ContextWarning::new(855_000, 1_000_000));
 
         // No notification should be sent for context warnings
         assert!(rx.try_recv().is_err());
