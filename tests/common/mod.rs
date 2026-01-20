@@ -69,7 +69,7 @@ pub fn create_temp_dir() -> TempDir {
 pub struct TestSink;
 
 impl logging::OutputSink for TestSink {
-    fn emit(&self, _message: &str, _render_markdown: bool) {
+    fn emit(&self, _message: &str) {
         // No-op for tests
     }
 }

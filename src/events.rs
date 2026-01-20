@@ -34,7 +34,7 @@ use genai_rs::{FunctionExecutionResult, OwnedFunctionCallInfo};
 use serde_json::Value;
 use termimad::MadSkin;
 
-use crate::logging::{log_event, log_event_raw};
+use crate::logging::log_event;
 
 // ============================================================================
 // Markdown Rendering Infrastructure
@@ -382,7 +382,7 @@ pub fn dispatch_event<H: EventHandler>(handler: &mut H, event: &crate::agent::Ag
         AgentEvent::ToolResult(result) => {
             handler.on_tool_result(result);
             // Unified logging: complete visual block
-            log_event_raw(&format_result_block(result));
+            log_event(&format_result_block(result));
         }
         AgentEvent::ContextWarning(warning) => {
             handler.on_context_warning(warning);
@@ -399,7 +399,7 @@ pub fn dispatch_event<H: EventHandler>(handler: &mut H, event: &crate::agent::Ag
         AgentEvent::ToolOutput(output) => {
             handler.on_tool_output(output);
             // Unified logging: tool output is pre-formatted with ANSI codes
-            log_event_raw(output);
+            log_event(output);
         }
     }
 }

@@ -24,7 +24,7 @@ pub fn is_logging_enabled() -> bool {
 /// Trait for output sinks that handle logging and display.
 pub trait OutputSink: Send + Sync {
     /// Emit a complete message/line.
-    fn emit(&self, message: &str, render_markdown: bool);
+    fn emit(&self, message: &str);
 }
 
 static OUTPUT_SINK: OnceLock<Arc<dyn OutputSink>> = OnceLock::new();
@@ -43,18 +43,10 @@ pub fn get_output_sink() -> Option<&'static Arc<dyn OutputSink>> {
 /// Uses same naming as rolling::daily: clemini.log.YYYY-MM-DD
 pub fn log_event(message: &str) {
     if let Some(sink) = OUTPUT_SINK.get() {
-        sink.emit(message, true);
+        sink.emit(message);
     }
     // No fallback - OUTPUT_SINK is always set in production before logging.
     // Skipping prevents test pollution of shared log files.
-}
-
-/// Log without markdown rendering (for protocol messages with long content).
-pub fn log_event_raw(message: &str) {
-    if let Some(sink) = OUTPUT_SINK.get() {
-        sink.emit(message, false);
-    }
-    // No fallback - see log_event comment
 }
 
 #[cfg(test)]

@@ -95,6 +95,20 @@ fn format_mcp_request(method: &str, params: &Option<Value>) -> String {
     output
 }
 
+/// Format complete MCP response log block (OUT line + optional body with spacing).
+fn format_mcp_response(
+    method: &str,
+    status: &colored::ColoredString,
+    detail: &str,
+    body: Option<&str>,
+) -> String {
+    let mut output = format!("{} {} ({}){}", "OUT".cyan(), method.bold(), status, detail);
+    if let Some(b) = body {
+        output.push_str(&format!("\n\n{}", b.trim()));
+    }
+    output
+}
+
 fn format_status(response: &JsonRpcResponse) -> colored::ColoredString {
     if response.error.is_some() {
         "ERROR".red()
@@ -195,7 +209,7 @@ async fn handle_post(
     State(server): State<Arc<McpServer>>,
     Json(request): Json<JsonRpcRequest>,
 ) -> Json<JsonRpcResponse> {
-    crate::logging::log_event_raw(&format_mcp_request(&request.method, &request.params));
+    crate::logging::log_event(&format_mcp_request(&request.method, &request.params));
 
     // For HTTP, we use the server's broadcast channel for notifications
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
@@ -212,11 +226,11 @@ async fn handle_post(
         .await
     {
         Ok(response) => {
-            crate::logging::log_event(&format!(
-                "{} {} ({})",
-                "OUT".cyan(),
-                request.method.bold(),
-                format_status(&response)
+            crate::logging::log_event(&format_mcp_response(
+                &request.method,
+                &format_status(&response),
+                "",
+                None,
             ));
             Json(response)
         }
@@ -321,7 +335,7 @@ impl McpServer {
 
             let request: JsonRpcRequest = match serde_json::from_str::<JsonRpcRequest>(&line) {
                 Ok(req) => {
-                    crate::logging::log_event_raw(&format_mcp_request(&req.method, &req.params));
+                    crate::logging::log_event(&format_mcp_request(&req.method, &req.params));
                     req
                 }
                 Err(e) => {
@@ -417,18 +431,17 @@ impl McpServer {
                         resp_body.push_str(&format!("\n{}", msg.red()));
                     }
                     if let Ok(resp_str) = serde_json::to_string(&response) {
-                        // Use log_event_raw to avoid markdown wrapping long interaction IDs
-                        crate::logging::log_event_raw(&format!(
-                            "{} {} ({}){}",
-                            "OUT".cyan(),
-                            request_clone.method.bold(),
-                            format_status(&response),
-                            detail,
+                        let body = if resp_body.is_empty() {
+                            None
+                        } else {
+                            Some(resp_body.as_str())
+                        };
+                        crate::logging::log_event(&format_mcp_response(
+                            &request_clone.method,
+                            &format_status(&response),
+                            &detail,
+                            body,
                         ));
-                        if !resp_body.is_empty() {
-                            crate::logging::log_event("");
-                            crate::logging::log_event(resp_body.trim());
-                        }
                         let _ = tx_clone.send(format!("{}\n", resp_str));
                     }
                 });
@@ -442,11 +455,11 @@ impl McpServer {
                 .handle_request(request.clone(), tx.clone(), cancellation_token)
                 .await?;
             let resp_str = serde_json::to_string(&response)?;
-            crate::logging::log_event(&format!(
-                "{} {} ({})",
-                "OUT".cyan(),
-                request.method.bold(),
-                format_status(&response)
+            crate::logging::log_event(&format_mcp_response(
+                &request.method,
+                &format_status(&response),
+                "",
+                None,
             ));
             let _ = tx.send(format!("{}\n", resp_str));
         }

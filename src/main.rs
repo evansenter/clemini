@@ -43,12 +43,12 @@ pub(crate) mod logging {
     pub use clemini::logging::*;
 }
 
-/// Writes to log files only (current behavior of log_event)
+/// Writes to log files only (for MCP mode)
 pub struct FileSink;
 
 impl OutputSink for FileSink {
-    fn emit(&self, message: &str, render_markdown: bool) {
-        log_event_to_file(message, render_markdown);
+    fn emit(&self, message: &str) {
+        log_event_to_file(message);
     }
 }
 
@@ -56,17 +56,13 @@ impl OutputSink for FileSink {
 pub struct TerminalSink;
 
 impl OutputSink for TerminalSink {
-    fn emit(&self, message: &str, render_markdown: bool) {
+    fn emit(&self, message: &str) {
         if message.is_empty() {
-            // Empty message = blank line
             eprintln!();
-        } else if render_markdown {
-            // render_markdown_nowrap includes trailing newline, use eprint to avoid doubling
-            eprint!("{}", events::render_markdown_nowrap(message));
         } else {
             eprintln!("{}", message);
         }
-        log_event_to_file(message, render_markdown);
+        log_event_to_file(message);
     }
 }
 
@@ -85,39 +81,31 @@ pub fn set_tui_output_channel(tx: mpsc::UnboundedSender<TuiMessage>) {
     let _ = TUI_OUTPUT_TX.set(tx);
 }
 
-/// Writes to TUI buffer (via channel) AND log files - no termimad, no stderr
+/// Writes to TUI buffer (via channel) AND log files
 pub struct TuiSink;
 
 impl OutputSink for TuiSink {
-    fn emit(&self, message: &str, _render_markdown: bool) {
-        // Send to TUI via channel (no termimad rendering - just plain text with ANSI colors)
+    fn emit(&self, message: &str) {
+        // Send to TUI via channel
         if let Some(tx) = TUI_OUTPUT_TX.get() {
             let _ = tx.send(TuiMessage::Line(message.to_string()));
         }
-        // Also log to file (without markdown rendering to avoid termimad formatting issues)
-        log_event_to_file(message, false);
+        log_event_to_file(message);
     }
 }
 
 /// Log to file only (skip terminal output even with TerminalSink)
 pub fn log_to_file(message: &str) {
-    log_event_to_file(message, true);
+    log_event_to_file(message);
 }
 
-fn log_event_to_file(message: &str, render_markdown: bool) {
+fn log_event_to_file(message: &str) {
     // Skip logging during tests unless explicitly enabled
     if !logging::is_logging_enabled() {
         return;
     }
 
     colored::control::set_override(true);
-
-    // Optionally render markdown (no wrapping)
-    let rendered = if render_markdown {
-        events::render_markdown_nowrap(message)
-    } else {
-        message.to_string()
-    };
 
     // Write to the stable log location: clemini.log.YYYY-MM-DD
     let log_dir = dirs::home_dir()
@@ -128,11 +116,11 @@ fn log_event_to_file(message: &str, render_markdown: bool) {
     let today = chrono::Local::now().format("%Y-%m-%d");
     let log_path = log_dir.join(format!("clemini.log.{}", today));
 
-    let _ = write_to_log_file(&log_path, &rendered);
+    let _ = write_to_log_file(&log_path, message);
 
     // Also write to CLEMINI_LOG if set (backwards compat)
     if let Ok(path) = std::env::var("CLEMINI_LOG") {
-        let _ = write_to_log_file(PathBuf::from(path), &rendered);
+        let _ = write_to_log_file(PathBuf::from(path), message);
     }
 }
 

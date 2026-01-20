@@ -47,7 +47,7 @@ pub trait ToolEmitter {
         if let Some(tx) = self.events_tx() {
             let _ = tx.try_send(AgentEvent::ToolOutput(output.to_string()));
         } else {
-            crate::logging::log_event_raw(output);
+            crate::logging::log_event(output);
         }
     }
 }
