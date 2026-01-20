@@ -1034,6 +1034,8 @@ mod tests {
 
     #[test]
     fn test_terminal_event_handler_spacing_contract() {
+        crate::logging::disable_logging();
+
         // This specifically tests the spacing contract for TerminalEventHandler:
         // when text is buffered and then a tool executes, the buffer must be flushed.
         let mut handler = TerminalEventHandler::new(false); // stream disabled to avoid stdout pollution
