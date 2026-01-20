@@ -72,6 +72,9 @@ impl logging::OutputSink for TestSink {
     fn emit(&self, _message: &str) {
         // No-op for tests
     }
+    fn emit_line(&self, _message: &str) {
+        // No-op for tests
+    }
 }
 
 /// Initialize logging with a no-op sink for tests.
