@@ -190,7 +190,8 @@ struct Config {
     bash_timeout: Option<u64>,
     #[serde(default = "default_allowed_paths")]
     allowed_paths: Vec<String>,
-    max_retries: Option<u32>,
+    /// Maximum extra retries after initial failure. Default 2 = 3 total attempts.
+    max_extra_retries: Option<u32>,
     retry_delay_base_secs: Option<u64>,
 }
 
@@ -200,7 +201,7 @@ impl Default for Config {
             model: None,
             bash_timeout: None,
             allowed_paths: default_allowed_paths(),
-            max_retries: None,
+            max_extra_retries: None,
             retry_delay_base_secs: None,
         }
     }
@@ -363,7 +364,7 @@ async fn main() -> Result<()> {
     }
 
     let retry_config = agent::RetryConfig {
-        max_retries: config.max_retries.unwrap_or(3),
+        max_extra_retries: config.max_extra_retries.unwrap_or(2),
         retry_delay_base: std::time::Duration::from_secs(config.retry_delay_base_secs.unwrap_or(1)),
     };
 

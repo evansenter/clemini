@@ -120,8 +120,9 @@ pub enum AgentEvent {
 /// Configuration for API retries.
 #[derive(Debug, Clone, Copy)]
 pub struct RetryConfig {
-    /// Maximum number of retry attempts.
-    pub max_retries: u32,
+    /// Maximum number of extra retry attempts after initial failure.
+    /// With default of 2, total attempts = 3 (initial + 2 retries).
+    pub max_extra_retries: u32,
     /// Base delay for exponential backoff.
     pub retry_delay_base: Duration,
 }
@@ -129,7 +130,7 @@ pub struct RetryConfig {
 impl Default for RetryConfig {
     fn default() -> Self {
         Self {
-            max_retries: 3,
+            max_extra_retries: 2,
             retry_delay_base: Duration::from_secs(1),
         }
     }
@@ -366,7 +367,7 @@ pub async fn run_interaction(
             .await
             {
                 Ok(res) => break res,
-                Err(e) if e.is_retryable() && attempt < retry_config.max_retries => {
+                Err(e) if e.is_retryable() && attempt < retry_config.max_extra_retries => {
                     attempt += 1;
 
                     // Use server-suggested delay if available, otherwise exponential backoff
@@ -376,7 +377,7 @@ pub async fn run_interaction(
 
                     let _ = events_tx.try_send(AgentEvent::Retry {
                         attempt,
-                        max_attempts: retry_config.max_retries,
+                        max_attempts: retry_config.max_extra_retries,
                         delay,
                         error: e.to_string(),
                     });
