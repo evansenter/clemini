@@ -11,7 +11,6 @@ use std::env;
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
-use termimad::MadSkin;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tui_textarea::{Input, TextArea};
@@ -296,10 +295,6 @@ struct Args {
     #[arg(long)]
     timeout: Option<u64>,
 
-    /// Stream raw text output (non-interactive mode)
-    #[arg(long)]
-    stream: bool,
-
     /// Start as an MCP server (stdio mode)
     #[arg(long)]
     mcp_server: bool,
@@ -442,10 +437,9 @@ async fn main() -> Result<()> {
         // Create channel for agent events
         let (events_tx, mut events_rx) = mpsc::channel::<AgentEvent>(100);
 
-        // Spawn task to handle streaming events using EventHandler
-        let stream_enabled = args.stream;
+        // Spawn task to handle events using EventHandler
         let event_handler = tokio::spawn(async move {
-            let mut handler = events::TerminalEventHandler::new(stream_enabled);
+            let mut handler = events::TerminalEventHandler::new();
             while let Some(event) = events_rx.recv().await {
                 events::dispatch_event(&mut handler, &event);
             }
@@ -454,7 +448,7 @@ async fn main() -> Result<()> {
         // Set events_tx for tools to emit output through the event system
         tool_service.set_events_tx(Some(events_tx.clone()));
 
-        let result = run_interaction(
+        run_interaction(
             &client,
             &tool_service,
             &prompt,
@@ -472,12 +466,6 @@ async fn main() -> Result<()> {
 
         // Wait for event handler to finish
         let _ = event_handler.await;
-
-        // In non-streaming mode, render the final response
-        if !args.stream && !result.response.is_empty() {
-            let skin = MadSkin::default();
-            skin.print_text(&result.response);
-        }
     } else {
         // Interactive REPL mode
         // Use TUI if terminal and --no-tui not specified
@@ -486,14 +474,11 @@ async fn main() -> Result<()> {
         if !use_tui {
             logging::set_output_sink(Arc::new(TerminalSink));
         }
-        // TUI mode always needs streaming for incremental updates
-        let stream_output = use_tui || args.stream;
         run_repl(
             &client,
             &tool_service,
             cwd,
             &model,
-            stream_output,
             system_prompt,
             use_tui,
             retry_config,
@@ -593,7 +578,7 @@ impl events::EventHandler for TuiEventHandler {
             let _ = self
                 .app_tx
                 .try_send(AppEvent::StreamChunk(rendered.clone()));
-            events::write_to_streaming_log(&rendered);
+            log_to_file(&rendered);
         }
         let _ = self.app_tx.try_send(AppEvent::ToolExecuting {
             name: call.name.clone(),
@@ -629,7 +614,7 @@ impl events::EventHandler for TuiEventHandler {
             let _ = self
                 .app_tx
                 .try_send(AppEvent::StreamChunk(rendered.clone()));
-            events::write_to_streaming_log(&rendered);
+            log_to_file(&rendered);
         }
     }
 
@@ -640,13 +625,19 @@ impl events::EventHandler for TuiEventHandler {
         // Logging is handled by dispatch_event() after this method returns
     }
 
-    fn on_retry(&mut self, attempt: u32, max_attempts: u32, delay: std::time::Duration, error: &str) {
+    fn on_retry(
+        &mut self,
+        attempt: u32,
+        max_attempts: u32,
+        delay: std::time::Duration,
+        error: &str,
+    ) {
         // Flush buffer before retry message
         if let Some(rendered) = self.text_buffer.flush() {
             let _ = self
                 .app_tx
                 .try_send(AppEvent::StreamChunk(rendered.clone()));
-            events::write_to_streaming_log(&rendered);
+            log_to_file(&rendered);
         }
         let msg = events::format_retry(attempt, max_attempts, delay, error);
         let _ = self.app_tx.try_send(AppEvent::Retry(msg));
@@ -659,7 +650,6 @@ async fn run_repl(
     tool_service: &Arc<CleminiToolService>,
     cwd: std::path::PathBuf,
     model: &str,
-    stream_output: bool,
     system_prompt: String,
     use_tui: bool,
     retry_config: agent::RetryConfig,
@@ -670,7 +660,6 @@ async fn run_repl(
             tool_service,
             cwd,
             model,
-            stream_output,
             system_prompt,
             retry_config,
         )
@@ -681,7 +670,6 @@ async fn run_repl(
             tool_service,
             cwd,
             model,
-            stream_output,
             system_prompt,
             retry_config,
         )
@@ -690,13 +678,11 @@ async fn run_repl(
 }
 
 /// Plain text REPL for non-TTY or --no-tui mode
-#[allow(clippy::too_many_arguments)]
 async fn run_plain_repl(
     client: &Client,
     tool_service: &Arc<CleminiToolService>,
     cwd: std::path::PathBuf,
     model: &str,
-    stream_output: bool,
     system_prompt: String,
     retry_config: agent::RetryConfig,
 ) -> Result<()> {
@@ -747,10 +733,9 @@ async fn run_plain_repl(
         // Create channel for agent events
         let (events_tx, mut events_rx) = mpsc::channel::<AgentEvent>(100);
 
-        // Spawn task to handle streaming events using EventHandler
-        let stream_enabled = stream_output;
+        // Spawn task to handle events using EventHandler
         let event_handler = tokio::spawn(async move {
-            let mut handler = events::TerminalEventHandler::new(stream_enabled);
+            let mut handler = events::TerminalEventHandler::new();
             while let Some(event) = events_rx.recv().await {
                 events::dispatch_event(&mut handler, &event);
             }
@@ -774,11 +759,6 @@ async fn run_plain_repl(
         {
             Ok(result) => {
                 last_interaction_id = result.id.clone();
-                // In non-streaming mode, render the final response
-                if !stream_output && !result.response.is_empty() {
-                    let skin = MadSkin::default();
-                    skin.print_text(&result.response);
-                }
             }
             Err(e) => {
                 eprintln!("\n{}", format!("[error: {e}]").bright_red());
@@ -802,7 +782,6 @@ async fn run_tui_repl(
     tool_service: &Arc<CleminiToolService>,
     cwd: std::path::PathBuf,
     model: &str,
-    stream_output: bool,
     system_prompt: String,
     retry_config: agent::RetryConfig,
 ) -> Result<()> {
@@ -813,7 +792,6 @@ async fn run_tui_repl(
         tool_service,
         cwd,
         model,
-        stream_output,
         system_prompt,
         retry_config,
     )
@@ -851,7 +829,6 @@ async fn run_tui_event_loop(
     tool_service: &Arc<CleminiToolService>,
     cwd: std::path::PathBuf,
     model: &str,
-    _stream_output: bool, // Always streams via channel in TUI mode
     system_prompt: String,
     retry_config: agent::RetryConfig,
 ) -> Result<()> {

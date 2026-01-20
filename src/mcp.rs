@@ -21,7 +21,7 @@ use tracing::instrument;
 // Note: info! macro goes to JSON logs only. For human-readable logs, use crate::logging::log_event()
 
 use crate::agent::{AgentEvent, RetryConfig, run_interaction};
-use crate::events::{EventHandler, TextBuffer, write_to_streaming_log};
+use crate::events::{EventHandler, TextBuffer};
 use crate::tools::CleminiToolService;
 
 #[derive(Debug, Deserialize, Clone)]
@@ -177,7 +177,7 @@ impl EventHandler for McpEventHandler {
         // Flush buffer before tool output (normalizes to \n\n for spacing)
         // Logging is handled by dispatch_event() after this method returns
         if let Some(rendered) = self.text_buffer.flush() {
-            write_to_streaming_log(&rendered);
+            crate::logging::log_event_line(&rendered);
         }
         // Send MCP notification
         self.send_notification(create_tool_executing_notification(&call.name, &call.args));
@@ -203,14 +203,20 @@ impl EventHandler for McpEventHandler {
     ) {
         // Flush any remaining buffered text (normalizes to \n\n)
         if let Some(rendered) = self.text_buffer.flush() {
-            write_to_streaming_log(&rendered);
+            crate::logging::log_event_line(&rendered);
         }
     }
 
-    fn on_retry(&mut self, attempt: u32, max_attempts: u32, delay: std::time::Duration, error: &str) {
+    fn on_retry(
+        &mut self,
+        attempt: u32,
+        max_attempts: u32,
+        delay: std::time::Duration,
+        error: &str,
+    ) {
         // Flush buffer before retry
         if let Some(rendered) = self.text_buffer.flush() {
-            write_to_streaming_log(&rendered);
+            crate::logging::log_event_line(&rendered);
         }
         // Send MCP notification
         self.send_notification(json!({

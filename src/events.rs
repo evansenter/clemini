@@ -24,8 +24,6 @@
 //! Lower-level formatters for individual fields:
 //! - `format_tool_executing()`, `format_tool_result()`, etc.
 
-use std::io::{self, Write};
-use std::path::PathBuf;
 use std::sync::LazyLock;
 use std::time::Duration;
 
@@ -102,42 +100,6 @@ impl TextBuffer {
     /// Check if the buffer is empty.
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
-    }
-}
-
-// ============================================================================
-// File Logging
-// ============================================================================
-
-/// Write streaming text directly to a log file (no newline added).
-fn write_streaming_to_log_file(path: impl Into<PathBuf>, text: &str) -> std::io::Result<()> {
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path.into())?;
-    write!(file, "{}", text)?;
-    Ok(())
-}
-
-/// Write rendered text to log files.
-/// Used by EventHandlers after flushing with `TextBuffer::flush()`.
-pub fn write_to_streaming_log(rendered: &str) {
-    // Skip logging during tests unless explicitly enabled
-    if !crate::logging::is_logging_enabled() {
-        return;
-    }
-
-    let log_dir = dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".clemini/logs");
-    let _ = std::fs::create_dir_all(&log_dir);
-    let today = chrono::Local::now().format("%Y-%m-%d");
-    let log_path = log_dir.join(format!("clemini.log.{}", today));
-
-    let _ = write_streaming_to_log_file(&log_path, rendered);
-
-    if let Ok(path) = std::env::var("CLEMINI_LOG") {
-        let _ = write_streaming_to_log_file(PathBuf::from(path), rendered);
     }
 }
 
@@ -326,40 +288,36 @@ pub trait EventHandler {
 }
 
 /// Event handler for terminal output (plain REPL and non-interactive modes).
+///
+/// All text output goes through `log_event_line()` which uses the OutputSink.
+/// Text is accumulated in `TextBuffer` and flushed at event boundaries.
 pub struct TerminalEventHandler {
-    stream_enabled: bool,
     text_buffer: TextBuffer,
 }
 
 impl TerminalEventHandler {
-    pub fn new(stream_enabled: bool) -> Self {
+    pub fn new() -> Self {
         Self {
-            stream_enabled,
             text_buffer: TextBuffer::new(),
         }
+    }
+}
+
+impl Default for TerminalEventHandler {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 impl EventHandler for TerminalEventHandler {
     fn on_text_delta(&mut self, text: &str) {
         self.text_buffer.push(text);
-        // In streaming mode, print incrementally
-        if self.stream_enabled {
-            print!("{}", text);
-            let _ = io::stdout().flush();
-        }
     }
 
     fn on_tool_executing(&mut self, _call: &OwnedFunctionCallInfo) {
         // Flush buffer before tool output
-        // Streaming mode: text already printed, just log to file
-        // Non-streaming mode: output via log_event_line (OutputSink)
         if let Some(rendered) = self.text_buffer.flush() {
-            if self.stream_enabled {
-                write_to_streaming_log(&rendered);
-            } else {
-                crate::logging::log_event_line(&rendered);
-            }
+            crate::logging::log_event_line(&rendered);
         }
     }
 
@@ -378,22 +336,14 @@ impl EventHandler for TerminalEventHandler {
     ) {
         // Flush any remaining buffered text
         if let Some(rendered) = self.text_buffer.flush() {
-            if self.stream_enabled {
-                write_to_streaming_log(&rendered);
-            } else {
-                crate::logging::log_event_line(&rendered);
-            }
+            crate::logging::log_event_line(&rendered);
         }
     }
 
     fn on_retry(&mut self, _attempt: u32, _max_attempts: u32, _delay: Duration, _error: &str) {
         // Flush buffer before retry message
         if let Some(rendered) = self.text_buffer.flush() {
-            if self.stream_enabled {
-                write_to_streaming_log(&rendered);
-            } else {
-                crate::logging::log_event_line(&rendered);
-            }
+            crate::logging::log_event_line(&rendered);
         }
     }
 }
@@ -458,16 +408,14 @@ mod tests {
     /// Test handler that records all calls for verification.
     struct RecordingHandler {
         events: Rc<RefCell<Vec<String>>>,
-        stream_enabled: bool,
     }
 
     impl RecordingHandler {
-        fn new(stream_enabled: bool) -> (Self, Rc<RefCell<Vec<String>>>) {
+        fn new() -> (Self, Rc<RefCell<Vec<String>>>) {
             let events = Rc::new(RefCell::new(Vec::new()));
             (
                 Self {
                     events: events.clone(),
-                    stream_enabled,
                 },
                 events,
             )
@@ -495,11 +443,9 @@ mod tests {
 
     impl EventHandler for RecordingHandler {
         fn on_text_delta(&mut self, text: &str) {
-            if self.stream_enabled {
-                self.events
-                    .borrow_mut()
-                    .push(format!("text_delta:{}", text));
-            }
+            self.events
+                .borrow_mut()
+                .push(format!("text_delta:{}", text));
         }
 
         fn on_tool_executing(&mut self, call: &OwnedFunctionCallInfo) {
@@ -550,22 +496,16 @@ mod tests {
     // =========================================
 
     #[test]
-    fn test_text_delta_respects_stream_enabled() {
-        // With streaming enabled
-        let (mut handler, events) = RecordingHandler::new(true);
+    fn test_text_delta_records_text() {
+        let (mut handler, events) = RecordingHandler::new();
         handler.on_text_delta("Hello");
         assert_eq!(events.borrow().len(), 1);
         assert!(events.borrow()[0].contains("text_delta:Hello"));
-
-        // With streaming disabled
-        let (mut handler, events) = RecordingHandler::new(false);
-        handler.on_text_delta("Hello");
-        assert_eq!(events.borrow().len(), 0); // No event recorded
     }
 
     #[test]
     fn test_tool_executing_records_name_and_args() {
-        let (mut handler, events) = RecordingHandler::new(true);
+        let (mut handler, events) = RecordingHandler::new();
         let call = OwnedFunctionCallInfo {
             name: "read_file".to_string(),
             args: serde_json::json!({"path": "test.rs"}),
@@ -580,7 +520,7 @@ mod tests {
 
     #[test]
     fn test_tool_result_records_all_fields() {
-        let (mut handler, events) = RecordingHandler::new(true);
+        let (mut handler, events) = RecordingHandler::new();
         let result = FunctionExecutionResult::new(
             "write_file".to_string(),
             "call-1".to_string(),
@@ -599,7 +539,7 @@ mod tests {
 
     #[test]
     fn test_tool_result_with_error() {
-        let (mut handler, events) = RecordingHandler::new(true);
+        let (mut handler, events) = RecordingHandler::new();
         let result = FunctionExecutionResult::new(
             "bash".to_string(),
             "call-1".to_string(),
@@ -617,7 +557,7 @@ mod tests {
 
     #[test]
     fn test_context_warning_records_percentage() {
-        let (mut handler, events) = RecordingHandler::new(true);
+        let (mut handler, events) = RecordingHandler::new();
         handler.on_context_warning(&crate::agent::ContextWarning::new(855_000, 1_000_000));
 
         assert_eq!(events.borrow().len(), 1);
@@ -632,7 +572,7 @@ mod tests {
     fn test_dispatch_text_delta() {
         use crate::agent::AgentEvent;
 
-        let (mut handler, events) = RecordingHandler::new(true);
+        let (mut handler, events) = RecordingHandler::new();
         let event = AgentEvent::TextDelta("Hello world".to_string());
         dispatch_event(&mut handler, &event);
 
@@ -645,7 +585,7 @@ mod tests {
         use crate::agent::AgentEvent;
         use genai_rs::OwnedFunctionCallInfo;
 
-        let (mut handler, events) = RecordingHandler::new(true);
+        let (mut handler, events) = RecordingHandler::new();
         let call = OwnedFunctionCallInfo {
             name: "grep".to_string(),
             id: Some("123".to_string()),
@@ -662,7 +602,7 @@ mod tests {
     fn test_dispatch_context_warning() {
         use crate::agent::AgentEvent;
 
-        let (mut handler, events) = RecordingHandler::new(true);
+        let (mut handler, events) = RecordingHandler::new();
         let event =
             AgentEvent::ContextWarning(crate::agent::ContextWarning::new(900_000, 1_000_000));
         dispatch_event(&mut handler, &event);
@@ -673,7 +613,7 @@ mod tests {
 
     #[test]
     fn test_dispatch_complete() {
-        let (mut handler, events) = RecordingHandler::new(true);
+        let (mut handler, events) = RecordingHandler::new();
         let response = test_response("test-id");
         handler.on_complete(Some("test-id"), &response);
 
@@ -685,7 +625,7 @@ mod tests {
     fn test_dispatch_cancelled() {
         use crate::agent::AgentEvent;
 
-        let (mut handler, events) = RecordingHandler::new(true);
+        let (mut handler, events) = RecordingHandler::new();
         let event = AgentEvent::Cancelled;
         dispatch_event(&mut handler, &event);
 
@@ -702,7 +642,7 @@ mod tests {
         use crate::agent::AgentEvent;
         use genai_rs::{FunctionExecutionResult, OwnedFunctionCallInfo};
 
-        let (mut handler, events) = RecordingHandler::new(true);
+        let (mut handler, events) = RecordingHandler::new();
 
         // Text delta (streaming)
         dispatch_event(
@@ -867,7 +807,7 @@ mod tests {
         use crate::agent::AgentEvent;
         use genai_rs::FunctionExecutionResult;
 
-        let (mut handler, events) = RecordingHandler::new(true);
+        let (mut handler, events) = RecordingHandler::new();
 
         // Create a result with known args and result sizes
         let args = serde_json::json!({"file_path": "/path/to/file.txt", "old_string": "hello", "new_string": "world"});
@@ -1071,7 +1011,7 @@ mod tests {
 
         // This specifically tests the spacing contract for TerminalEventHandler:
         // when text is buffered and then a tool executes, the buffer must be flushed.
-        let mut handler = TerminalEventHandler::new(false); // stream disabled to avoid stdout pollution
+        let mut handler = TerminalEventHandler::new();
         handler.on_text_delta("Some text");
 
         // At this point, text is in buffer.
