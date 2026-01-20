@@ -90,7 +90,7 @@ fn format_mcp_request(method: &str, params: &Option<Value>) -> String {
     let mut output = format!("\n{} {}{}", "IN".green(), method.bold(), detail);
     if let Some(msg) = body {
         // Body with background for visibility, surrounded by blank lines
-        output.push_str(&format!("\n\n{}\n", msg.trim().on_bright_black()));
+        output.push_str(&format!("\n\n{}\n\n", msg.trim().on_bright_black()));
     }
     output
 }

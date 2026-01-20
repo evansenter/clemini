@@ -130,7 +130,6 @@ fn write_to_log_file(path: impl Into<PathBuf>, rendered: &str) -> std::io::Resul
         .append(true)
         .open(path.into())?;
 
-    let rendered = rendered.trim_end();
     if rendered.is_empty() {
         writeln!(file)?;
     } else {
