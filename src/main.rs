@@ -234,11 +234,19 @@ mod tests {
 
         assert_eq!(
             handle_builtin_command("/version", model, &cwd),
-            Some(format!("clemini v{} | {}", env!("CARGO_PKG_VERSION"), model))
+            Some(format!(
+                "clemini v{} | {}",
+                env!("CARGO_PKG_VERSION"),
+                model
+            ))
         );
         assert_eq!(
             handle_builtin_command("/v", model, &cwd),
-            Some(format!("clemini v{} | {}", env!("CARGO_PKG_VERSION"), model))
+            Some(format!(
+                "clemini v{} | {}",
+                env!("CARGO_PKG_VERSION"),
+                model
+            ))
         );
         assert_eq!(
             handle_builtin_command("/model", model, &cwd),
@@ -263,11 +271,7 @@ mod tests {
     #[test]
     fn test_run_shell_command_capture() {
         // Test successful command
-        let out = if cfg!(target_os = "windows") {
-            run_shell_command_capture("echo hello")
-        } else {
-            run_shell_command_capture("echo hello")
-        };
+        let out = run_shell_command_capture("echo hello");
         assert_eq!(out, "hello");
 
         // Test failing command
@@ -279,8 +283,14 @@ mod tests {
         assert!(out.contains("exit code"));
 
         // Test empty command
-        assert_eq!(handle_builtin_command("!", "model", &PathBuf::from(".")), None);
-        assert_eq!(handle_builtin_command("!  ", "model", &PathBuf::from(".")), None);
+        assert_eq!(
+            handle_builtin_command("!", "model", &PathBuf::from(".")),
+            None
+        );
+        assert_eq!(
+            handle_builtin_command("!  ", "model", &PathBuf::from(".")),
+            None
+        );
     }
 
     #[test]
@@ -307,7 +317,11 @@ mod tests {
         assert!(out.contains("error"));
 
         // Test status on empty repo (should be success but empty with --short)
-        let out = run_git_command_capture_in_dir(&["status", "--short"], "clean working directory", repo_path);
+        let out = run_git_command_capture_in_dir(
+            &["status", "--short"],
+            "clean working directory",
+            repo_path,
+        );
         assert_eq!(out, "[clean working directory]");
 
         // Add a file and commit
@@ -327,7 +341,11 @@ mod tests {
     }
 
     /// Helper for testing git commands in a specific directory
-    fn run_git_command_capture_in_dir(args: &[&str], empty_msg: &str, dir: &std::path::Path) -> String {
+    fn run_git_command_capture_in_dir(
+        args: &[&str],
+        empty_msg: &str,
+        dir: &std::path::Path,
+    ) -> String {
         match std::process::Command::new("git")
             .args(args)
             .current_dir(dir)

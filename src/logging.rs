@@ -16,11 +16,6 @@ pub fn disable_logging() {
     LOGGING_DISABLED.store(true, Ordering::SeqCst);
 }
 
-/// Enable logging to files. Call this in tests to ensure log writes.
-pub fn enable_logging() {
-    LOGGING_DISABLED.store(false, Ordering::SeqCst);
-}
-
 /// Check if logging is enabled. Returns true unless explicitly disabled via `disable_logging()`.
 pub fn is_logging_enabled() -> bool {
     !LOGGING_DISABLED.load(Ordering::SeqCst)
