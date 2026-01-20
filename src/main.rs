@@ -1716,7 +1716,10 @@ mod event_handling_tests {
         write_to_log_file(&log_path, "hello", true).unwrap();
 
         let content = std::fs::read_to_string(&log_path).unwrap();
-        assert_eq!(content, "hello\n\n", "emit() should add trailing blank line");
+        assert_eq!(
+            content, "hello\n\n",
+            "emit() should add trailing blank line"
+        );
     }
 
     /// write_to_log_file with add_blank_line=false does NOT add trailing blank line
@@ -1728,7 +1731,10 @@ mod event_handling_tests {
         write_to_log_file(&log_path, "hello", false).unwrap();
 
         let content = std::fs::read_to_string(&log_path).unwrap();
-        assert_eq!(content, "hello\n", "emit_line() should NOT add trailing blank line");
+        assert_eq!(
+            content, "hello\n",
+            "emit_line() should NOT add trailing blank line"
+        );
     }
 
     /// Multiple emit_line calls produce consecutive lines without gaps
@@ -1742,7 +1748,10 @@ mod event_handling_tests {
         write_to_log_file(&log_path, "line3", false).unwrap();
 
         let content = std::fs::read_to_string(&log_path).unwrap();
-        assert_eq!(content, "line1\nline2\nline3\n", "consecutive emit_line() calls should not have gaps");
+        assert_eq!(
+            content, "line1\nline2\nline3\n",
+            "consecutive emit_line() calls should not have gaps"
+        );
     }
 
     /// emit() after emit_line() creates proper block separation
@@ -1752,14 +1761,13 @@ mod event_handling_tests {
         let log_path = temp_dir.path().join("test.log");
 
         // Simulate: tool executing (emit_line), tool output (emit_line), tool result (emit)
-        write_to_log_file(&log_path, "┌─ tool", false).unwrap();  // emit_line
+        write_to_log_file(&log_path, "┌─ tool", false).unwrap(); // emit_line
         write_to_log_file(&log_path, "  output", false).unwrap(); // emit_line
-        write_to_log_file(&log_path, "└─ tool", true).unwrap();   // emit (ends block)
+        write_to_log_file(&log_path, "└─ tool", true).unwrap(); // emit (ends block)
 
         let content = std::fs::read_to_string(&log_path).unwrap();
         assert_eq!(
-            content,
-            "┌─ tool\n  output\n└─ tool\n\n",
+            content, "┌─ tool\n  output\n└─ tool\n\n",
             "tool block should end with blank line for separation"
         );
     }
