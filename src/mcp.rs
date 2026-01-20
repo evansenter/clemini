@@ -97,15 +97,17 @@ fn format_mcp_request(method: &str, params: &Option<Value>) -> String {
 }
 
 /// Format complete MCP response log block (OUT line + optional body with spacing).
+/// Body is included if non-empty.
 fn format_mcp_response(
     method: &str,
     status: &colored::ColoredString,
     detail: &str,
-    body: Option<&str>,
+    body: &str,
 ) -> String {
     let mut output = format!("{} {} ({}){}", "OUT".cyan(), method.bold(), status, detail);
-    if let Some(b) = body {
-        output.push_str(&format!("\n\n{}", b.trim()));
+    let trimmed = body.trim();
+    if !trimmed.is_empty() {
+        output.push_str(&format!("\n\n{}", trimmed));
     }
     output
 }
@@ -231,7 +233,7 @@ async fn handle_post(
                 &request.method,
                 &format_status(&response),
                 "",
-                None,
+                "",
             ));
             Json(response)
         }
@@ -432,16 +434,11 @@ impl McpServer {
                         resp_body.push_str(&format!("\n{}", msg.red()));
                     }
                     if let Ok(resp_str) = serde_json::to_string(&response) {
-                        let body = if resp_body.is_empty() {
-                            None
-                        } else {
-                            Some(resp_body.as_str())
-                        };
                         crate::logging::log_event(&format_mcp_response(
                             &request_clone.method,
                             &format_status(&response),
                             &detail,
-                            body,
+                            &resp_body,
                         ));
                         let _ = tx_clone.send(format!("{}\n", resp_str));
                     }
@@ -460,7 +457,7 @@ impl McpServer {
                 &request.method,
                 &format_status(&response),
                 "",
-                None,
+                "",
             ));
             let _ = tx.send(format!("{}\n", resp_str));
         }

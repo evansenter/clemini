@@ -257,10 +257,15 @@ pub fn format_call(call: &OwnedFunctionCallInfo) -> String {
     format_tool_executing(&call.name, &call.args)
 }
 
+/// Compute token estimate for a function execution result (args + result).
+pub fn compute_result_tokens(result: &FunctionExecutionResult) -> u32 {
+    estimate_tokens(&result.args) + estimate_tokens(&result.result)
+}
+
 /// Pure: Format a function execution result for display.
 /// Takes the genai-rs type directly, computing tokens internally.
 pub fn format_result(result: &FunctionExecutionResult) -> String {
-    let tokens = estimate_tokens(&result.args) + estimate_tokens(&result.result);
+    let tokens = compute_result_tokens(result);
     let has_error = result.is_error();
     format_tool_result(&result.name, result.duration, tokens, has_error)
 }
@@ -426,6 +431,25 @@ mod tests {
                 },
                 events,
             )
+        }
+    }
+
+    /// Create a minimal InteractionResponse for testing.
+    fn test_response(id: &str) -> genai_rs::InteractionResponse {
+        genai_rs::InteractionResponse {
+            id: Some(id.to_string()),
+            model: None,
+            agent: None,
+            input: vec![],
+            outputs: vec![],
+            status: genai_rs::InteractionStatus::Completed,
+            usage: None,
+            tools: None,
+            grounding_metadata: None,
+            url_context_metadata: None,
+            previous_interaction_id: None,
+            created: None,
+            updated: None,
         }
     }
 
@@ -609,24 +633,8 @@ mod tests {
 
     #[test]
     fn test_dispatch_complete() {
-        use genai_rs::{InteractionResponse, InteractionStatus};
-
         let (mut handler, events) = RecordingHandler::new(true);
-        let response = InteractionResponse {
-            id: Some("test-id".to_string()),
-            model: None,
-            agent: None,
-            input: vec![],
-            outputs: vec![],
-            status: InteractionStatus::Completed,
-            usage: None,
-            tools: None,
-            grounding_metadata: None,
-            url_context_metadata: None,
-            previous_interaction_id: None,
-            created: None,
-            updated: None,
-        };
+        let response = test_response("test-id");
         handler.on_complete(Some("test-id"), &response);
 
         assert_eq!(events.borrow().len(), 1);
@@ -687,22 +695,7 @@ mod tests {
         );
 
         // Complete
-        use genai_rs::{InteractionResponse, InteractionStatus};
-        let response = InteractionResponse {
-            id: Some("test-id".to_string()),
-            model: None,
-            agent: None,
-            input: vec![],
-            outputs: vec![],
-            status: InteractionStatus::Completed,
-            usage: None,
-            tools: None,
-            grounding_metadata: None,
-            url_context_metadata: None,
-            previous_interaction_id: None,
-            created: None,
-            updated: None,
-        };
+        let response = test_response("test-id");
         handler.on_complete(Some("test-id"), &response);
 
         // Verify flow

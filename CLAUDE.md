@@ -63,6 +63,7 @@ run_interaction()                    UI Layer
 - `TextDelta(String)` - Streaming text chunk
 - `ToolExecuting(Vec<OwnedFunctionCallInfo>)` - Tools about to run
 - `ToolResult(FunctionExecutionResult)` - Tool completed (uses genai-rs type)
+- `ToolOutput(String)` - Tool output to display (emitted by tools via `ToolEmitter` trait)
 - `Complete { interaction_id, response }` - Interaction finished
 - `ContextWarning { used, limit, percentage }` - Context window >80%
 - `Cancelled` - User cancelled
@@ -161,7 +162,7 @@ These use `validate_response_semantically()` from `tests/common/mod.rs` - a seco
 | Tool error detail (`└─ error:...`) | `format_error_detail()` in `events.rs` |
 | Tool args format (`key=value`) | `format_tool_args()` in `events.rs` |
 | Context warnings | `format_context_warning()` in `events.rs` |
-| Streaming text (markdown) | `render_streaming_chunk()` + `flush_streaming_buffer()` in `events.rs` |
+| Streaming text (markdown) | `TextBuffer::push()` + `TextBuffer::flush()` in `events.rs` |
 
 All three EventHandler implementations (`TerminalEventHandler`, `TuiEventHandler`, `McpEventHandler`) use these shared functions, so changes apply everywhere automatically.
 
@@ -183,20 +184,24 @@ Test visual changes by running clemini in each mode and verifying the output loo
 
 **Agent isolation** - The agent (`agent.rs`) emits structured events via channel. No formatting, colors, or UI logic. This keeps the agent testable and UI implementations independent.
 
-**Unified implementations** - UI logic appearing in multiple modes (Terminal, TUI, MCP) belongs in shared functions, not duplicated per-handler. Examples: `format_tool_executing()`, `render_streaming_chunk()`.
+**Unified implementations** - UI logic appearing in multiple modes (Terminal, TUI, MCP) belongs in shared functions, not duplicated per-handler. Examples: `format_tool_executing()`, `format_result_block()`, `TextBuffer`.
 
 **Handlers near dependencies** - EventHandler implementations live where their protocol-specific types are:
 - `TerminalEventHandler` in `events.rs` (generic)
 - `TuiEventHandler` in `main.rs` (needs `AppEvent`)
 - `McpEventHandler` in `mcp.rs` (needs MCP notification channel)
 
-**Tool output via events** - Tools emit `AgentEvent::ToolOutput` for visual output, never call `log_event()` directly. This ensures correct ordering (all output flows through the event channel) and keeps tools decoupled from the UI layer. The standard `emit()` helper pattern:
+**Tool output via events** - Tools emit `AgentEvent::ToolOutput` for visual output, never call `log_event()` directly. This ensures correct ordering (all output flows through the event channel) and keeps tools decoupled from the UI layer. Tools implement the `ToolEmitter` trait (`src/tools/mod.rs`):
 ```rust
-fn emit(&self, output: &str) {
-    if let Some(tx) = &self.events_tx {
-        let _ = tx.try_send(AgentEvent::ToolOutput(output.to_string()));
-    } else {
-        crate::logging::log_event(output);
+pub trait ToolEmitter {
+    fn events_tx(&self) -> &Option<mpsc::Sender<AgentEvent>>;
+
+    fn emit(&self, output: &str) {
+        if let Some(tx) = self.events_tx() {
+            let _ = tx.try_send(AgentEvent::ToolOutput(output.to_string()));
+        } else {
+            crate::logging::log_event(output);
+        }
     }
 }
 ```

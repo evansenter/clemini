@@ -119,7 +119,7 @@ pub fn log_to_file(message: &str) {
     log_event_to_file(message, true);
 }
 
-fn log_event_to_file(message: &str, add_blank_line: bool) {
+fn log_event_to_file(message: &str, with_block_separator: bool) {
     // Skip logging during tests unless explicitly enabled
     if !logging::is_logging_enabled() {
         return;
@@ -136,18 +136,18 @@ fn log_event_to_file(message: &str, add_blank_line: bool) {
     let today = chrono::Local::now().format("%Y-%m-%d");
     let log_path = log_dir.join(format!("clemini.log.{}", today));
 
-    let _ = write_to_log_file(&log_path, message, add_blank_line);
+    let _ = write_to_log_file(&log_path, message, with_block_separator);
 
     // Also write to CLEMINI_LOG if set (backwards compat)
     if let Ok(path) = std::env::var("CLEMINI_LOG") {
-        let _ = write_to_log_file(PathBuf::from(path), message, add_blank_line);
+        let _ = write_to_log_file(PathBuf::from(path), message, with_block_separator);
     }
 }
 
 fn write_to_log_file(
     path: impl Into<PathBuf>,
     rendered: &str,
-    add_blank_line: bool,
+    with_block_separator: bool,
 ) -> std::io::Result<()> {
     let mut file = std::fs::OpenOptions::new()
         .create(true)
@@ -163,7 +163,7 @@ fn write_to_log_file(
         }
     }
     // Add blank line after for visual separation between blocks
-    if add_blank_line {
+    if with_block_separator {
         writeln!(file)?;
     }
     Ok(())
@@ -602,7 +602,7 @@ fn convert_agent_event_to_app_events(event: &AgentEvent) -> Vec<AppEvent> {
         AgentEvent::ToolResult(result) => vec![AppEvent::ToolCompleted {
             name: result.name.clone(),
             duration_ms: result.duration.as_millis() as u64,
-            tokens: events::estimate_tokens(&result.args) + events::estimate_tokens(&result.result),
+            tokens: events::compute_result_tokens(result),
             has_error: result.is_error(),
         }],
         AgentEvent::ContextWarning(warning) => {
@@ -1707,7 +1707,7 @@ mod event_handling_tests {
     // Output spacing contract tests
     // =========================================
 
-    /// write_to_log_file with add_blank_line=true adds trailing blank line
+    /// write_to_log_file with with_block_separator=true adds trailing blank line
     #[test]
     fn test_write_to_log_file_with_blank_line() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -1722,7 +1722,7 @@ mod event_handling_tests {
         );
     }
 
-    /// write_to_log_file with add_blank_line=false does NOT add trailing blank line
+    /// write_to_log_file with with_block_separator=false does NOT add trailing blank line
     #[test]
     fn test_write_to_log_file_without_blank_line() {
         let temp_dir = tempfile::tempdir().unwrap();

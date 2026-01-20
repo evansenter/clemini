@@ -6,25 +6,27 @@ This document defines the visual output standards for clemini across all output 
 
 ### OutputSink Trait
 
-All user-facing output flows through the `OutputSink` trait, which has three implementations:
+All user-facing output flows through the `OutputSink` trait (`src/logging.rs`), which has three implementations:
 
 | Sink | Mode | Behavior |
 |------|------|----------|
-| `TerminalSink` | Plain REPL (`--no-tui`) | Writes to stderr + log files, uses termimad for markdown |
-| `TuiSink` | TUI REPL (default) | Sends to TUI via channel + log files, plain text (no termimad) |
+| `TerminalSink` | Plain REPL (`--no-tui`) | Writes to stderr + log files |
+| `TuiSink` | TUI REPL (default) | Sends to TUI via channel + log files |
 | `FileSink` | MCP Server | Writes to log files only |
 
-The trait also includes `emit_streaming()` for real-time streaming output:
-- `TerminalSink`: Uses `print!()` to stdout
-- `TuiSink`: Sends `TuiMessage::Streaming` through channel
-- `FileSink`: No-op (no terminal to stream to)
+The trait has two methods for different spacing behavior:
+
+| Method | Purpose |
+|--------|---------|
+| `emit(msg)` | Complete block with trailing blank line (visual separation between blocks) |
+| `emit_line(msg)` | Line without trailing blank line (for multi-line tool output) |
 
 ### Logging Functions
 
 | Function | Purpose |
 |----------|---------|
-| `log_event(msg)` | Standard output through OutputSink (markdown-rendered) |
-| `log_event_raw(msg)` | Output without markdown rendering (for protocol messages) |
+| `log_event(msg)` | Log complete block via `OutputSink.emit()` - adds trailing blank line |
+| `log_event_line(msg)` | Log line via `OutputSink.emit_line()` - no trailing blank line |
 | `log_to_file(msg)` | Write to log file only, bypassing terminal |
 
 ### Log Files
@@ -44,7 +46,7 @@ All three UI modes (Terminal, TUI, MCP) implement the `EventHandler` trait in `e
 | `format_error_detail()` | `  └─ error: message` |
 | `format_tool_args()` | `key=value key2=value2` |
 | `format_context_warning()` | Context window warnings |
-| `render_streaming_chunk()` | Streaming text with markdown |
+| `TextBuffer::flush()` | Buffered streaming text with markdown rendering |
 
 See [CLAUDE.md](../CLAUDE.md) for the full architecture.
 
