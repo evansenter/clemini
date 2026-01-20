@@ -281,6 +281,17 @@ pub fn format_result_block(result: &FunctionExecutionResult) -> String {
     output
 }
 
+/// Format API retry message.
+pub fn format_retry(attempt: u32, max_attempts: u32, delay: Duration, error: &str) -> String {
+    format!(
+        "[{}: retrying in {}s (attempt {}/{})]",
+        error.bright_yellow(),
+        delay.as_secs(),
+        attempt,
+        max_attempts
+    )
+}
+
 /// Handler for agent events. UI modes implement this to process events.
 pub trait EventHandler {
     /// Handle streaming text (should append to current line, not create new line).
@@ -309,6 +320,9 @@ pub trait EventHandler {
     /// Handle tool output (emitted by tools for visual display).
     /// Default implementation is no-op; logging is handled by dispatch_event.
     fn on_tool_output(&mut self, _output: &str) {}
+
+    /// Handle API retry notification.
+    fn on_retry(&mut self, _attempt: u32, _max_attempts: u32, _delay: Duration, _error: &str) {}
 }
 
 /// Event handler for terminal output (plain REPL and non-interactive modes).
@@ -329,17 +343,23 @@ impl TerminalEventHandler {
 impl EventHandler for TerminalEventHandler {
     fn on_text_delta(&mut self, text: &str) {
         self.text_buffer.push(text);
+        // In streaming mode, print incrementally
+        if self.stream_enabled {
+            print!("{}", text);
+            let _ = io::stdout().flush();
+        }
     }
 
     fn on_tool_executing(&mut self, _call: &OwnedFunctionCallInfo) {
-        // Flush buffer before tool output (normalizes to \n\n for spacing)
-        // Logging is handled by dispatch_event() after this method returns
+        // Flush buffer before tool output
+        // Streaming mode: text already printed, just log to file
+        // Non-streaming mode: output via log_event_line (OutputSink)
         if let Some(rendered) = self.text_buffer.flush() {
             if self.stream_enabled {
-                print!("{}", rendered);
-                let _ = io::stdout().flush();
+                write_to_streaming_log(&rendered);
+            } else {
+                crate::logging::log_event_line(&rendered);
             }
-            write_to_streaming_log(&rendered);
         }
     }
 
@@ -356,13 +376,24 @@ impl EventHandler for TerminalEventHandler {
         _interaction_id: Option<&str>,
         _response: &genai_rs::InteractionResponse,
     ) {
-        // Flush any remaining buffered text (normalizes to \n\n)
+        // Flush any remaining buffered text
         if let Some(rendered) = self.text_buffer.flush() {
             if self.stream_enabled {
-                print!("{}", rendered);
-                let _ = io::stdout().flush();
+                write_to_streaming_log(&rendered);
+            } else {
+                crate::logging::log_event_line(&rendered);
             }
-            write_to_streaming_log(&rendered);
+        }
+    }
+
+    fn on_retry(&mut self, _attempt: u32, _max_attempts: u32, _delay: Duration, _error: &str) {
+        // Flush buffer before retry message
+        if let Some(rendered) = self.text_buffer.flush() {
+            if self.stream_enabled {
+                write_to_streaming_log(&rendered);
+            } else {
+                crate::logging::log_event_line(&rendered);
+            }
         }
     }
 }
@@ -405,6 +436,15 @@ pub fn dispatch_event<H: EventHandler>(handler: &mut H, event: &crate::agent::Ag
             handler.on_tool_output(output);
             // Tool output lines don't get trailing blank line (they're part of a block)
             crate::logging::log_event_line(output);
+        }
+        AgentEvent::Retry {
+            attempt,
+            max_attempts,
+            delay,
+            error,
+        } => {
+            handler.on_retry(*attempt, *max_attempts, *delay, error);
+            crate::logging::log_event(&format_retry(*attempt, *max_attempts, *delay, error));
         }
     }
 }

@@ -23,7 +23,7 @@ fn create_tool_service_with_events(
 ) -> Arc<CleminiToolService> {
     let service = Arc::new(CleminiToolService::new(
         temp_dir.path().to_path_buf(),
-        30,
+        120,
         false,
         vec![temp_dir.path().to_path_buf()],
         "dummy-key".to_string(),
@@ -165,7 +165,7 @@ async fn test_tool_without_events_tx_falls_back() {
     // Create tool service WITHOUT setting events_tx
     let tool_service = Arc::new(CleminiToolService::new(
         temp_dir.path().to_path_buf(),
-        30,
+        120,
         false,
         vec![temp_dir.path().to_path_buf()],
         "dummy-key".to_string(),

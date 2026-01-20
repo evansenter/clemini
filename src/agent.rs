@@ -7,7 +7,7 @@
 //! - Future streaming-first architecture (#59)
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use futures_util::StreamExt;
@@ -15,11 +15,24 @@ use genai_rs::{
     CallableFunction, Client, Content, FunctionExecutionResult, InteractionResponse,
     OwnedFunctionCallInfo, StreamChunk, ToolService,
 };
+use rand::Rng;
 use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::tools::CleminiToolService;
+
+async fn sleep_with_backoff(attempt: u32, base: Duration) {
+    let factor = 2u32.pow(attempt - 1);
+    let delay = base * factor;
+    // Add jitter (up to 20%)
+    let jitter = {
+        let mut rng = rand::thread_rng();
+        let jitter_factor: f64 = rng.gen_range(0.0..0.2);
+        delay.as_millis() as f64 * jitter_factor
+    };
+    tokio::time::sleep(delay + Duration::from_millis(jitter as u64)).await;
+}
 
 /// Context window limit for Gemini models (1M tokens).
 const CONTEXT_WINDOW_LIMIT: u32 = 1_000_000;
@@ -84,6 +97,36 @@ pub enum AgentEvent {
     /// Tool output to display (emitted by tools, not the agent).
     /// Tools emit this for visual output instead of calling log_event() directly.
     ToolOutput(String),
+
+    /// API call retrying due to transient failure.
+    Retry {
+        /// Current retry attempt number (1-based).
+        attempt: u32,
+        /// Maximum number of attempts.
+        max_attempts: u32,
+        /// Delay before next attempt.
+        delay: std::time::Duration,
+        /// Error message that triggered the retry.
+        error: String,
+    },
+}
+
+/// Configuration for API retries.
+#[derive(Debug, Clone, Copy)]
+pub struct RetryConfig {
+    /// Maximum number of retry attempts.
+    pub max_retries: u32,
+    /// Base delay for exponential backoff.
+    pub retry_delay_base: std::time::Duration,
+}
+
+impl Default for RetryConfig {
+    fn default() -> Self {
+        Self {
+            max_retries: 3,
+            retry_delay_base: std::time::Duration::from_secs(1),
+        }
+    }
 }
 
 /// Result of an interaction.
@@ -207,7 +250,7 @@ async fn process_interaction_stream<S>(
     events_tx: &mpsc::Sender<AgentEvent>,
     cancellation_token: &CancellationToken,
     full_response: &mut String,
-) -> Result<StreamProcessingResult>
+) -> std::result::Result<StreamProcessingResult, genai_rs::GenaiError>
 where
     S: futures_util::Stream<Item = Result<genai_rs::StreamEvent, genai_rs::GenaiError>> + Unpin,
 {
@@ -241,7 +284,7 @@ where
                 _ => {}
             },
             Err(e) => {
-                return Err(anyhow::anyhow!(e.to_string()));
+                return Err(e);
             }
         }
     }
@@ -275,6 +318,7 @@ pub async fn run_interaction(
     system_prompt: &str,
     events_tx: mpsc::Sender<AgentEvent>,
     cancellation_token: CancellationToken,
+    retry_config: RetryConfig,
 ) -> Result<InteractionResult> {
     let functions: Vec<_> = tool_service
         .tools()
@@ -282,33 +326,69 @@ pub async fn run_interaction(
         .map(|t: &Arc<dyn CallableFunction>| t.declaration())
         .collect();
 
-    // Build the interaction - system instruction must be sent on every turn
-    // (it's NOT inherited via previousInteractionId per genai-rs docs)
-    let mut interaction = client
-        .interaction()
-        .with_model(model)
-        .add_functions(functions.clone())
-        .with_system_instruction(system_prompt)
-        .with_content(vec![Content::text(input)]);
-
-    if let Some(prev_id) = previous_interaction_id {
-        interaction = interaction.with_previous_interaction(prev_id);
-    }
-
-    let mut stream = Box::pin(interaction.create_stream());
-
     let mut last_id = previous_interaction_id.map(String::from);
     let mut current_context_size: u32 = 0;
     let mut total_tokens: u32 = 0;
     let mut tool_calls: Vec<String> = Vec::new();
     let mut full_response = String::new();
     let mut last_response: Option<InteractionResponse> = None;
+    let mut next_turn_content: Vec<Content> = vec![Content::text(input)];
 
     const MAX_ITERATIONS: usize = 100;
     for _ in 0..MAX_ITERATIONS {
-        let stream_result =
-            process_interaction_stream(stream, &events_tx, &cancellation_token, &mut full_response)
-                .await?;
+        let mut attempt = 0;
+        let stream_result = loop {
+            let mut interaction = client
+                .interaction()
+                .with_model(model)
+                .add_functions(functions.clone())
+                .with_system_instruction(system_prompt);
+
+            if let Some(prev_id) = &last_id {
+                interaction = interaction.with_previous_interaction(prev_id);
+            }
+
+            interaction = interaction.with_content(next_turn_content.clone());
+
+            let stream = Box::pin(interaction.create_stream());
+            match process_interaction_stream(
+                stream,
+                &events_tx,
+                &cancellation_token,
+                &mut full_response,
+            )
+            .await
+            {
+                Ok(res) => break res,
+                Err(e) if e.is_retryable() && attempt < retry_config.max_retries => {
+                    attempt += 1;
+
+                    let retry_after = e.retry_after();
+                    let delay = retry_after.unwrap_or_else(|| {
+                        let factor = 2u32.pow(attempt - 1);
+                        retry_config.retry_delay_base * factor
+                    });
+
+                    let _ = events_tx.try_send(AgentEvent::Retry {
+                        attempt,
+                        max_attempts: retry_config.max_retries,
+                        delay,
+                        error: e.to_string(),
+                    });
+
+                    if let Some(delay) = retry_after {
+                        tokio::time::sleep(delay).await;
+                    } else {
+                        sleep_with_backoff(attempt, retry_config.retry_delay_base).await;
+                    }
+
+                    // If we had some response, clear it for the retry to avoid duplication
+                    // (Note: TextDelta events were already sent, so UI might still show them)
+                    full_response.clear();
+                }
+                Err(e) => return Err(anyhow::anyhow!(e)),
+            }
+        };
 
         if stream_result.cancelled {
             return Ok(InteractionResult {
@@ -381,18 +461,7 @@ pub async fn run_interaction(
             });
         }
 
-        let results = tool_result.results;
-
-        // Create new stream for the next turn
-        stream = Box::pin(
-            client
-                .interaction()
-                .with_model(model)
-                .with_previous_interaction(last_id.as_ref().unwrap())
-                .with_system_instruction(system_prompt)
-                .with_content(results)
-                .create_stream(),
-        );
+        next_turn_content = tool_result.results;
     }
 
     // Check context window and send warning if needed
@@ -689,7 +758,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let tool_service = Arc::new(CleminiToolService::new(
             temp.path().to_path_buf(),
-            30,
+            120,
             false,
             vec![temp.path().to_path_buf()],
             "fake-key".to_string(),
@@ -737,7 +806,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let tool_service = Arc::new(CleminiToolService::new(
             temp.path().to_path_buf(),
-            30,
+            120,
             false,
             vec![temp.path().to_path_buf()],
             "fake-key".to_string(),
@@ -767,7 +836,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let tool_service = Arc::new(CleminiToolService::new(
             temp.path().to_path_buf(),
-            30,
+            120,
             false,
             vec![temp.path().to_path_buf()],
             "fake-key".to_string(),
@@ -819,7 +888,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let tool_service = Arc::new(CleminiToolService::new(
             temp.path().to_path_buf(),
-            30,
+            120,
             false,
             vec![temp.path().to_path_buf()],
             "fake-key".to_string(),

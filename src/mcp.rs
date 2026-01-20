@@ -20,7 +20,7 @@ use tower_http::cors::CorsLayer;
 use tracing::instrument;
 // Note: info! macro goes to JSON logs only. For human-readable logs, use crate::logging::log_event()
 
-use crate::agent::{AgentEvent, run_interaction};
+use crate::agent::{AgentEvent, RetryConfig, run_interaction};
 use crate::events::{EventHandler, TextBuffer, write_to_streaming_log};
 use crate::tools::CleminiToolService;
 
@@ -48,6 +48,7 @@ pub struct McpServer {
     tool_service: Arc<CleminiToolService>,
     model: String,
     system_prompt: String,
+    retry_config: RetryConfig,
     notification_tx: broadcast::Sender<String>,
 }
 
@@ -205,6 +206,25 @@ impl EventHandler for McpEventHandler {
             write_to_streaming_log(&rendered);
         }
     }
+
+    fn on_retry(&mut self, attempt: u32, max_attempts: u32, delay: std::time::Duration, error: &str) {
+        // Flush buffer before retry
+        if let Some(rendered) = self.text_buffer.flush() {
+            write_to_streaming_log(&rendered);
+        }
+        // Send MCP notification
+        self.send_notification(json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/progress",
+            "params": {
+                "status": "retrying",
+                "attempt": attempt,
+                "max_attempts": max_attempts,
+                "delay_ms": delay.as_millis() as u64,
+                "error": error
+            }
+        }));
+    }
 }
 
 #[instrument(skip(server, request))]
@@ -266,6 +286,7 @@ impl McpServer {
         tool_service: Arc<CleminiToolService>,
         model: String,
         system_prompt: String,
+        retry_config: RetryConfig,
     ) -> Self {
         let (notification_tx, _) = broadcast::channel(100);
         Self {
@@ -273,6 +294,7 @@ impl McpServer {
             tool_service,
             model,
             system_prompt,
+            retry_config,
             notification_tx,
         }
     }
@@ -662,6 +684,7 @@ impl McpServer {
             &self.system_prompt,
             events_tx,
             cancellation_token,
+            self.retry_config,
         )
         .await?;
 
@@ -840,7 +863,7 @@ mod tests {
         let cwd = std::env::current_dir().unwrap();
         let tool_service = Arc::new(CleminiToolService::new(
             cwd.clone(),
-            30,
+            120,
             true,
             vec![cwd],
             "dummy-key".to_string(),
@@ -851,6 +874,7 @@ mod tests {
             tool_service,
             "gemini-1.5-flash".to_string(),
             "system prompt".to_string(),
+            RetryConfig::default(),
         )
     }
 
