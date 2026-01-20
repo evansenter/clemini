@@ -377,7 +377,7 @@ pub async fn run_interaction(
 
                     let _ = events_tx.try_send(AgentEvent::Retry {
                         attempt,
-                        max_attempts: retry_config.max_extra_retries,
+                        max_attempts: retry_config.max_extra_retries + 1, // Total attempts = initial + retries
                         delay,
                         error: e.to_string(),
                     });
