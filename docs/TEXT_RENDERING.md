@@ -6,12 +6,11 @@ This document defines the visual output standards for clemini across all output 
 
 ### OutputSink Trait
 
-All user-facing output flows through the `OutputSink` trait (`src/logging.rs`), which has three implementations:
+All user-facing output flows through the `OutputSink` trait (`src/logging.rs`), which has two implementations:
 
 | Sink | Mode | Behavior |
 |------|------|----------|
-| `TerminalSink` | Plain REPL (`--no-tui`) | Writes to stderr + log files |
-| `TuiSink` | TUI REPL (default) | Sends to TUI via channel + log files |
+| `TerminalSink` | REPL | Writes to stderr + log files |
 | `FileSink` | MCP Server | Writes to log files only |
 
 The trait has two methods for different spacing behavior:
@@ -37,7 +36,7 @@ The trait has two methods for different spacing behavior:
 
 ### EventHandler Trait
 
-All three UI modes (Terminal, TUI, MCP) implement the `EventHandler` trait in `events.rs`. Handlers use shared formatting functions to ensure consistent output:
+Both UI modes (Terminal, MCP) implement the `EventHandler` trait in `events.rs`. Handlers use shared formatting functions to ensure consistent output:
 
 | Function | Output |
 |----------|--------|

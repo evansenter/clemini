@@ -2,7 +2,7 @@
 //!
 //! This module contains the core agent logic for running interactions with Gemini.
 //! It sends events through a channel for the UI layer to consume, enabling:
-//! - Decoupled UI implementations (TUI, terminal, MCP)
+//! - Decoupled UI implementations (terminal, MCP)
 //! - Testable agent logic
 //! - Future streaming-first architecture (#59)
 
@@ -67,12 +67,11 @@ impl ContextWarning {
 /// Events emitted by the agent during interaction.
 ///
 /// UI layers receive these events and handle them appropriately:
-/// - TUI: Update app state and render
 /// - Terminal: Print to stdout/stderr
 /// - MCP: Ignore real-time events, use final result
 ///
-/// Note: Some variants/fields are intentionally unused pending full event handling
-/// implementation in UI layers (issue #59).
+/// Note: `#[allow(dead_code)]` silences warnings for fields that are populated
+/// but may not be read in all UI modes (e.g., `Complete.response` is only used by MCP).
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub enum AgentEvent {
@@ -137,6 +136,9 @@ impl Default for RetryConfig {
 }
 
 /// Result of an interaction.
+///
+/// Note: `#[allow(dead_code)]` silences warnings for fields that are set but not
+/// always read (`context_size`, `total_tokens` are included for potential future use).
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct InteractionResult {
