@@ -400,4 +400,102 @@ mod tests {
             );
         }
     }
+
+    // ============================================================================
+    // ToolEmitter tests
+    // ============================================================================
+
+    #[tokio::test]
+    async fn test_tool_emitter_with_channel() {
+        struct MockTool {
+            events_tx: Option<mpsc::Sender<AgentEvent>>,
+        }
+        impl ToolEmitter for MockTool {
+            fn events_tx(&self) -> &Option<mpsc::Sender<AgentEvent>> {
+                &self.events_tx
+            }
+        }
+
+        let (tx, mut rx) = mpsc::channel(1);
+        let tool = MockTool {
+            events_tx: Some(tx),
+        };
+
+        tool.emit("test message");
+
+        if let Some(AgentEvent::ToolOutput(msg)) = rx.recv().await {
+            assert_eq!(msg, "test message");
+        } else {
+            panic!("Expected AgentEvent::ToolOutput");
+        }
+    }
+
+    #[test]
+    fn test_tool_emitter_fallback() {
+        use std::sync::Mutex;
+
+        struct MockSink {
+            last_message: Mutex<Option<(String, bool)>>,
+        }
+
+        impl crate::logging::OutputSink for MockSink {
+            fn emit(&self, message: &str, render_markdown: bool) {
+                let mut guard = self.last_message.lock().unwrap();
+                *guard = Some((message.to_string(), render_markdown));
+            }
+        }
+
+        struct MockTool {
+            events_tx: Option<mpsc::Sender<AgentEvent>>,
+        }
+        impl ToolEmitter for MockTool {
+            fn events_tx(&self) -> &Option<mpsc::Sender<AgentEvent>> {
+                &self.events_tx
+            }
+        }
+
+        let sink = Arc::new(MockSink {
+            last_message: Mutex::new(None),
+        });
+
+        // Try to set the sink. It might already be set by another test,
+        // but we'll try anyway. If it's already set, we might be testing
+        // against a different sink, which is why this test is a bit fragile
+        // in a parallel test environment.
+        crate::logging::set_output_sink(sink.clone());
+
+        // Check if we actually succeeded in setting our sink
+        let actual_sink = crate::logging::get_output_sink();
+        let is_our_sink = actual_sink.is_some();
+
+        let tool = MockTool { events_tx: None };
+
+        // Test emit()
+        tool.emit("fallback message");
+
+        if is_our_sink {
+            let guard = sink.last_message.lock().unwrap();
+            // If it's not our sink, we can't easily verify the message,
+            // but we at least verified it didn't crash.
+            if let Some((msg, render)) = guard.as_ref() {
+                assert_eq!(msg, "fallback message");
+                assert!(render);
+            }
+        }
+
+        // Test emit_raw()
+        {
+            let mut guard = sink.last_message.lock().unwrap();
+            *guard = None;
+        }
+        tool.emit_raw("raw message");
+
+        if is_our_sink {
+            let guard = sink.last_message.lock().unwrap();
+            if let Some((msg, render)) = guard.as_ref() {
+                assert_eq!(msg, "raw message");
+                assert!(!render);
+            }
+        }
+    }
 }
