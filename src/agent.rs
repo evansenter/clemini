@@ -41,9 +41,14 @@ async fn sleep_with_jitter(delay: Duration) {
 }
 
 /// Context window limit for Gemini models (1M tokens).
+/// This is a model constraint, not user-configurable.
 const CONTEXT_WINDOW_LIMIT: u32 = 1_000_000;
 
-/// Context window usage warning (>80% or >95% usage).
+/// Threshold for context window usage warnings (80%).
+/// When usage exceeds this ratio, a ContextWarning event is emitted.
+const CONTEXT_WARNING_THRESHOLD: f64 = 0.80;
+
+/// Context window usage warning (>80% usage).
 #[derive(Debug, Clone, Copy)]
 pub struct ContextWarning {
     /// Tokens used in the context window.
@@ -159,7 +164,7 @@ struct ToolExecutionResult {
 /// Check context window usage and send warning event if needed.
 fn check_context_window(total_tokens: u32, events_tx: &mpsc::Sender<AgentEvent>) {
     let ratio = f64::from(total_tokens) / f64::from(CONTEXT_WINDOW_LIMIT);
-    if ratio > 0.80 {
+    if ratio > CONTEXT_WARNING_THRESHOLD {
         let _ = events_tx.try_send(AgentEvent::ContextWarning(ContextWarning::new(
             total_tokens,
             CONTEXT_WINDOW_LIMIT,
