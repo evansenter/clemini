@@ -365,10 +365,10 @@ impl CallableFunction for BashTool {
                         match line {
                             Ok(Some(line)) => {
                                 if logged_stdout_lines < MAX_LOG_LINES {
-                                    self.emit_raw(&format!("  {}", line.dimmed()));
+                                    self.emit(&format!("  {}", line.dimmed()));
                                     logged_stdout_lines += 1;
                                 } else if logged_stdout_lines == MAX_LOG_LINES {
-                                    self.emit_raw(&format!("  {}", "[...more stdout...]".dimmed()));
+                                    self.emit(&format!("  {}", "[...more stdout...]".dimmed()));
                                     logged_stdout_lines += 1;
                                 }
                                 captured_stdout.push_str(&line);
@@ -383,10 +383,10 @@ impl CallableFunction for BashTool {
                         match line {
                             Ok(Some(line)) => {
                                 if logged_stderr_lines < MAX_LOG_LINES {
-                                    self.emit_raw(&format!("  {}", line.dimmed()));
+                                    self.emit(&format!("  {}", line.dimmed()));
                                     logged_stderr_lines += 1;
                                 } else if logged_stderr_lines == MAX_LOG_LINES {
-                                    self.emit_raw(&format!("  {}", "[...more stderr...]".dimmed()));
+                                    self.emit(&format!("  {}", "[...more stderr...]".dimmed()));
                                     logged_stderr_lines += 1;
                                 }
                                 captured_stderr.push_str(&line);

@@ -305,7 +305,7 @@ impl CallableFunction for EditTool {
                 let diff_output =
                     crate::diff::format_diff(old_string, new_string, 2, Some(file_path));
                 if !diff_output.is_empty() {
-                    self.emit_raw(&diff_output);
+                    self.emit(&diff_output);
                 }
 
                 Ok(json!({
