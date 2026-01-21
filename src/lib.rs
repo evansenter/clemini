@@ -10,6 +10,7 @@ pub mod diff;
 pub mod events;
 pub mod format;
 pub mod logging;
+pub mod plan;
 pub mod tools;
 
 // Re-export commonly used types
