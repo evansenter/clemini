@@ -39,10 +39,14 @@ pub struct AcpTask {
     /// Accumulated output from the subagent.
     pub output_buffer: Arc<Mutex<String>>,
 
+    /// Error message if the task failed.
+    pub error: Arc<Mutex<Option<String>>>,
+
     /// The child process handle.
     pub child: Option<Child>,
 
     /// Channel to signal cancellation.
+    /// TODO: Cancellation not yet implemented - will be wired up in future PR.
     #[allow(dead_code)]
     pub cancel_tx: Option<mpsc::Sender<()>>,
 }
@@ -52,6 +56,7 @@ impl AcpTask {
         Self {
             completed: Arc::new(AtomicBool::new(false)),
             output_buffer: Arc::new(Mutex::new(String::new())),
+            error: Arc::new(Mutex::new(None)),
             child: Some(child),
             cancel_tx: Some(cancel_tx),
         }
@@ -151,7 +156,10 @@ impl acp::Client for SubagentClient {
                     buffer.push_str(&format!("[status: {:?}]\n", status));
                 }
             }
-            _ => {}
+            other => {
+                // Log unknown update types at debug level for diagnostics
+                tracing::debug!("Ignoring unhandled ACP session update: {:?}", other);
+            }
         }
         Ok(())
     }
@@ -179,12 +187,12 @@ pub async fn spawn_subagent(prompt: &str, cwd: &Path, background: bool) -> Resul
         cwd.to_string_lossy().to_string(),
     ]);
 
-    // Spawn the subprocess
+    // Spawn the subprocess with stderr captured for debugging
     let mut child = Command::new(&cmd)
         .args(&cmd_args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .kill_on_drop(true)
         .spawn()?;
 
@@ -196,22 +204,40 @@ pub async fn spawn_subagent(prompt: &str, cwd: &Path, background: bool) -> Resul
         .stdout
         .take()
         .ok_or_else(|| anyhow::anyhow!("No stdout"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("No stderr"))?;
 
     let output_buffer = Arc::new(Mutex::new(String::new()));
+    let error_buffer = Arc::new(Mutex::new(None::<String>));
     let completed = Arc::new(AtomicBool::new(false));
+
+    // Spawn task to capture stderr
+    let error_buffer_clone = error_buffer.clone();
+    tokio::task::spawn(async move {
+        use tokio::io::AsyncReadExt;
+        let mut stderr = stderr;
+        let mut buf = String::new();
+        if stderr.read_to_string(&mut buf).await.is_ok() && !buf.is_empty() {
+            *error_buffer_clone.lock().unwrap() = Some(buf);
+        }
+    });
 
     let client = SubagentClient {
         output_buffer: output_buffer.clone(),
         completed: completed.clone(),
     };
 
-    let (cancel_tx, mut cancel_rx) = mpsc::channel::<()>(1);
+    // TODO: Wire up cancellation when cancel support is implemented in run_acp_session
+    let (cancel_tx, _cancel_rx) = mpsc::channel::<()>(1);
 
     if background {
         // Background mode: register task and return immediately
-        let task = AcpTask::new(child, cancel_tx);
-        let task_output = task.output_buffer.clone();
+        let mut task = AcpTask::new(child, cancel_tx);
+        task.error = error_buffer.clone();
         let task_completed = task.completed.clone();
+        let task_error = task.error.clone();
 
         ACP_TASKS.lock().unwrap().insert(task_id.clone(), task);
 
@@ -226,15 +252,14 @@ pub async fn spawn_subagent(prompt: &str, cwd: &Path, background: bool) -> Resul
                 stdout.compat(),
                 &prompt,
                 &cwd_owned,
-                &mut cancel_rx,
             )
             .await;
 
             task_completed.store(true, Ordering::SeqCst);
 
             if let Err(e) = result {
-                let mut buffer = task_output.lock().unwrap();
-                buffer.push_str(&format!("\n[error: {}]", e));
+                // Store error in dedicated field
+                *task_error.lock().unwrap() = Some(e.to_string());
             }
 
             // Clean up child from registry
@@ -246,26 +271,28 @@ pub async fn spawn_subagent(prompt: &str, cwd: &Path, background: bool) -> Resul
         Ok(SubagentResult::Background { task_id })
     } else {
         // Foreground mode: wait for completion
-        let result = run_acp_session(
-            client,
-            stdin.compat_write(),
-            stdout.compat(),
-            prompt,
-            cwd,
-            &mut cancel_rx,
-        )
-        .await;
+        let result =
+            run_acp_session(client, stdin.compat_write(), stdout.compat(), prompt, cwd).await;
 
         completed.store(true, Ordering::SeqCst);
 
         let output = output_buffer.lock().unwrap().clone();
+        let stderr_output = error_buffer.lock().unwrap().clone();
 
         match result {
             Ok(_) => Ok(SubagentResult::Completed { output }),
-            Err(e) => Ok(SubagentResult::Failed {
-                output,
-                error: e.to_string(),
-            }),
+            Err(e) => {
+                // Combine error with stderr if available
+                let error_msg = if let Some(stderr) = stderr_output {
+                    format!("{}\nstderr: {}", e, stderr)
+                } else {
+                    e.to_string()
+                };
+                Ok(SubagentResult::Failed {
+                    output,
+                    error: error_msg,
+                })
+            }
         }
     }
 }
@@ -281,13 +308,14 @@ pub enum SubagentResult {
 }
 
 /// Run the ACP session with the subagent.
+///
+/// TODO: Add cancellation support by selecting on a cancel channel.
 async fn run_acp_session<W, R>(
     client: SubagentClient,
     outgoing: W,
     incoming: R,
     prompt: &str,
     cwd: &Path,
-    _cancel_rx: &mut mpsc::Receiver<()>,
 ) -> Result<()>
 where
     W: futures_util::AsyncWrite + Unpin + 'static,
@@ -340,6 +368,9 @@ fn get_clemini_command() -> (String, Vec<String>) {
         return (exe.to_string_lossy().to_string(), vec![]);
     }
     // Fallback to cargo run - only useful during development
+    tracing::warn!(
+        "Could not find clemini executable, falling back to 'cargo run' (dev mode only)"
+    );
     (
         "cargo".to_string(),
         vec!["run".to_string(), "--quiet".to_string(), "--".to_string()],
@@ -357,6 +388,7 @@ mod tests {
         assert_eq!(id2, id1 + 1);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_acp_task_initial_state() {
         let (tx, _rx) = mpsc::channel(1);
@@ -370,6 +402,7 @@ mod tests {
 
         assert!(!task.completed.load(Ordering::SeqCst));
         assert!(task.output_buffer.lock().unwrap().is_empty());
+        assert!(task.error.lock().unwrap().is_none());
         assert!(task.child.is_some());
     }
 
