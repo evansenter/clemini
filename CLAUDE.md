@@ -242,14 +242,3 @@ Uses `try_send` (non-blocking) to avoid stalling tools on slow consumers. The fa
 - Error messages
 
 This separation allows `clemini -p "prompt" > output.txt` to capture just the conversation.
-
-### REPL Builtin Commands
-
-| Command | Alias | Description |
-|---------|-------|-------------|
-| `/help` | `/h` | Show help text |
-| `/quit` | `/q`, `/exit` | Exit the REPL |
-| `/clear` | `/c` | Clear conversation history (start fresh) |
-| `/model` | `/m` | Show current model |
-| `/pwd` | `/cwd` | Show current working directory |
-| `!<cmd>` | - | Run shell command (e.g., `!ls -la`) |
