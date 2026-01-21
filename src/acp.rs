@@ -27,9 +27,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::mpsc;
 use tokio::task::LocalSet;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
+use tokio_util::sync::CancellationToken;
 use tracing::instrument;
 
-use crate::agent::RetryConfig;
+use crate::agent::{AgentEvent, RetryConfig, run_interaction};
 use crate::tools::CleminiToolService;
 
 /// ACP server for clemini.
@@ -159,6 +160,7 @@ impl CleminiAgent {
     }
 
     /// Send a session update notification.
+    #[allow(dead_code)]
     fn send_update(&self, session_id: &str, update: acp::SessionUpdate) {
         let notification = acp::SessionNotification::new(session_id.to_string(), update);
         if self.session_update_tx.send(notification).is_err() {
@@ -167,6 +169,75 @@ impl CleminiAgent {
                 session_id
             ));
         }
+    }
+}
+
+/// Convert an AgentEvent to an ACP SessionUpdate.
+///
+/// Returns None for events that don't map to ACP updates.
+fn agent_event_to_session_update(event: &AgentEvent) -> Option<acp::SessionUpdate> {
+    match event {
+        AgentEvent::TextDelta(text) => Some(acp::SessionUpdate::AgentMessageChunk(
+            acp::ContentChunk::new(acp::ContentBlock::Text(acp::TextContent::new(text.clone()))),
+        )),
+        AgentEvent::ToolExecuting(calls) => {
+            // Send first tool call (ACP sends one at a time)
+            calls.first().map(|call| {
+                acp::SessionUpdate::ToolCall(
+                    acp::ToolCall::new(call.id.clone().unwrap_or_default(), call.name.clone())
+                        .status(acp::ToolCallStatus::InProgress)
+                        .raw_input(Some(call.args.clone())),
+                )
+            })
+        }
+        AgentEvent::ToolResult(result) => Some(acp::SessionUpdate::ToolCallUpdate(
+            acp::ToolCallUpdate::new(
+                result.call_id.clone(),
+                acp::ToolCallUpdateFields::default()
+                    .status(if result.is_error() {
+                        acp::ToolCallStatus::Failed
+                    } else {
+                        acp::ToolCallStatus::Completed
+                    })
+                    .raw_output(Some(result.result.clone())),
+            ),
+        )),
+        AgentEvent::ToolOutput(output) => {
+            // Tool output can be sent as agent thought or message chunk
+            Some(acp::SessionUpdate::AgentThoughtChunk(
+                acp::ContentChunk::new(acp::ContentBlock::Text(acp::TextContent::new(
+                    output.clone(),
+                ))),
+            ))
+        }
+        AgentEvent::ContextWarning(warning) => {
+            // Send as thought chunk
+            Some(acp::SessionUpdate::AgentThoughtChunk(
+                acp::ContentChunk::new(acp::ContentBlock::Text(acp::TextContent::new(format!(
+                    "Context window at {:.0}%",
+                    warning.percentage()
+                )))),
+            ))
+        }
+        AgentEvent::Complete { .. } => {
+            // Completion is handled by the prompt method return
+            None
+        }
+        AgentEvent::Cancelled => {
+            // Cancellation is handled separately
+            None
+        }
+        AgentEvent::Retry {
+            attempt,
+            max_attempts,
+            error,
+            ..
+        } => Some(acp::SessionUpdate::AgentThoughtChunk(
+            acp::ContentChunk::new(acp::ContentBlock::Text(acp::TextContent::new(format!(
+                "Retry {}/{}: {}",
+                attempt, max_attempts, error
+            )))),
+        )),
     }
 }
 
@@ -253,24 +324,53 @@ impl acp::Agent for CleminiAgent {
             ));
         }
 
-        // Send initial status update
-        self.send_update(
-            &session_id,
-            acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(acp::ContentBlock::Text(
-                acp::TextContent::new("Processing...".to_string()),
-            ))),
-        );
+        // Create channel for agent events
+        let (events_tx, mut events_rx) = mpsc::channel::<AgentEvent>(100);
+        let cancellation_token = CancellationToken::new();
 
-        // TODO: Implement actual interaction with Gemini agent
-        // For now, return a simple response
-        self.send_update(
-            &session_id,
-            acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(acp::ContentBlock::Text(
-                acp::TextContent::new(format!("Received prompt: {}", prompt_text)),
-            ))),
-        );
+        // Spawn task to forward agent events as ACP session updates
+        let session_id_clone = session_id.clone();
+        let update_tx = self.session_update_tx.clone();
+        tokio::task::spawn_local(async move {
+            while let Some(event) = events_rx.recv().await {
+                let update = agent_event_to_session_update(&event);
+                if let Some(update) = update {
+                    let notification =
+                        acp::SessionNotification::new(session_id_clone.clone(), update);
+                    if update_tx.send(notification).is_err() {
+                        break;
+                    }
+                }
+            }
+        });
 
-        Ok(acp::PromptResponse::new(acp::StopReason::EndTurn))
+        // Set up events channel for tool service
+        self.tool_service.set_events_tx(Some(events_tx.clone()));
+
+        // Run the interaction
+        let result = run_interaction(
+            &self.client,
+            &self.tool_service,
+            &prompt_text,
+            None, // TODO: support previous_interaction_id for multi-turn
+            &self.model,
+            &self.system_prompt,
+            events_tx,
+            cancellation_token,
+            self.retry_config,
+        )
+        .await;
+
+        match result {
+            Ok(_) => Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)),
+            Err(e) => {
+                crate::logging::log_event(&format!("ACP: prompt error: {}", e));
+                Err(acp::Error::new(
+                    acp::ErrorCode::InternalError.into(),
+                    e.to_string(),
+                ))
+            }
+        }
     }
 
     async fn cancel(&self, cancel_request: acp::CancelNotification) -> acp::Result<()> {
@@ -373,23 +473,69 @@ mod tests {
         assert_eq!(err.message, "No text content in prompt");
     }
 
-    #[tokio::test]
-    async fn test_prompt_extracts_text_from_content_blocks() {
-        let agent = create_test_agent();
+    #[test]
+    fn test_text_extraction_from_content_blocks() {
+        // Test the text extraction logic used in prompt()
+        let blocks = vec![
+            acp::ContentBlock::Text(acp::TextContent::new("Hello".to_string())),
+            acp::ContentBlock::Text(acp::TextContent::new("World".to_string())),
+        ];
 
-        // Create a prompt request with multiple text blocks
-        let request = acp::PromptRequest::new(
-            "1".to_string(),
-            vec![
-                acp::ContentBlock::Text(acp::TextContent::new("Hello".to_string())),
-                acp::ContentBlock::Text(acp::TextContent::new("World".to_string())),
-            ],
-        );
+        let prompt_text: String = blocks
+            .iter()
+            .filter_map(|block| {
+                if let acp::ContentBlock::Text(text_content) = block {
+                    Some(text_content.text.clone())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
 
-        let result: acp::Result<acp::PromptResponse> = agent.prompt(request).await;
+        assert_eq!(prompt_text, "Hello\nWorld");
+    }
 
-        // Should succeed (stub returns EndTurn)
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap().stop_reason, acp::StopReason::EndTurn);
+    #[test]
+    fn test_agent_event_to_session_update_text_delta() {
+        let event = AgentEvent::TextDelta("Hello".to_string());
+        let update = agent_event_to_session_update(&event);
+
+        assert!(update.is_some());
+        if let Some(acp::SessionUpdate::AgentMessageChunk(chunk)) = update {
+            if let acp::ContentBlock::Text(text) = chunk.content {
+                assert_eq!(text.text, "Hello");
+            } else {
+                panic!("Expected Text content block");
+            }
+        } else {
+            panic!("Expected AgentMessageChunk");
+        }
+    }
+
+    #[test]
+    fn test_agent_event_to_session_update_complete() {
+        let event = AgentEvent::Complete {
+            interaction_id: Some("test-id".to_string()),
+            response: Box::new(genai_rs::InteractionResponse {
+                id: Some("test-id".to_string()),
+                model: None,
+                agent: None,
+                input: vec![],
+                outputs: vec![],
+                status: genai_rs::InteractionStatus::Completed,
+                usage: None,
+                tools: None,
+                grounding_metadata: None,
+                url_context_metadata: None,
+                previous_interaction_id: None,
+                created: None,
+                updated: None,
+            }),
+        };
+        let update = agent_event_to_session_update(&event);
+
+        // Complete events don't map to updates (handled by prompt return)
+        assert!(update.is_none());
     }
 }
