@@ -476,7 +476,7 @@ mod tests {
     #[test]
     fn test_text_extraction_from_content_blocks() {
         // Test the text extraction logic used in prompt()
-        let blocks = vec![
+        let blocks = [
             acp::ContentBlock::Text(acp::TextContent::new("Hello".to_string())),
             acp::ContentBlock::Text(acp::TextContent::new("World".to_string())),
         ];
