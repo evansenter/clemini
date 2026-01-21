@@ -41,7 +41,8 @@ src/
 ├── lib.rs           # Library crate exposing core types for integration tests
 ├── agent.rs         # Core interaction logic, AgentEvent enum
 ├── diff.rs          # Diff formatting for edit tool output
-├── events.rs        # EventHandler trait, TerminalEventHandler
+├── events.rs        # EventHandler trait, TerminalEventHandler, TextBuffer
+├── format.rs        # Pure formatting functions (format_tool_*, colors)
 ├── logging.rs       # OutputSink trait, log_event functions
 ├── mcp.rs           # MCP server implementation
 ├── system_prompt.md # System prompt for Gemini (included at compile time)
