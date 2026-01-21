@@ -4,6 +4,7 @@
 //! The binary crate (main.rs) uses these same modules.
 
 pub mod acp;
+pub mod acp_client;
 pub mod agent;
 pub mod diff;
 pub mod events;
