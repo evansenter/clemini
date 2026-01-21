@@ -812,7 +812,8 @@ mod tests {
         assert!(formatted.contains("OK"));
 
         // Response with detail
-        let formatted = format_mcp_response("tools/call", &"OK".into(), " --interaction test-id", "");
+        let formatted =
+            format_mcp_response("tools/call", &"OK".into(), " --interaction test-id", "");
         assert!(formatted.contains("--interaction test-id"));
 
         // Response with body

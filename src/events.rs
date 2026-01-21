@@ -246,7 +246,12 @@ pub fn dispatch_event<H: EventHandler>(handler: &mut H, event: &crate::agent::Ag
             error,
         } => {
             handler.on_retry(*attempt, *max_attempts, *delay, error);
-            crate::logging::log_event(&crate::format::format_retry(*attempt, *max_attempts, *delay, error));
+            crate::logging::log_event(&crate::format::format_retry(
+                *attempt,
+                *max_attempts,
+                *delay,
+                error,
+            ));
         }
     }
 }
