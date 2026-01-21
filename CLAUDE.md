@@ -146,6 +146,14 @@ Debugging: `LOUD_WIRE=1` logs all HTTP requests/responses.
 
 Don't skip tests. If a test is flaky or legitimately broken by your change, fix the test as part of the PR.
 
+**Comprehensive test coverage** - New code requires tests. When adding or modifying functionality:
+- New modules need unit tests in the same file or a `tests` submodule
+- New tools need tests covering success cases, error cases, and edge cases
+- Refactors that change behavior need tests proving the new behavior
+- Bug fixes need regression tests that would have caught the bug
+
+If you're unsure whether coverage is sufficient, add more tests. Undertesting causes regressions; overtesting just means slightly longer CI.
+
 **Integration tests** - Tests in `tests/` that require `GEMINI_API_KEY` use semantic validation:
 - `confirmation_tests.rs` - Confirmation flow for destructive commands
 - `tool_output_tests.rs` - Tool output events and model interpretation
