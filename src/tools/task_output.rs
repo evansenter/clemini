@@ -229,4 +229,98 @@ mod tests {
             let _ = child.kill().await;
         }
     }
+
+    #[tokio::test]
+    async fn test_task_output_tool_not_found() {
+        let tool = TaskOutputTool::new(None);
+        let result = tool
+            .call(json!({ "task_id": "nonexistent-task-12345" }))
+            .await
+            .unwrap();
+
+        assert!(result["error"].is_string());
+        assert!(result["error"].as_str().unwrap().contains("not found"));
+        assert_eq!(
+            result["error_code"].as_str().unwrap(),
+            error_codes::NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
+    async fn test_task_output_tool_timeout_returns_running() {
+        let dir = tempdir().unwrap();
+        let bash = BashTool::new(
+            dir.path().to_path_buf(),
+            vec![dir.path().to_path_buf()],
+            30,
+            false,
+            None,
+        );
+
+        // Start a long-running background task
+        let bash_result = bash
+            .call(json!({
+                "command": "sleep 10",
+                "run_in_background": true
+            }))
+            .await
+            .unwrap();
+
+        let task_id = bash_result["task_id"].as_str().unwrap();
+
+        let tool = TaskOutputTool::new(None);
+
+        // Wait with a very short timeout - should return "running" status
+        let result = tool
+            .call(json!({ "task_id": task_id, "wait": true, "timeout": 1 }))
+            .await
+            .unwrap();
+
+        assert_eq!(result["status"].as_str().unwrap(), "running");
+        // exit_code should not be present for running tasks
+        assert!(result.get("exit_code").is_none());
+
+        // Clean up
+        let child = {
+            let mut tasks = BACKGROUND_TASKS.lock().unwrap();
+            tasks.remove(task_id).and_then(|mut task| task.child.take())
+        };
+        if let Some(mut child) = child {
+            let _ = child.kill().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_task_output_tool_nonzero_exit_code() {
+        let dir = tempdir().unwrap();
+        let bash = BashTool::new(
+            dir.path().to_path_buf(),
+            vec![dir.path().to_path_buf()],
+            5,
+            false,
+            None,
+        );
+
+        // Start a background task that exits with non-zero code
+        let bash_result = bash
+            .call(json!({
+                "command": "exit 42",
+                "run_in_background": true
+            }))
+            .await
+            .unwrap();
+
+        let task_id = bash_result["task_id"].as_str().unwrap();
+
+        let tool = TaskOutputTool::new(None);
+
+        // Wait for completion
+        let result = tool
+            .call(json!({ "task_id": task_id, "wait": true, "timeout": 5 }))
+            .await
+            .unwrap();
+
+        assert_eq!(result["status"].as_str().unwrap(), "completed");
+        assert_eq!(result["exit_code"].as_i64().unwrap(), 42);
+    }
 }
