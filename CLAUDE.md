@@ -140,7 +140,7 @@ Debugging: `LOUD_WIRE=1` logs all HTTP requests/responses.
 
 **Quality gates before pushing** - All of these must pass:
 - `make clippy` (no warnings)
-- `make fmt` then check for changes (formatted)
+- `make fmt` (run formatter, then commit any changes it makes)
 - `make test` (tests pass)
 
 Don't skip tests. If a test is flaky or legitimately broken by your change, fix the test as part of the PR.
