@@ -1,8 +1,9 @@
-//! Event handling and formatting for UI layers.
+//! Event handling for UI layers.
 //!
 //! This module is the canonical location for:
 //! - `EventHandler` trait - UI implementations handle `AgentEvent`s
-//! - Formatting functions - pure functions for formatting events
+//! - `TextBuffer` - Streaming text accumulation with markdown rendering
+//! - `dispatch_event()` - Central event dispatch with logging
 //!
 //! # Design
 //!
@@ -12,37 +13,23 @@
 //! - `TerminalEventHandler`: For REPL and non-interactive modes
 //! - `McpEventHandler`: For MCP server mode (in mcp.rs)
 //!
-//! All handlers use the shared formatting functions to ensure consistent output.
+//! All handlers use the shared formatting functions from `crate::format`.
 //! Each handler owns its own text buffer for streaming text accumulation.
 //!
-//! # Pure Formatters
+//! # Formatting
 //!
-//! Type-aligned pure formatters take genai-rs types directly:
-//! - `format_call()` - OwnedFunctionCallInfo → String
-//! - `format_result()` - FunctionExecutionResult → String
-//!
-//! Lower-level formatters for individual fields:
-//! - `format_tool_executing()`, `format_tool_result()`, etc.
+//! Pure formatting functions are in `crate::format`. This module re-exports
+//! them for backwards compatibility.
 
 use std::sync::LazyLock;
 use std::time::Duration;
 
-use colored::Colorize;
 use genai_rs::{FunctionExecutionResult, OwnedFunctionCallInfo};
-use serde_json::Value;
 use termimad::MadSkin;
 
 use crate::logging::log_event;
 
-// ============================================================================
-// Constants
-// ============================================================================
-
-/// Maximum argument display length before truncation.
-const MAX_ARG_DISPLAY_LEN: usize = 80;
-
-/// Approximate characters per token for estimation.
-const CHARS_PER_TOKEN: usize = 4;
+// Format functions are in crate::format - use that module directly
 
 // ============================================================================
 // Markdown Rendering Infrastructure
@@ -114,156 +101,8 @@ impl TextBuffer {
 }
 
 // ============================================================================
-// Formatting helpers (UI concerns, used by EventHandler implementations)
+// EventHandler trait and implementations
 // ============================================================================
-
-/// Format function call arguments for display.
-pub fn format_tool_args(tool_name: &str, args: &Value) -> String {
-    let Some(obj) = args.as_object() else {
-        return String::new();
-    };
-
-    let mut parts = Vec::new();
-    for (k, v) in obj {
-        // Skip large strings for the edit tool as they are shown in the diff
-        if tool_name == "edit" && (k == "old_string" || k == "new_string") {
-            continue;
-        }
-        // Skip todos for todo_write as they are rendered below
-        if tool_name == "todo_write" && k == "todos" {
-            continue;
-        }
-        // Skip question/options for ask_user as they are rendered below
-        if tool_name == "ask_user" && (k == "question" || k == "options") {
-            continue;
-        }
-
-        let val_str = match v {
-            Value::String(s) => {
-                let trimmed = s.replace('\n', " ");
-                if trimmed.len() > MAX_ARG_DISPLAY_LEN {
-                    format!("\"{}...\"", &trimmed[..MAX_ARG_DISPLAY_LEN - 3])
-                } else {
-                    format!("\"{trimmed}\"")
-                }
-            }
-            Value::Number(n) => n.to_string(),
-            Value::Bool(b) => b.to_string(),
-            Value::Null => "null".to_string(),
-            _ => "...".to_string(),
-        };
-        parts.push(format!("{k}={val_str}"));
-    }
-
-    if parts.is_empty() {
-        String::new()
-    } else {
-        format!("{} ", parts.join(" "))
-    }
-}
-
-/// Format tool executing line for display.
-/// Includes trailing newline for use with emit_line.
-pub fn format_tool_executing(name: &str, args: &Value) -> String {
-    let args_str = format_tool_args(name, args);
-    format!("┌─ {} {}\n", name.cyan(), args_str)
-}
-
-/// Rough token estimate based on `CHARS_PER_TOKEN`.
-pub fn estimate_tokens(value: &Value) -> u32 {
-    (value.to_string().len() / CHARS_PER_TOKEN) as u32
-}
-
-/// Format tool result for display.
-pub fn format_tool_result(
-    name: &str,
-    duration: Duration,
-    estimated_tokens: u32,
-    has_error: bool,
-) -> String {
-    let error_suffix = if has_error {
-        " ERROR".bright_red().bold().to_string()
-    } else {
-        String::new()
-    };
-    let elapsed_secs = duration.as_secs_f32();
-
-    let duration_str = if elapsed_secs < 0.001 {
-        format!("{:.3}s", elapsed_secs)
-    } else {
-        format!("{:.2}s", elapsed_secs)
-    };
-
-    format!(
-        "└─ {} {} ~{} tok{}",
-        name.cyan(),
-        duration_str.yellow(),
-        estimated_tokens,
-        error_suffix
-    )
-}
-
-/// Format context warning message.
-pub fn format_context_warning(percentage: f64) -> String {
-    if percentage > 95.0 {
-        format!(
-            "WARNING: Context window at {:.1}%. Use /clear to reset.",
-            percentage
-        )
-    } else {
-        format!("WARNING: Context window at {:.1}%.", percentage)
-    }
-}
-
-/// Format error detail line for display (shown below tool result on error).
-pub fn format_error_detail(error_message: &str) -> String {
-    format!("  └─ error: {}", error_message.dimmed())
-}
-
-// ============================================================================
-// Type-aligned pure formatters (take genai-rs types directly)
-// ============================================================================
-
-/// Pure: Format a function call for display.
-/// Takes the genai-rs type directly for clean consumer API.
-pub fn format_call(call: &OwnedFunctionCallInfo) -> String {
-    format_tool_executing(&call.name, &call.args)
-}
-
-/// Compute token estimate for a function execution result (args + result).
-pub fn compute_result_tokens(result: &FunctionExecutionResult) -> u32 {
-    estimate_tokens(&result.args) + estimate_tokens(&result.result)
-}
-
-/// Pure: Format a function execution result for display.
-/// Takes the genai-rs type directly, computing tokens internally.
-pub fn format_result(result: &FunctionExecutionResult) -> String {
-    let tokens = compute_result_tokens(result);
-    let has_error = result.is_error();
-    format_tool_result(&result.name, result.duration, tokens, has_error)
-}
-
-/// Pure: Format tool result block (result line + optional error).
-/// Spacing between blocks is handled by write_to_log_file.
-pub fn format_result_block(result: &FunctionExecutionResult) -> String {
-    let mut output = format_result(result);
-    if let Some(err_msg) = result.error_message() {
-        output.push('\n');
-        output.push_str(&format_error_detail(err_msg));
-    }
-    output
-}
-
-/// Format API retry message.
-pub fn format_retry(attempt: u32, max_attempts: u32, delay: Duration, error: &str) -> String {
-    format!(
-        "[{}: retrying in {}s (attempt {}/{})]",
-        error.bright_yellow(),
-        delay.as_secs(),
-        attempt,
-        max_attempts
-    )
-}
 
 /// Handler for agent events. UI modes implement this to process events.
 pub trait EventHandler {
@@ -304,19 +143,15 @@ pub trait EventHandler {
 /// Text is accumulated in `TextBuffer` and flushed at event boundaries.
 pub struct TerminalEventHandler {
     text_buffer: TextBuffer,
+    model: String,
 }
 
 impl TerminalEventHandler {
-    pub fn new() -> Self {
+    pub fn new(model: String) -> Self {
         Self {
             text_buffer: TextBuffer::new(),
+            model,
         }
-    }
-}
-
-impl Default for TerminalEventHandler {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -342,12 +177,17 @@ impl EventHandler for TerminalEventHandler {
 
     fn on_complete(
         &mut self,
-        _interaction_id: Option<&str>,
+        interaction_id: Option<&str>,
         _response: &genai_rs::InteractionResponse,
     ) {
         // Flush any remaining buffered text
         if let Some(rendered) = self.text_buffer.flush() {
             crate::logging::log_event_line(&rendered);
+        }
+
+        // Print interaction ID and model for session continuity
+        if let Some(id) = interaction_id {
+            crate::logging::log_event(&crate::format::format_interaction_complete(id, &self.model));
         }
     }
 
@@ -373,18 +213,18 @@ pub fn dispatch_event<H: EventHandler>(handler: &mut H, event: &crate::agent::Ag
                 handler.on_tool_executing(call);
                 // Tool executing is start of block - no trailing blank line
                 // (tool output and result will follow)
-                crate::logging::log_event_line(&format_call(call));
+                crate::logging::log_event_line(&crate::format::format_call(call));
             }
         }
         AgentEvent::ToolResult(result) => {
             handler.on_tool_result(result);
             // Unified logging: complete visual block
-            log_event(&format_result_block(result));
+            log_event(&crate::format::format_result_block(result));
         }
         AgentEvent::ContextWarning(warning) => {
             handler.on_context_warning(warning);
             // Unified logging: after handler
-            log_event(&format_context_warning(warning.percentage()));
+            log_event(&crate::format::format_context_warning(warning.percentage()));
         }
         AgentEvent::Complete {
             interaction_id,
@@ -406,7 +246,7 @@ pub fn dispatch_event<H: EventHandler>(handler: &mut H, event: &crate::agent::Ag
             error,
         } => {
             handler.on_retry(*attempt, *max_attempts, *delay, error);
-            crate::logging::log_event(&format_retry(*attempt, *max_attempts, *delay, error));
+            crate::logging::log_event(&crate::format::format_retry(*attempt, *max_attempts, *delay, error));
         }
     }
 }
@@ -467,7 +307,8 @@ mod tests {
         }
 
         fn on_tool_result(&mut self, result: &FunctionExecutionResult) {
-            let tokens = estimate_tokens(&result.args) + estimate_tokens(&result.result);
+            let tokens = crate::format::estimate_tokens(&result.args)
+                + crate::format::estimate_tokens(&result.result);
             self.events.borrow_mut().push(format!(
                 "tool_result:{}:{}ms:{}tok:error={}:{}",
                 result.name,
@@ -486,10 +327,12 @@ mod tests {
 
         fn on_complete(
             &mut self,
-            _interaction_id: Option<&str>,
+            interaction_id: Option<&str>,
             _response: &genai_rs::InteractionResponse,
         ) {
-            self.events.borrow_mut().push("complete".to_string());
+            self.events
+                .borrow_mut()
+                .push(format!("complete:{}", interaction_id.unwrap_or("none")));
         }
 
         fn on_cancelled(&mut self) {
@@ -630,7 +473,7 @@ mod tests {
         handler.on_complete(Some("test-id"), &response);
 
         assert_eq!(events.borrow().len(), 1);
-        assert_eq!(events.borrow()[0], "complete");
+        assert_eq!(events.borrow()[0], "complete:test-id");
     }
 
     #[test]
@@ -697,124 +540,7 @@ mod tests {
         assert!(events[1].contains("tool_executing"));
         assert!(events[2].contains("tool_result"));
         assert!(events[3].contains("text_delta"));
-        assert_eq!(events[4], "complete");
-    }
-
-    // =========================================
-    // Format helper tests
-    // =========================================
-
-    #[test]
-    fn test_format_tool_args_empty() {
-        assert_eq!(format_tool_args("test", &serde_json::json!({})), "");
-        assert_eq!(format_tool_args("test", &serde_json::json!(null)), "");
-        assert_eq!(
-            format_tool_args("test", &serde_json::json!("not an object")),
-            ""
-        );
-    }
-
-    #[test]
-    fn test_format_tool_args_types() {
-        let args = serde_json::json!({
-            "bool": true,
-            "num": 42,
-            "null": null,
-            "str": "hello"
-        });
-        let formatted = format_tool_args("test", &args);
-        // serde_json::Map is sorted by key
-        assert_eq!(formatted, "bool=true null=null num=42 str=\"hello\" ");
-    }
-
-    #[test]
-    fn test_format_tool_args_complex_types() {
-        let args = serde_json::json!({
-            "arr": [1, 2],
-            "obj": {"a": 1}
-        });
-        let formatted = format_tool_args("test", &args);
-        assert_eq!(formatted, "arr=... obj=... ");
-    }
-
-    #[test]
-    fn test_format_tool_args_truncation() {
-        let long_str = "a".repeat(100);
-        let args = serde_json::json!({"long": long_str});
-        let formatted = format_tool_args("test", &args);
-        let expected_val = format!("\"{}...\"", "a".repeat(77));
-        assert_eq!(formatted, format!("long={} ", expected_val));
-    }
-
-    #[test]
-    fn test_format_tool_args_newlines() {
-        let args = serde_json::json!({"text": "hello\nworld"});
-        let formatted = format_tool_args("test", &args);
-        assert_eq!(formatted, "text=\"hello world\" ");
-    }
-
-    #[test]
-    fn test_format_tool_args_edit_filtering() {
-        let args = serde_json::json!({
-            "file_path": "test.rs",
-            "old_string": "old content",
-            "new_string": "new content"
-        });
-        let formatted = format_tool_args("edit", &args);
-        assert_eq!(formatted, "file_path=\"test.rs\" ");
-    }
-
-    #[test]
-    fn test_format_tool_args_todo_write_filtering() {
-        let args = serde_json::json!({
-            "todos": [
-                {"content": "Task 1", "status": "pending"},
-                {"content": "Task 2", "status": "completed"}
-            ]
-        });
-        let formatted = format_tool_args("todo_write", &args);
-        // todos should be filtered out since they're rendered below
-        assert_eq!(formatted, "");
-    }
-
-    #[test]
-    fn test_format_tool_args_ask_user_filtering() {
-        let args = serde_json::json!({
-            "question": "What is your favorite color?",
-            "options": ["red", "blue", "green"]
-        });
-        let formatted = format_tool_args("ask_user", &args);
-        // question and options should be filtered out since they're rendered below
-        assert_eq!(formatted, "");
-    }
-
-    #[test]
-    fn test_estimate_tokens() {
-        // ~4 chars per token
-        assert_eq!(estimate_tokens(&serde_json::json!("hello")), 1); // "hello" = 7 chars / 4 = 1
-        assert_eq!(estimate_tokens(&serde_json::json!({"key": "value"})), 3); // {"key":"value"} = 15 chars / 4 = 3
-    }
-
-    #[test]
-    fn test_format_tool_executing_basic() {
-        // Disable colors for predictable test output
-        colored::control::set_override(false);
-        let args = serde_json::json!({"file_path": "test.rs"});
-        let formatted = format_tool_executing("read_file", &args);
-        assert!(formatted.contains("┌─"));
-        assert!(formatted.contains("read_file"));
-        assert!(formatted.contains("file_path=\"test.rs\""));
-        // Must end with newline for emit_line compatibility
-        assert!(formatted.ends_with('\n'), "must end with newline");
-    }
-
-    #[test]
-    fn test_format_tool_executing_empty_args() {
-        colored::control::set_override(false);
-        let formatted = format_tool_executing("list_files", &serde_json::json!({}));
-        assert!(formatted.contains("┌─"));
-        assert!(formatted.contains("list_files"));
-        assert!(formatted.ends_with('\n'), "must end with newline");
+        assert_eq!(events[4], "complete:test-id");
     }
 
     #[test]
@@ -828,8 +554,8 @@ mod tests {
         let args = serde_json::json!({"file_path": "/path/to/file.txt", "old_string": "hello", "new_string": "world"});
         let result_data = serde_json::json!({"success": true, "bytes": 100});
 
-        let args_tokens = estimate_tokens(&args);
-        let result_tokens = estimate_tokens(&result_data);
+        let args_tokens = crate::format::estimate_tokens(&args);
+        let result_tokens = crate::format::estimate_tokens(&result_data);
         let expected_total = args_tokens + result_tokens;
 
         let result = FunctionExecutionResult::new(
@@ -847,89 +573,6 @@ mod tests {
         assert_eq!(events.len(), 1);
         // The recording format is: "tool_result:name:duration:tokens:error:msg"
         assert!(events[0].contains(&format!("{}tok", expected_total)));
-    }
-
-    #[test]
-    fn test_format_tool_result_duration() {
-        colored::control::set_override(false);
-
-        // < 1ms (100us) -> 3 decimals
-        assert_eq!(
-            format_tool_result("test", Duration::from_micros(100), 10, false),
-            "└─ test 0.000s ~10 tok"
-        );
-
-        // < 1ms (900us) -> 3 decimals
-        assert_eq!(
-            format_tool_result("test", Duration::from_micros(900), 10, false),
-            "└─ test 0.001s ~10 tok"
-        );
-
-        // >= 1ms (1.1ms) -> 2 decimals (shows 0.00s due to threshold)
-        assert_eq!(
-            format_tool_result("test", Duration::from_micros(1100), 10, false),
-            "└─ test 0.00s ~10 tok"
-        );
-
-        // >= 1ms (20ms) -> 2 decimals
-        assert_eq!(
-            format_tool_result("test", Duration::from_millis(20), 10, false),
-            "└─ test 0.02s ~10 tok"
-        );
-
-        // >= 1ms (1450ms) -> 2 decimals
-        assert_eq!(
-            format_tool_result("test", Duration::from_millis(1450), 10, false),
-            "└─ test 1.45s ~10 tok"
-        );
-
-        colored::control::unset_override();
-    }
-
-    #[test]
-    fn test_format_tool_result_error() {
-        colored::control::set_override(false);
-
-        let res = format_tool_result("test", Duration::from_millis(10), 25, true);
-        assert_eq!(res, "└─ test 0.01s ~25 tok ERROR");
-
-        let res = format_tool_result("test", Duration::from_millis(10), 25, false);
-        assert_eq!(res, "└─ test 0.01s ~25 tok");
-
-        colored::control::unset_override();
-    }
-
-    #[test]
-    fn test_format_context_warning_normal() {
-        let msg = format_context_warning(85.0);
-        assert!(msg.contains("85.0%"));
-        assert!(!msg.contains("/clear"));
-    }
-
-    #[test]
-    fn test_format_context_warning_critical() {
-        let msg = format_context_warning(96.0);
-        assert!(msg.contains("96.0%"));
-        assert!(msg.contains("/clear"));
-    }
-
-    #[test]
-    fn test_format_context_warning_boundary() {
-        // Exactly 95% - not critical
-        let msg = format_context_warning(95.0);
-        assert!(!msg.contains("/clear"));
-
-        // Just over 95% - critical
-        let msg = format_context_warning(95.1);
-        assert!(msg.contains("/clear"));
-    }
-
-    #[test]
-    fn test_format_error_detail() {
-        colored::control::set_override(false);
-        let detail = format_error_detail("permission denied");
-        assert_eq!(detail, "  └─ error: permission denied");
-        colored::control::unset_override();
     }
 
     // =========================================
@@ -1017,27 +660,6 @@ mod tests {
     }
 
     // =========================================
-    // Retry formatting tests
-    // =========================================
-
-    #[test]
-    fn test_format_retry() {
-        colored::control::set_override(false);
-
-        let msg = format_retry(1, 3, Duration::from_secs(2), "rate limit exceeded");
-        assert!(msg.contains("rate limit exceeded"));
-        assert!(msg.contains("2s"));
-        assert!(msg.contains("1/3"));
-
-        let msg = format_retry(2, 5, Duration::from_secs(10), "connection reset");
-        assert!(msg.contains("connection reset"));
-        assert!(msg.contains("10s"));
-        assert!(msg.contains("2/5"));
-
-        colored::control::unset_override();
-    }
-
-    // =========================================
     // EventHandler spacing tests
     // =========================================
 
@@ -1047,7 +669,7 @@ mod tests {
 
         // This specifically tests the spacing contract for TerminalEventHandler:
         // when text is buffered and then a tool executes, the buffer must be flushed.
-        let mut handler = TerminalEventHandler::new();
+        let mut handler = TerminalEventHandler::new("test-model".to_string());
         handler.on_text_delta("Some text");
 
         // At this point, text is in buffer.
@@ -1069,7 +691,7 @@ mod tests {
     fn test_terminal_event_handler_on_complete_flushes() {
         crate::logging::disable_logging();
 
-        let mut handler = TerminalEventHandler::new();
+        let mut handler = TerminalEventHandler::new("test-model".to_string());
         handler.on_text_delta("Final thoughts");
 
         assert!(!handler.text_buffer.is_empty());
@@ -1084,7 +706,7 @@ mod tests {
     fn test_terminal_event_handler_on_retry_flushes() {
         crate::logging::disable_logging();
 
-        let mut handler = TerminalEventHandler::new();
+        let mut handler = TerminalEventHandler::new("test-model".to_string());
         handler.on_text_delta("Trying...");
 
         assert!(!handler.text_buffer.is_empty());
@@ -1092,156 +714,5 @@ mod tests {
         handler.on_retry(1, 3, Duration::from_secs(1), "error");
 
         assert!(handler.text_buffer.is_empty());
-    }
-
-    // =========================================
-    // Output format contract tests
-    // These tests ensure the visual output structure is correct
-    // =========================================
-
-    #[test]
-    fn test_format_tool_executing_ends_with_newline() {
-        colored::control::set_override(false);
-        let formatted = format_tool_executing("test_tool", &serde_json::json!({"arg": "val"}));
-        assert!(
-            formatted.ends_with('\n'),
-            "format_tool_executing must end with \\n for emit_line, got: {:?}",
-            formatted
-        );
-        // Should have exactly one trailing newline
-        assert!(
-            !formatted.ends_with("\n\n"),
-            "Should not have double newline"
-        );
-        colored::control::unset_override();
-    }
-
-    #[test]
-    fn test_format_result_block_structure() {
-        colored::control::set_override(false);
-
-        // Result without error
-        let result = FunctionExecutionResult::new(
-            "test_tool".to_string(),
-            "call-1".to_string(),
-            serde_json::json!({}),
-            serde_json::json!({"ok": true}),
-            Duration::from_millis(100),
-        );
-        let formatted = format_result_block(&result);
-        assert!(formatted.starts_with("└─"), "Result should start with └─");
-        assert!(formatted.contains("test_tool"));
-        assert!(formatted.contains("0.10s"));
-        // No trailing newline - emit() adds that
-        assert!(
-            !formatted.ends_with('\n'),
-            "format_result_block should not end with newline (emit adds it)"
-        );
-
-        colored::control::unset_override();
-    }
-
-    #[test]
-    fn test_format_result_block_with_error() {
-        colored::control::set_override(false);
-
-        let result = FunctionExecutionResult::new(
-            "failing_tool".to_string(),
-            "call-1".to_string(),
-            serde_json::json!({}),
-            serde_json::json!({"error": "something went wrong"}),
-            Duration::from_millis(50),
-        );
-        let formatted = format_result_block(&result);
-
-        // Should have result line and error detail
-        assert!(formatted.contains("└─"), "Should have result line");
-        assert!(formatted.contains("ERROR"), "Should show ERROR suffix");
-        assert!(formatted.contains("failing_tool"));
-
-        // Error detail should be on a separate line with indentation
-        let lines: Vec<&str> = formatted.lines().collect();
-        assert_eq!(lines.len(), 2, "Should have 2 lines: result + error detail");
-        assert!(
-            lines[1].starts_with("  └─ error:"),
-            "Error detail should have 2-space indent and └─ prefix, got: {:?}",
-            lines[1]
-        );
-
-        colored::control::unset_override();
-    }
-
-    #[test]
-    fn test_format_error_detail_structure() {
-        colored::control::set_override(false);
-        let formatted = format_error_detail("test error message");
-
-        // Must have 2-space indent + └─ prefix
-        assert!(
-            formatted.starts_with("  └─ error:"),
-            "Error detail must start with '  └─ error:', got: {:?}",
-            formatted
-        );
-        assert!(formatted.contains("test error message"));
-
-        colored::control::unset_override();
-    }
-
-    #[test]
-    fn test_format_context_warning_structure() {
-        let warning_80 = format_context_warning(80.5);
-        assert!(warning_80.starts_with("WARNING:"));
-        assert!(warning_80.contains("80.5%"));
-        assert!(!warning_80.contains("/clear")); // Only critical shows /clear hint
-
-        let warning_96 = format_context_warning(96.0);
-        assert!(warning_96.starts_with("WARNING:"));
-        assert!(warning_96.contains("96.0%"));
-        assert!(warning_96.contains("/clear")); // Critical threshold shows hint
-    }
-
-    #[test]
-    fn test_tool_output_indentation() {
-        // Tool outputs that appear between ┌─ and └─ should have consistent
-        // indentation (2 spaces) when they're status lines
-        colored::control::set_override(false);
-
-        // The format for intermediate tool output (like "  742 lines")
-        // is defined by each tool, but status messages use 2-space indent
-        let status_output = "  running subagent...";
-        assert!(
-            status_output.starts_with("  "),
-            "Tool status output should have 2-space indent"
-        );
-
-        let line_count_output = "  742 lines";
-        assert!(
-            line_count_output.starts_with("  "),
-            "Tool line count should have 2-space indent"
-        );
-
-        colored::control::unset_override();
-    }
-
-    #[test]
-    fn test_format_tool_args_truncation_indicator() {
-        colored::control::set_override(false);
-
-        // Long string should be truncated with ...
-        let long_value = "x".repeat(100);
-        let args = serde_json::json!({"content": long_value});
-        let formatted = format_tool_args("test", &args);
-        assert!(
-            formatted.contains("...\""),
-            "Truncated string should end with ...\", got: {}",
-            formatted
-        );
-        // Should be truncated to MAX_ARG_DISPLAY_LEN (80)
-        assert!(
-            formatted.len() < 100,
-            "Should be truncated to reasonable length"
-        );
-
-        colored::control::unset_override();
     }
 }

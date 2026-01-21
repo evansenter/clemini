@@ -123,10 +123,20 @@ impl CallableFunction for TaskTool {
             // Foreground mode: wait for completion, capture output
             self.emit("  running subagent...");
 
-            let output = Command::new(&cmd)
+            let mut child = Command::new(&cmd);
+            child
                 .args(&cmd_args)
                 .stdin(std::process::Stdio::null())
-                .output()
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .kill_on_drop(true);
+
+            let output = child
+                .spawn()
+                .map_err(|e| {
+                    FunctionError::ExecutionError(format!("Failed to spawn task: {}", e).into())
+                })?
+                .wait_with_output()
                 .await
                 .map_err(|e| {
                     FunctionError::ExecutionError(format!("Failed to run task: {}", e).into())

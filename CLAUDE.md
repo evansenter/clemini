@@ -170,6 +170,14 @@ Both EventHandler implementations (`TerminalEventHandler`, `McpEventHandler`) us
 
 Test visual changes by running clemini in each mode and verifying the output looks correct.
 
+**Output formatting tests are critical** - The output formatting has strict contracts that were hard to get right. Keep the test coverage comprehensive:
+
+- `src/events.rs` tests: Format function contracts (newlines, indentation, structure)
+- `src/main.rs` output_tests: Log file spacing, complete tool blocks, edge cases
+- `tests/event_ordering_tests.rs`: End-to-end event ordering and output
+
+When modifying output code, ensure all these tests pass. Add new tests for any new format patterns. Regressions in output spacing are subtle and hard to catch without tests.
+
 ## Design Principles
 
 ### Core Principles
@@ -180,6 +188,7 @@ Test visual changes by running clemini in each mode and verifying the output loo
 | **Graceful unknowns** | Unknown/unexpected data is logged and handled, not crashed on. Tool errors return JSON so the model can retry. |
 | **Formatting owns visual output** | Format functions return complete visual blocks including spacing. Output layer just emits—no newline decisions. |
 | **Pure rendering** | Format/render functions are pure: no side effects, no global state. Color control, file I/O, and logging happen in callers, not formatters. |
+| **Format helpers for all output** | All colored/styled output uses `format_*` helper functions. No inline `.cyan()`, `.bold()`, etc. in handlers or business logic. Keeps formatting testable and centralized. |
 | **Breaking changes over shims** | Clean breaks preferred. No deprecated wrappers, re-exports for compatibility, or `// legacy` code paths. |
 
 ### Architecture Principles
@@ -214,5 +223,33 @@ Uses `try_send` (non-blocking) to avoid stalling tools on slow consumers. The fa
 |--------|----------------|
 | `agent.rs` | Core interaction logic, `AgentEvent` enum, `run_interaction()` |
 | `events.rs` | `EventHandler` trait, formatting functions, streaming text rendering |
+| `format.rs` | Pure formatting functions (`format_*` helpers) |
 | `main.rs` | CLI entry, REPL loop, OutputSink implementations |
 | `mcp.rs` | MCP server protocol, `McpEventHandler` |
+
+### Output Streams (stdout vs stderr)
+
+**stdout** - The AI conversation (what you'd pipe to a file to save the chat):
+- Model text responses
+- Tool output
+
+**stderr** - Session status and diagnostics:
+- Startup banner and tip
+- User input echo (visual feedback)
+- Builtin command responses (`/model`, `/pwd`, etc.)
+- Status messages (`[conversation cleared]`)
+- ctrl-c message
+- Error messages
+
+This separation allows `clemini -p "prompt" > output.txt` to capture just the conversation.
+
+### REPL Builtin Commands
+
+| Command | Alias | Description |
+|---------|-------|-------------|
+| `/help` | `/h` | Show help text |
+| `/quit` | `/q`, `/exit` | Exit the REPL |
+| `/clear` | `/c` | Clear conversation history (start fresh) |
+| `/model` | `/m` | Show current model |
+| `/pwd` | `/cwd` | Show current working directory |
+| `!<cmd>` | - | Run shell command (e.g., `!ls -la`) |

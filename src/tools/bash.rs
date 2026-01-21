@@ -329,6 +329,7 @@ impl CallableFunction for BashTool {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            .kill_on_drop(true)
             .spawn()
             .map_err(|e| {
                 FunctionError::ExecutionError(format!("Failed to spawn process: {}", e).into())
