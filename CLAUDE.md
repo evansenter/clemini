@@ -155,15 +155,15 @@ Run locally with: `cargo test --test <name> -- --include-ignored --nocapture`
 
 These use `validate_response_semantically()` from `tests/common/mod.rs` - a second Gemini call with structured output that judges whether responses are appropriate. This provides a middle ground between brittle string assertions and purely structural checks.
 
-**Visual output changes** - Tool output formatting is centralized in `src/events.rs`:
+**Visual output changes** - Tool output formatting is centralized in `src/format.rs`:
 
 | Change | Location |
 |--------|----------|
-| Tool executing format (`┌─ name...`) | `format_tool_executing()` in `events.rs` |
-| Tool result format (`└─ name...`) | `format_tool_result()` in `events.rs` |
-| Tool error detail (`└─ error:...`) | `format_error_detail()` in `events.rs` |
-| Tool args format (`key=value`) | `format_tool_args()` in `events.rs` |
-| Context warnings | `format_context_warning()` in `events.rs` |
+| Tool executing format (`┌─ name...`) | `format_tool_executing()` in `format.rs` |
+| Tool result format (`└─ name...`) | `format_tool_result()` in `format.rs` |
+| Tool error detail (`└─ error:...`) | `format_error_detail()` in `format.rs` |
+| Tool args format (`key=value`) | `format_tool_args()` in `format.rs` |
+| Context warnings | `format_context_warning()` in `format.rs` |
 | Streaming text (markdown) | `TextBuffer::push()` + `TextBuffer::flush()` in `events.rs` |
 
 Both EventHandler implementations (`TerminalEventHandler`, `McpEventHandler`) use these shared functions, so changes apply everywhere automatically.
@@ -172,7 +172,7 @@ Test visual changes by running clemini in each mode and verifying the output loo
 
 **Output formatting tests are critical** - The output formatting has strict contracts that were hard to get right. Keep the test coverage comprehensive:
 
-- `src/events.rs` tests: Format function contracts (newlines, indentation, structure)
+- `src/format.rs` tests: Format function contracts (newlines, indentation, structure)
 - `src/main.rs` output_tests: Log file spacing, complete tool blocks, edge cases
 - `tests/event_ordering_tests.rs`: End-to-end event ordering and output
 
@@ -222,7 +222,7 @@ Uses `try_send` (non-blocking) to avoid stalling tools on slow consumers. The fa
 | Module | Responsibility |
 |--------|----------------|
 | `agent.rs` | Core interaction logic, `AgentEvent` enum, `run_interaction()` |
-| `events.rs` | `EventHandler` trait, formatting functions, streaming text rendering |
+| `events.rs` | `EventHandler` trait, `TextBuffer`, streaming text rendering |
 | `format.rs` | Pure formatting functions (`format_*` helpers) |
 | `main.rs` | CLI entry, REPL loop, OutputSink implementations |
 | `mcp.rs` | MCP server protocol, `McpEventHandler` |
