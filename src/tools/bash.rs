@@ -675,10 +675,10 @@ mod tests {
             let mut tasks = BACKGROUND_TASKS.lock().unwrap();
             tasks.remove(&task_id)
         };
-        if let Some(mut task) = task {
-            if let Some(mut child) = task.child.take() {
-                let _ = child.kill().await;
-            }
+        if let Some(mut task) = task
+            && let Some(mut child) = task.child.take()
+        {
+            let _ = child.kill().await;
         }
     }
 
@@ -715,15 +715,15 @@ mod tests {
             let mut tasks = BACKGROUND_TASKS.lock().unwrap();
             (tasks.remove(id1), tasks.remove(id2))
         };
-        if let Some(mut task) = task1 {
-            if let Some(mut child) = task.child.take() {
-                let _ = child.kill().await;
-            }
+        if let Some(mut task) = task1
+            && let Some(mut child) = task.child.take()
+        {
+            let _ = child.kill().await;
         }
-        if let Some(mut task) = task2 {
-            if let Some(mut child) = task.child.take() {
-                let _ = child.kill().await;
-            }
+        if let Some(mut task) = task2
+            && let Some(mut child) = task.child.take()
+        {
+            let _ = child.kill().await;
         }
     }
 
