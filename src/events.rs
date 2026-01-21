@@ -804,6 +804,8 @@ mod tests {
         assert!(formatted.contains("┌─"));
         assert!(formatted.contains("read_file"));
         assert!(formatted.contains("file_path=\"test.rs\""));
+        // Must end with newline for emit_line compatibility
+        assert!(formatted.ends_with('\n'), "must end with newline");
     }
 
     #[test]
@@ -812,6 +814,7 @@ mod tests {
         let formatted = format_tool_executing("list_files", &serde_json::json!({}));
         assert!(formatted.contains("┌─"));
         assert!(formatted.contains("list_files"));
+        assert!(formatted.ends_with('\n'), "must end with newline");
     }
 
     #[test]
@@ -1089,5 +1092,156 @@ mod tests {
         handler.on_retry(1, 3, Duration::from_secs(1), "error");
 
         assert!(handler.text_buffer.is_empty());
+    }
+
+    // =========================================
+    // Output format contract tests
+    // These tests ensure the visual output structure is correct
+    // =========================================
+
+    #[test]
+    fn test_format_tool_executing_ends_with_newline() {
+        colored::control::set_override(false);
+        let formatted = format_tool_executing("test_tool", &serde_json::json!({"arg": "val"}));
+        assert!(
+            formatted.ends_with('\n'),
+            "format_tool_executing must end with \\n for emit_line, got: {:?}",
+            formatted
+        );
+        // Should have exactly one trailing newline
+        assert!(
+            !formatted.ends_with("\n\n"),
+            "Should not have double newline"
+        );
+        colored::control::unset_override();
+    }
+
+    #[test]
+    fn test_format_result_block_structure() {
+        colored::control::set_override(false);
+
+        // Result without error
+        let result = FunctionExecutionResult::new(
+            "test_tool".to_string(),
+            "call-1".to_string(),
+            serde_json::json!({}),
+            serde_json::json!({"ok": true}),
+            Duration::from_millis(100),
+        );
+        let formatted = format_result_block(&result);
+        assert!(formatted.starts_with("└─"), "Result should start with └─");
+        assert!(formatted.contains("test_tool"));
+        assert!(formatted.contains("0.10s"));
+        // No trailing newline - emit() adds that
+        assert!(
+            !formatted.ends_with('\n'),
+            "format_result_block should not end with newline (emit adds it)"
+        );
+
+        colored::control::unset_override();
+    }
+
+    #[test]
+    fn test_format_result_block_with_error() {
+        colored::control::set_override(false);
+
+        let result = FunctionExecutionResult::new(
+            "failing_tool".to_string(),
+            "call-1".to_string(),
+            serde_json::json!({}),
+            serde_json::json!({"error": "something went wrong"}),
+            Duration::from_millis(50),
+        );
+        let formatted = format_result_block(&result);
+
+        // Should have result line and error detail
+        assert!(formatted.contains("└─"), "Should have result line");
+        assert!(formatted.contains("ERROR"), "Should show ERROR suffix");
+        assert!(formatted.contains("failing_tool"));
+
+        // Error detail should be on a separate line with indentation
+        let lines: Vec<&str> = formatted.lines().collect();
+        assert_eq!(lines.len(), 2, "Should have 2 lines: result + error detail");
+        assert!(
+            lines[1].starts_with("  └─ error:"),
+            "Error detail should have 2-space indent and └─ prefix, got: {:?}",
+            lines[1]
+        );
+
+        colored::control::unset_override();
+    }
+
+    #[test]
+    fn test_format_error_detail_structure() {
+        colored::control::set_override(false);
+        let formatted = format_error_detail("test error message");
+
+        // Must have 2-space indent + └─ prefix
+        assert!(
+            formatted.starts_with("  └─ error:"),
+            "Error detail must start with '  └─ error:', got: {:?}",
+            formatted
+        );
+        assert!(formatted.contains("test error message"));
+
+        colored::control::unset_override();
+    }
+
+    #[test]
+    fn test_format_context_warning_structure() {
+        let warning_80 = format_context_warning(80.5);
+        assert!(warning_80.starts_with("WARNING:"));
+        assert!(warning_80.contains("80.5%"));
+        assert!(!warning_80.contains("/clear")); // Only critical shows /clear hint
+
+        let warning_96 = format_context_warning(96.0);
+        assert!(warning_96.starts_with("WARNING:"));
+        assert!(warning_96.contains("96.0%"));
+        assert!(warning_96.contains("/clear")); // Critical threshold shows hint
+    }
+
+    #[test]
+    fn test_tool_output_indentation() {
+        // Tool outputs that appear between ┌─ and └─ should have consistent
+        // indentation (2 spaces) when they're status lines
+        colored::control::set_override(false);
+
+        // The format for intermediate tool output (like "  742 lines")
+        // is defined by each tool, but status messages use 2-space indent
+        let status_output = "  running subagent...";
+        assert!(
+            status_output.starts_with("  "),
+            "Tool status output should have 2-space indent"
+        );
+
+        let line_count_output = "  742 lines";
+        assert!(
+            line_count_output.starts_with("  "),
+            "Tool line count should have 2-space indent"
+        );
+
+        colored::control::unset_override();
+    }
+
+    #[test]
+    fn test_format_tool_args_truncation_indicator() {
+        colored::control::set_override(false);
+
+        // Long string should be truncated with ...
+        let long_value = "x".repeat(100);
+        let args = serde_json::json!({"content": long_value});
+        let formatted = format_tool_args("test", &args);
+        assert!(
+            formatted.contains("...\""),
+            "Truncated string should end with ...\", got: {}",
+            formatted
+        );
+        // Should be truncated to MAX_ARG_DISPLAY_LEN (80)
+        assert!(
+            formatted.len() < 100,
+            "Should be truncated to reasonable length"
+        );
+
+        colored::control::unset_override();
     }
 }

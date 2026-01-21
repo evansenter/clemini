@@ -15,10 +15,12 @@ All user-facing output flows through the `OutputSink` trait (`src/logging.rs`), 
 
 The trait has two methods for different spacing behavior:
 
-| Method | Purpose |
-|--------|---------|
-| `emit(msg)` | Complete block with trailing blank line (visual separation between blocks) |
-| `emit_line(msg)` | Line without trailing blank line (for multi-line tool output) |
+| Method | Purpose | Newline Behavior |
+|--------|---------|------------------|
+| `emit(msg)` | Complete block with trailing blank line | Adds `\n` after message |
+| `emit_line(msg)` | Line without trailing blank line | Prints as-is (message must include `\n`) |
+
+**Important:** Messages passed to `emit_line()` must include their own trailing `\n`. The sink does not add newlines.
 
 ### Logging Functions
 
@@ -70,19 +72,48 @@ Uses the `colored` crate for ANSI terminal colors:
 
 ## Tool Call Format
 
+A complete tool call block spans multiple lines:
+
+```
+┌─ read_file file_path="/src/main.rs"
+  742 lines
+└─ read_file 0.02s ~18 tok
+```
+
+Each line is on its own line (separated by `\n`). The block ends with a blank line for visual separation.
+
 ### Executing Line (Before Execution)
 
 ```
-┌─ <tool_name> <formatted_args>
+┌─ <tool_name> <formatted_args>\n
 ```
 
 - `┌─`: Dimmed
 - `<tool_name>`: Cyan
 - `<formatted_args>`: Dimmed grey, key=value pairs
+- **Must end with `\n`** (for `emit_line` compatibility)
 
 Example:
 ```
 ┌─ read_file file_path="/src/main.rs"
+```
+
+### Tool Output (During Execution)
+
+Tool-specific status or progress output, indented with 2 spaces:
+
+```
+  <output_message>\n
+```
+
+- Two-space indent for visual grouping under the tool
+- **Must end with `\n`** (added at dispatch level)
+
+Examples:
+```
+  742 lines
+  running subagent...
+  3 matches found
 ```
 
 ### Result Line (After Execution)
