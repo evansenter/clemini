@@ -10,9 +10,9 @@ use tokio_util::sync::CancellationToken;
 use tracing::instrument;
 
 use crate::agent::{AgentEvent, RetryConfig, run_interaction};
+use crate::events::EventHandler;
+use crate::format::TextBuffer;
 use crate::tools::CleminiToolService;
-use clemini::events::EventHandler;
-use clemini::format::TextBuffer;
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct JsonRpcRequest {
