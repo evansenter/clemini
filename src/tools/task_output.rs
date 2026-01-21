@@ -220,14 +220,13 @@ mod tests {
 
         assert_eq!(result["status"].as_str().unwrap(), "running");
 
-        // Clean up
-        {
+        // Clean up - extract child before dropping lock to avoid holding across await
+        let child = {
             let mut tasks = BACKGROUND_TASKS.lock().unwrap();
-            if let Some(mut task) = tasks.remove(task_id) {
-                if let Some(mut child) = task.child.take() {
-                    let _ = child.kill().await;
-                }
-            }
+            tasks.remove(task_id).and_then(|mut task| task.child.take())
+        };
+        if let Some(mut child) = child {
+            let _ = child.kill().await;
         }
     }
 }
