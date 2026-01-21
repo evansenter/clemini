@@ -12,18 +12,13 @@
 //!
 //! - `TerminalEventHandler`: For REPL and non-interactive modes (this module)
 //! - `McpEventHandler`: For MCP server mode (in mcp.rs)
-//!
-//! All handlers use the shared formatting functions from `crate::format`.
-//! Each handler owns its own `TextBuffer` for streaming text accumulation.
 
 use std::time::Duration;
 
 use genai_rs::{FunctionExecutionResult, OwnedFunctionCallInfo};
 
+use crate::format::TextBuffer;
 use crate::logging::log_event;
-
-// Re-export text rendering infrastructure from format module
-pub use crate::format::{SKIN, TextBuffer, render_markdown_nowrap};
 
 // ============================================================================
 // EventHandler trait and implementations
