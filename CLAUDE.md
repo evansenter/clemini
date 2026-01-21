@@ -19,6 +19,7 @@ Clemini is a Gemini-powered coding CLI built with genai-rs. It's designed to be 
 make check               # Fast type checking
 make build               # Debug build
 make release             # Release build
+make run                 # Run the CLI
 make test                # Unit tests only (fast, no API key)
 make test-all            # Full suite including integration tests (requires GEMINI_API_KEY)
 make clippy              # Lint with warnings as errors
@@ -30,13 +31,13 @@ Logs are stored in `~/.clemini/logs/` with daily rotation.
 
 ## Architecture
 
-The CLI has three modes: single-prompt (`-p "prompt"`), interactive REPL, and MCP server (`--mcp-server`). The interactive REPL uses a full-screen TUI by default; use `--no-tui` for plain terminal output.
+The CLI has three modes: single-prompt (`-p "prompt"`), interactive REPL, and MCP server (`--mcp-server`).
 
 ### Module Structure
 
 ```
 src/
-├── main.rs          # CLI entry, UI loops (TUI/REPL), MCP server startup
+├── main.rs          # CLI entry, REPL loop, MCP server startup
 ├── lib.rs           # Library crate exposing core types for integration tests
 ├── agent.rs         # Core interaction logic, AgentEvent enum
 ├── diff.rs          # Diff formatting for edit tool output
@@ -44,7 +45,6 @@ src/
 ├── logging.rs       # OutputSink trait, log_event functions
 ├── mcp.rs           # MCP server implementation
 ├── system_prompt.md # System prompt for Gemini (included at compile time)
-├── tui/             # TUI mode (ratatui)
 └── tools/           # Tool implementations (bash, read_file, etc.)
 ```
 
@@ -72,8 +72,7 @@ run_interaction()                    UI Layer
 - `Cancelled` - User cancelled
 
 **`EventHandler` trait** (`src/events.rs`): All UI modes implement this trait:
-- `TerminalEventHandler` (`events.rs`) - Plain REPL and non-interactive modes
-- `TuiEventHandler` (`main.rs`) - TUI mode, sends AppEvents via channel
+- `TerminalEventHandler` (`events.rs`) - REPL and non-interactive modes
 - `McpEventHandler` (`mcp.rs`) - MCP server mode
 
 All handlers use shared formatting functions:
@@ -119,7 +118,6 @@ Debugging: `LOUD_WIRE=1` logs all HTTP requests/responses.
 ## Documentation
 
 - [docs/TOOLS.md](docs/TOOLS.md) - Tool reference, design philosophy, implementation guide
-- [docs/TUI.md](docs/TUI.md) - TUI architecture (ratatui, event loop, output channels)
 - [docs/TEXT_RENDERING.md](docs/TEXT_RENDERING.md) - Output formatting guidelines (colors, truncation, spacing)
 
 ## Conventions
@@ -168,7 +166,7 @@ These use `validate_response_semantically()` from `tests/common/mod.rs` - a seco
 | Context warnings | `format_context_warning()` in `events.rs` |
 | Streaming text (markdown) | `TextBuffer::push()` + `TextBuffer::flush()` in `events.rs` |
 
-All three EventHandler implementations (`TerminalEventHandler`, `TuiEventHandler`, `McpEventHandler`) use these shared functions, so changes apply everywhere automatically.
+Both EventHandler implementations (`TerminalEventHandler`, `McpEventHandler`) use these shared functions, so changes apply everywhere automatically.
 
 Test visual changes by running clemini in each mode and verifying the output looks correct.
 
@@ -188,11 +186,10 @@ Test visual changes by running clemini in each mode and verifying the output loo
 
 **Agent isolation** - The agent (`agent.rs`) emits structured events via channel. No formatting, colors, or UI logic. This keeps the agent testable and UI implementations independent.
 
-**Unified implementations** - UI logic appearing in multiple modes (Terminal, TUI, MCP) belongs in shared functions, not duplicated per-handler. Examples: `format_tool_executing()`, `format_result_block()`, `TextBuffer`.
+**Unified implementations** - UI logic appearing in multiple modes (Terminal, MCP) belongs in shared functions, not duplicated per-handler. Examples: `format_tool_executing()`, `format_tool_result()`, `TextBuffer`.
 
 **Handlers near dependencies** - EventHandler implementations live where their protocol-specific types are:
-- `TerminalEventHandler` in `events.rs` (generic)
-- `TuiEventHandler` in `main.rs` (needs `AppEvent`)
+- `TerminalEventHandler` in `events.rs` (generic terminal output)
 - `McpEventHandler` in `mcp.rs` (needs MCP notification channel)
 
 **Tool output via events** - Tools emit `AgentEvent::ToolOutput` for visual output, never call `log_event()` directly. This ensures correct ordering (all output flows through the event channel) and keeps tools decoupled from the UI layer. Tools implement the `ToolEmitter` trait (`src/tools/mod.rs`):
@@ -217,6 +214,5 @@ Uses `try_send` (non-blocking) to avoid stalling tools on slow consumers. The fa
 |--------|----------------|
 | `agent.rs` | Core interaction logic, `AgentEvent` enum, `run_interaction()` |
 | `events.rs` | `EventHandler` trait, formatting functions, streaming text rendering |
-| `main.rs` | CLI entry, UI loops, OutputSink implementations, `TuiEventHandler` |
+| `main.rs` | CLI entry, REPL loop, OutputSink implementations |
 | `mcp.rs` | MCP server protocol, `McpEventHandler` |
-| `tui/` | TUI components, ratatui widgets, `AppEvent` |

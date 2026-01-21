@@ -9,8 +9,8 @@
 //! The agent emits `AgentEvent`s through a channel. Each UI mode implements
 //! `EventHandler` to process these events appropriately:
 //!
-//! - `TerminalEventHandler`: For plain REPL and non-interactive modes
-//! - TUI mode: Uses `AppEvent` internally (handled separately)
+//! - `TerminalEventHandler`: For REPL and non-interactive modes
+//! - `McpEventHandler`: For MCP server mode (in mcp.rs)
 //!
 //! All handlers use the shared formatting functions to ensure consistent output.
 //! Each handler owns its own text buffer for streaming text accumulation.
@@ -33,6 +33,16 @@ use serde_json::Value;
 use termimad::MadSkin;
 
 use crate::logging::log_event;
+
+// ============================================================================
+// Constants
+// ============================================================================
+
+/// Maximum argument display length before truncation.
+const MAX_ARG_DISPLAY_LEN: usize = 80;
+
+/// Approximate characters per token for estimation.
+const CHARS_PER_TOKEN: usize = 4;
 
 // ============================================================================
 // Markdown Rendering Infrastructure
@@ -131,8 +141,8 @@ pub fn format_tool_args(tool_name: &str, args: &Value) -> String {
         let val_str = match v {
             Value::String(s) => {
                 let trimmed = s.replace('\n', " ");
-                if trimmed.len() > 80 {
-                    format!("\"{}...\"", &trimmed[..77])
+                if trimmed.len() > MAX_ARG_DISPLAY_LEN {
+                    format!("\"{}...\"", &trimmed[..MAX_ARG_DISPLAY_LEN - 3])
                 } else {
                     format!("\"{trimmed}\"")
                 }
@@ -158,9 +168,9 @@ pub fn format_tool_executing(name: &str, args: &Value) -> String {
     format!("┌─ {} {}", name.cyan(), args_str)
 }
 
-/// Rough token estimate: ~4 chars per token.
+/// Rough token estimate based on `CHARS_PER_TOKEN`.
 pub fn estimate_tokens(value: &Value) -> u32 {
-    (value.to_string().len() / 4) as u32
+    (value.to_string().len() / CHARS_PER_TOKEN) as u32
 }
 
 /// Format tool result for display.
@@ -1047,6 +1057,35 @@ mod tests {
         handler.on_tool_executing(&call);
 
         // Buffer should be empty now
+        assert!(handler.text_buffer.is_empty());
+    }
+
+    #[test]
+    fn test_terminal_event_handler_on_complete_flushes() {
+        crate::logging::disable_logging();
+
+        let mut handler = TerminalEventHandler::new();
+        handler.on_text_delta("Final thoughts");
+
+        assert!(!handler.text_buffer.is_empty());
+
+        let response = test_response("test-id");
+        handler.on_complete(Some("test-id"), &response);
+
+        assert!(handler.text_buffer.is_empty());
+    }
+
+    #[test]
+    fn test_terminal_event_handler_on_retry_flushes() {
+        crate::logging::disable_logging();
+
+        let mut handler = TerminalEventHandler::new();
+        handler.on_text_delta("Trying...");
+
+        assert!(!handler.text_buffer.is_empty());
+
+        handler.on_retry(1, 3, Duration::from_secs(1), "error");
+
         assert!(handler.text_buffer.is_empty());
     }
 }

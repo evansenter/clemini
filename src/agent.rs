@@ -2,7 +2,7 @@
 //!
 //! This module contains the core agent logic for running interactions with Gemini.
 //! It sends events through a channel for the UI layer to consume, enabling:
-//! - Decoupled UI implementations (TUI, terminal, MCP)
+//! - Decoupled UI implementations (terminal, MCP)
 //! - Testable agent logic
 //! - Future streaming-first architecture (#59)
 
@@ -41,9 +41,14 @@ async fn sleep_with_jitter(delay: Duration) {
 }
 
 /// Context window limit for Gemini models (1M tokens).
+/// This is a model constraint, not user-configurable.
 const CONTEXT_WINDOW_LIMIT: u32 = 1_000_000;
 
-/// Context window usage warning (>80% or >95% usage).
+/// Threshold for context window usage warnings (80%).
+/// When usage exceeds this ratio, a ContextWarning event is emitted.
+const CONTEXT_WARNING_THRESHOLD: f64 = 0.80;
+
+/// Context window usage warning (>80% usage).
 #[derive(Debug, Clone, Copy)]
 pub struct ContextWarning {
     /// Tokens used in the context window.
@@ -67,12 +72,11 @@ impl ContextWarning {
 /// Events emitted by the agent during interaction.
 ///
 /// UI layers receive these events and handle them appropriately:
-/// - TUI: Update app state and render
 /// - Terminal: Print to stdout/stderr
 /// - MCP: Ignore real-time events, use final result
 ///
-/// Note: Some variants/fields are intentionally unused pending full event handling
-/// implementation in UI layers (issue #59).
+/// Note: `#[allow(dead_code)]` silences warnings for fields that are populated
+/// but may not be read in all UI modes (e.g., `Complete.response` is only used by MCP).
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub enum AgentEvent {
@@ -137,6 +141,9 @@ impl Default for RetryConfig {
 }
 
 /// Result of an interaction.
+///
+/// Note: `#[allow(dead_code)]` silences warnings for fields that are set but not
+/// always read (`context_size`, `total_tokens` are included for potential future use).
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct InteractionResult {
@@ -157,7 +164,7 @@ struct ToolExecutionResult {
 /// Check context window usage and send warning event if needed.
 fn check_context_window(total_tokens: u32, events_tx: &mpsc::Sender<AgentEvent>) {
     let ratio = f64::from(total_tokens) / f64::from(CONTEXT_WINDOW_LIMIT);
-    if ratio > 0.80 {
+    if ratio > CONTEXT_WARNING_THRESHOLD {
         let _ = events_tx.try_send(AgentEvent::ContextWarning(ContextWarning::new(
             total_tokens,
             CONTEXT_WINDOW_LIMIT,

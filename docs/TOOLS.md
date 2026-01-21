@@ -240,7 +240,7 @@ Find files matching a pattern.
 
 // Find in specific directory, sorted by modification time
 {"pattern": "*.md", "directory": "docs", "sort": "modified"}
-// → {"matches": ["docs/TOOLS.md", "docs/TUI.md", "docs/TEXT_RENDERING.md"], "count": 3, "total_found": 3, "truncated": false}
+// → {"matches": ["docs/TOOLS.md", "docs/TEXT_RENDERING.md"], "count": 2, "total_found": 2, "truncated": false}
 
 // Paginated results
 {"pattern": "**/*.ts", "head_limit": 10, "offset": 20}
