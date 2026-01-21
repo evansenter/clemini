@@ -2,7 +2,7 @@
 //!
 //! This module is the canonical location for:
 //! - `EventHandler` trait - UI implementations handle `AgentEvent`s
-//! - `TextBuffer` - Streaming text accumulation with markdown rendering
+//! - `TerminalEventHandler` - For REPL and non-interactive modes
 //! - `dispatch_event()` - Central event dispatch with logging
 //!
 //! # Design
@@ -10,95 +10,20 @@
 //! The agent emits `AgentEvent`s through a channel. Each UI mode implements
 //! `EventHandler` to process these events appropriately:
 //!
-//! - `TerminalEventHandler`: For REPL and non-interactive modes
+//! - `TerminalEventHandler`: For REPL and non-interactive modes (this module)
 //! - `McpEventHandler`: For MCP server mode (in mcp.rs)
 //!
 //! All handlers use the shared formatting functions from `crate::format`.
-//! Each handler owns its own text buffer for streaming text accumulation.
-//!
-//! # Formatting
-//!
-//! Pure formatting functions are in `crate::format`. This module re-exports
-//! them for backwards compatibility.
+//! Each handler owns its own `TextBuffer` for streaming text accumulation.
 
-use std::sync::LazyLock;
 use std::time::Duration;
 
 use genai_rs::{FunctionExecutionResult, OwnedFunctionCallInfo};
-use termimad::MadSkin;
 
 use crate::logging::log_event;
 
-// Format functions are in crate::format - use that module directly
-
-// ============================================================================
-// Markdown Rendering Infrastructure
-// ============================================================================
-
-/// Termimad skin for markdown rendering. Left-aligns headers.
-/// Used by streaming functions and exported for main.rs TerminalSink.
-pub static SKIN: LazyLock<MadSkin> = LazyLock::new(|| {
-    let mut skin = MadSkin::default();
-    for h in &mut skin.headers {
-        h.align = termimad::Alignment::Left;
-    }
-    skin
-});
-
-/// Render text with markdown formatting but without line wrapping.
-/// Uses a very large width to effectively disable termimad's wrapping.
-pub fn render_markdown_nowrap(text: &str) -> String {
-    use termimad::FmtText;
-    FmtText::from(&SKIN, text, Some(10000)).to_string()
-}
-
-// ============================================================================
-// Text Buffer (shared across EventHandler implementations)
-// ============================================================================
-
-/// Buffer for accumulating streaming text until event boundaries.
-///
-/// Text is buffered via `push()` at each TextDelta event, then flushed with
-/// markdown rendering at event boundaries (tool executing, complete).
-/// The `flush()` method normalizes trailing newlines to exactly `\n\n`.
-#[derive(Debug, Default)]
-pub struct TextBuffer(String);
-
-impl TextBuffer {
-    /// Create a new empty text buffer.
-    pub fn new() -> Self {
-        Self(String::new())
-    }
-
-    /// Append text to the buffer.
-    pub fn push(&mut self, text: &str) {
-        self.0.push_str(text);
-    }
-
-    /// Flush buffered text with markdown rendering, normalized to `\n\n`.
-    /// Returns rendered text, or None if buffer was empty or whitespace-only.
-    pub fn flush(&mut self) -> Option<String> {
-        if self.0.is_empty() {
-            return None;
-        }
-
-        let text = std::mem::take(&mut self.0);
-        let rendered = render_markdown_nowrap(&text);
-
-        // Normalize trailing newlines to exactly \n\n
-        let trimmed = rendered.trim_end_matches('\n');
-        if trimmed.is_empty() {
-            None
-        } else {
-            Some(format!("{}\n\n", trimmed))
-        }
-    }
-
-    /// Check if the buffer is empty.
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-}
+// Re-export text rendering infrastructure from format module
+pub use crate::format::{SKIN, TextBuffer, render_markdown_nowrap};
 
 // ============================================================================
 // EventHandler trait and implementations
@@ -578,90 +503,6 @@ mod tests {
         assert_eq!(events.len(), 1);
         // The recording format is: "tool_result:name:duration:tokens:error:msg"
         assert!(events[0].contains(&format!("{}tok", expected_total)));
-    }
-
-    // =========================================
-    // TextBuffer tests
-    // =========================================
-
-    #[test]
-    fn test_text_buffer_accumulates() {
-        let mut buffer = TextBuffer::new();
-
-        // Buffer text chunks
-        buffer.push("Hello ");
-        buffer.push("world!");
-
-        // Flush returns rendered content
-        let out = buffer.flush();
-        assert!(out.is_some());
-        assert!(out.unwrap().contains("Hello world!"));
-
-        // Buffer is now empty
-        assert!(buffer.flush().is_none());
-        assert!(buffer.is_empty());
-    }
-
-    #[test]
-    fn test_text_buffer_flush_empty() {
-        let mut buffer = TextBuffer::new();
-        assert!(buffer.is_empty());
-        let out = buffer.flush();
-        assert!(out.is_none());
-    }
-
-    #[test]
-    fn test_text_buffer_flush_normalizes_to_double_newline() {
-        // flush() should normalize output to end with exactly \n\n
-        // This is critical for consistent spacing before tool calls
-
-        // Case 1: Text with no trailing newline -> normalized to \n\n
-        let mut buffer = TextBuffer::new();
-        buffer.push("Hello world");
-        let out = buffer.flush().unwrap();
-        assert!(
-            out.ends_with("\n\n"),
-            "Should end with \\n\\n, got: {:?}",
-            out
-        );
-        assert!(!out.ends_with("\n\n\n"), "Should not have triple newline");
-
-        // Case 2: Text with single trailing newline -> normalized to \n\n
-        let mut buffer = TextBuffer::new();
-        buffer.push("Hello world\n");
-        let out = buffer.flush().unwrap();
-        assert!(
-            out.ends_with("\n\n"),
-            "Should end with \\n\\n, got: {:?}",
-            out
-        );
-
-        // Case 3: Text with double trailing newline -> stays \n\n
-        let mut buffer = TextBuffer::new();
-        buffer.push("Hello world\n\n");
-        let out = buffer.flush().unwrap();
-        assert!(
-            out.ends_with("\n\n"),
-            "Should end with \\n\\n, got: {:?}",
-            out
-        );
-        assert!(!out.ends_with("\n\n\n"), "Should not have triple newline");
-    }
-
-    #[test]
-    fn test_text_buffer_flush_returns_none_for_whitespace_only() {
-        // If buffer only contains whitespace/newlines, flush should return None
-        let mut buffer = TextBuffer::new();
-        buffer.push("\n\n");
-        let out = buffer.flush();
-        assert!(out.is_none(), "Whitespace-only buffer should return None");
-    }
-
-    #[test]
-    fn test_text_buffer_default() {
-        // TextBuffer implements Default
-        let buffer = TextBuffer::default();
-        assert!(buffer.is_empty());
     }
 
     // =========================================
