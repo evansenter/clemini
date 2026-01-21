@@ -299,6 +299,29 @@ impl acp::Agent for CleminiAgent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use acp::Agent;
+
+    fn create_test_agent() -> CleminiAgent {
+        let api_key = "test-key".to_string();
+        let client = Client::new(api_key.clone());
+        let tool_service = Arc::new(CleminiToolService::new(
+            std::path::PathBuf::from("/tmp"),
+            120,
+            false,
+            vec![std::path::PathBuf::from("/tmp")],
+            api_key,
+        ));
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        CleminiAgent::new(
+            client,
+            tool_service,
+            "test-model".to_string(),
+            "test prompt".to_string(),
+            RetryConfig::default(),
+            tx,
+        )
+    }
 
     #[test]
     fn test_acp_server_creation() {
@@ -320,5 +343,53 @@ mod tests {
             "test prompt".to_string(),
             RetryConfig::default(),
         );
+    }
+
+    #[test]
+    fn test_session_id_increments_atomically() {
+        let agent = create_test_agent();
+
+        // Each call should return a unique, incrementing ID
+        let id1 = agent.next_session_id.fetch_add(1, Ordering::SeqCst);
+        let id2 = agent.next_session_id.fetch_add(1, Ordering::SeqCst);
+        let id3 = agent.next_session_id.fetch_add(1, Ordering::SeqCst);
+
+        assert_eq!(id1, 1);
+        assert_eq!(id2, 2);
+        assert_eq!(id3, 3);
+    }
+
+    #[tokio::test]
+    async fn test_prompt_rejects_empty_content() {
+        let agent = create_test_agent();
+
+        // Create a prompt request with no text content
+        let request = acp::PromptRequest::new("1".to_string(), vec![]);
+
+        let result: acp::Result<acp::PromptResponse> = agent.prompt(request).await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.message, "No text content in prompt");
+    }
+
+    #[tokio::test]
+    async fn test_prompt_extracts_text_from_content_blocks() {
+        let agent = create_test_agent();
+
+        // Create a prompt request with multiple text blocks
+        let request = acp::PromptRequest::new(
+            "1".to_string(),
+            vec![
+                acp::ContentBlock::Text(acp::TextContent::new("Hello".to_string())),
+                acp::ContentBlock::Text(acp::TextContent::new("World".to_string())),
+            ],
+        );
+
+        let result: acp::Result<acp::PromptResponse> = agent.prompt(request).await;
+
+        // Should succeed (stub returns EndTurn)
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().stop_reason, acp::StopReason::EndTurn);
     }
 }
