@@ -400,7 +400,7 @@ Spawn a clemini subagent to handle delegated work.
 **Limitations:**
 - Subagent cannot use interactive tools (`ask_user`) - stdin is null
 - Subagent gets its own sandbox based on cwd (does not inherit parent's `allowed_paths`)
-- Background tasks are fire-and-forget (no output capture yet - see issue #79)
+- Use `task_output` to check status and retrieve output of background tasks
 
 **Use cases:**
 - Parallel work on independent subtasks
@@ -425,6 +425,36 @@ Spawn a clemini subagent to handle delegated work.
 // Subagent failure (e.g., API error)
 {"prompt": "Analyze this codebase"}
 // → {"status": "failed", "stdout": "", "stderr": "Error: API rate limit exceeded", "exit_code": 1}
+```
+
+---
+
+#### task_output
+Get the output and status of a background task.
+
+**Parameters:**
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| task_id | string | yes | The task ID to check |
+| wait | boolean | no | Wait for completion (up to timeout). (default: false) |
+| timeout | integer | no | Max wait time in seconds if wait=true. (default: 30) |
+
+**Returns:** `{task_id, status, exit_code, stdout, stderr}`
+
+**Examples:**
+
+```json
+// Check status of a running task
+{"task_id": "abc123"}
+// → {"task_id": "abc123", "status": "running", "stdout": "Building...", "stderr": ""}
+
+// Wait for completion
+{"task_id": "abc123", "wait": true}
+// → {"task_id": "abc123", "status": "completed", "exit_code": 0, "stdout": "Build successful", "stderr": ""}
+
+// Wait with custom timeout
+{"task_id": "abc123", "wait": true, "timeout": 5}
+// → {"task_id": "abc123", "status": "running", "stdout": "Still building...", "stderr": ""}
 ```
 
 ---

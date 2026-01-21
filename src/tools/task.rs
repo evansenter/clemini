@@ -2,14 +2,15 @@ use async_trait::async_trait;
 use genai_rs::{CallableFunction, FunctionDeclaration, FunctionError, FunctionParameters};
 use serde_json::{Value, json};
 use std::path::PathBuf;
+use std::process::Stdio;
 use std::sync::atomic::Ordering;
 use tokio::process::Command;
 use tokio::sync::mpsc;
 use tracing::instrument;
 
 use super::ToolEmitter;
-use super::bash::{BACKGROUND_TASKS, NEXT_TASK_ID};
 use crate::agent::AgentEvent;
+use crate::tools::background::{BACKGROUND_TASKS, BackgroundTask, NEXT_TASK_ID};
 
 pub struct TaskTool {
     cwd: PathBuf,
@@ -99,9 +100,9 @@ impl CallableFunction for TaskTool {
             // Note: subprocess inherits environment including GEMINI_API_KEY (required for subagent)
             let child = Command::new(&cmd)
                 .args(&cmd_args)
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
                 .spawn()
                 .map_err(|e| {
                     FunctionError::ExecutionError(format!("Failed to spawn task: {}", e).into())
@@ -110,7 +111,7 @@ impl CallableFunction for TaskTool {
             BACKGROUND_TASKS
                 .lock()
                 .unwrap()
-                .insert(task_id.clone(), child);
+                .insert(task_id.clone(), BackgroundTask::new(child));
 
             self.emit(&format!("  task {} running in background", task_id));
 
@@ -126,9 +127,9 @@ impl CallableFunction for TaskTool {
             let mut child = Command::new(&cmd);
             child
                 .args(&cmd_args)
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
                 .kill_on_drop(true);
 
             let output = child

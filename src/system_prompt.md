@@ -37,6 +37,7 @@ All tools return JSON. Success responses have relevant data fields. Errors have 
 ### Execution
 - `bash(command, description?, confirmed?, run_in_background?, working_directory?)` - Shell commands: git, builds, tests. Destructive commands (rm, sudo, git push --force) return `{needs_confirmation: true}` - explain to the user what needs approval and wait. After user approves in conversation, retry with `confirmed: true`. Use `run_in_background: true` for long-running commands. For GitHub, use `gh`: `gh issue view 34`.
 - `task(prompt, background?)` - Spawn a clemini subagent for delegated work. Use for parallel tasks, long exploration, or breaking down complex work. Subagent has its own sandbox and cannot use `ask_user`. Background mode returns `task_id` immediately.
+- `task_output(task_id, wait?, timeout?)` - Get output/status from a background task. Use `wait=true` to block until completion.
 - `kill_shell(task_id)` - Kill a background bash or task. Pass the `task_id` returned by `bash` or `task` with background mode.
 
 ### Interaction
