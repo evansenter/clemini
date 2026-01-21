@@ -3,6 +3,7 @@
 //! This module re-exports the core types and functions needed for testing.
 //! The binary crate (main.rs) uses these same modules.
 
+pub mod acp;
 pub mod agent;
 pub mod diff;
 pub mod events;

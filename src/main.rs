@@ -12,6 +12,7 @@ use tokio_util::sync::CancellationToken;
 
 mod mcp;
 
+use clemini::acp::AcpServer;
 use clemini::agent::{self, AgentEvent, run_interaction};
 use clemini::events;
 use clemini::format;
@@ -319,6 +320,10 @@ struct Args {
     /// Start as an MCP server (stdio mode)
     #[arg(long)]
     mcp_server: bool,
+
+    /// Start as an ACP server (Agent Client Protocol)
+    #[arg(long)]
+    acp_server: bool,
 }
 
 #[tokio::main]
@@ -387,6 +392,20 @@ async fn main() -> Result<()> {
             retry_config,
         ));
         mcp_server.run_stdio().await?;
+        return Ok(());
+    }
+
+    // ACP server mode - handle early before consuming stdin or printing banner
+    if args.acp_server {
+        logging::set_output_sink(Arc::new(FileSink));
+        let acp_server = Arc::new(AcpServer::new(
+            client,
+            tool_service,
+            model,
+            system_prompt,
+            retry_config,
+        ));
+        acp_server.run_stdio().await?;
         return Ok(());
     }
 
