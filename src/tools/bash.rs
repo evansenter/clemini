@@ -1,25 +1,20 @@
 use crate::agent::AgentEvent;
+use crate::tools::background::{BACKGROUND_TASKS, BackgroundTask, NEXT_TASK_ID};
 use crate::tools::{MAX_TOOL_OUTPUT_LEN, ToolEmitter, error_codes, error_response};
 use async_trait::async_trait;
 use colored::Colorize;
 use genai_rs::{CallableFunction, FunctionDeclaration, FunctionError, FunctionParameters};
 use regex::Regex;
 use serde_json::{Value, json};
-use std::collections::HashMap;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{LazyLock, Mutex};
+use std::sync::LazyLock;
+use std::sync::atomic::Ordering;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 use tracing::instrument;
-
-pub(crate) static BACKGROUND_TASKS: LazyLock<Mutex<HashMap<String, tokio::process::Child>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-
-pub(crate) static NEXT_TASK_ID: AtomicUsize = AtomicUsize::new(1);
 
 /// Blocked command patterns that are always rejected.
 static BLOCKED_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
@@ -299,8 +294,8 @@ impl CallableFunction for BashTool {
                 .arg(command)
                 .current_dir(&working_dir)
                 .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
                 .spawn()
                 .map_err(|e| {
                     FunctionError::ExecutionError(format!("Failed to spawn process: {}", e).into())
@@ -309,7 +304,7 @@ impl CallableFunction for BashTool {
             BACKGROUND_TASKS
                 .lock()
                 .unwrap()
-                .insert(task_id.clone(), child);
+                .insert(task_id.clone(), BackgroundTask::new(child));
 
             let mut response = json!({
                 "command": command,
@@ -676,11 +671,13 @@ mod tests {
         }
 
         // Cleanup: kill the background process
-        let child = {
+        let task = {
             let mut tasks = BACKGROUND_TASKS.lock().unwrap();
             tasks.remove(&task_id)
         };
-        if let Some(mut child) = child {
+        if let Some(mut task) = task
+            && let Some(mut child) = task.child.take()
+        {
             let _ = child.kill().await;
         }
     }
@@ -714,14 +711,18 @@ mod tests {
         assert_ne!(id1, id2);
 
         // Cleanup - extract children before dropping lock to avoid holding across await
-        let (child1, child2) = {
+        let (task1, task2) = {
             let mut tasks = BACKGROUND_TASKS.lock().unwrap();
             (tasks.remove(id1), tasks.remove(id2))
         };
-        if let Some(mut child) = child1 {
+        if let Some(mut task) = task1
+            && let Some(mut child) = task.child.take()
+        {
             let _ = child.kill().await;
         }
-        if let Some(mut child) = child2 {
+        if let Some(mut task) = task2
+            && let Some(mut child) = task.child.take()
+        {
             let _ = child.kill().await;
         }
     }

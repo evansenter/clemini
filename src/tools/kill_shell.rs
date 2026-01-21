@@ -49,26 +49,35 @@ impl CallableFunction for KillShellTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| FunctionError::ArgumentMismatch("Missing task_id".to_string()))?;
 
-        let mut child = {
-            let mut tasks = crate::tools::bash::BACKGROUND_TASKS.lock().unwrap();
+        let task = {
+            let mut tasks = crate::tools::background::BACKGROUND_TASKS.lock().unwrap();
             tasks.remove(task_id)
         };
 
-        if let Some(mut child) = child.take() {
-            match child.kill().await {
-                Ok(_) => {
-                    self.emit(&format!("  {}", "killed".dimmed()));
-                    Ok(json!({
-                        "task_id": task_id,
-                        "status": "killed",
-                        "success": true
-                    }))
+        if let Some(mut task) = task {
+            if let Some(mut child) = task.child.take() {
+                match child.kill().await {
+                    Ok(_) => {
+                        self.emit(&format!("  {}", "killed".dimmed()));
+                        Ok(json!({
+                            "task_id": task_id,
+                            "status": "killed",
+                            "success": true
+                        }))
+                    }
+                    Err(e) => Ok(error_response(
+                        &format!("Failed to kill task {}: {}", task_id, e),
+                        error_codes::IO_ERROR,
+                        json!({ "task_id": task_id }),
+                    )),
                 }
-                Err(e) => Ok(error_response(
-                    &format!("Failed to kill task {}: {}", task_id, e),
-                    error_codes::IO_ERROR,
+            } else {
+                // Task object exists but child is missing (already finished?)
+                Ok(error_response(
+                    &format!("Task {} already finished or process missing", task_id),
+                    error_codes::NOT_FOUND,
                     json!({ "task_id": task_id }),
-                )),
+                ))
             }
         } else {
             Ok(error_response(
@@ -116,7 +125,7 @@ mod tests {
         assert_eq!(kill_result["status"], "killed");
 
         // Verify it's gone from the map
-        let tasks = crate::tools::bash::BACKGROUND_TASKS.lock().unwrap();
+        let tasks = crate::tools::background::BACKGROUND_TASKS.lock().unwrap();
         assert!(!tasks.contains_key(task_id));
     }
 
