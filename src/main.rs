@@ -14,6 +14,7 @@ mod mcp;
 
 use clemini::agent::{self, AgentEvent, run_interaction};
 use clemini::events;
+use clemini::format;
 use clemini::logging::OutputSink;
 use clemini::tools::{self, CleminiToolService};
 

@@ -8,10 +8,10 @@ use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio_util::sync::CancellationToken;
 use tracing::instrument;
-// Note: info! macro goes to JSON logs only. For human-readable logs, use crate::logging::log_event()
 
 use crate::agent::{AgentEvent, RetryConfig, run_interaction};
-use crate::events::{EventHandler, TextBuffer};
+use crate::events::EventHandler;
+use crate::format::TextBuffer;
 use crate::tools::CleminiToolService;
 
 #[derive(Debug, Deserialize, Clone)]
