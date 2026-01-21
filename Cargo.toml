@@ -10,9 +10,13 @@ license = "MIT"
 # AI
 genai-rs = "0.7.2"
 
+# ACP (Agent Client Protocol)
+agent-client-protocol = "0.9"
+agent-client-protocol-schema = "0.10"
+
 # Async runtime
 tokio = { version = "1", features = ["full"] }
-tokio-util = "0.7"
+tokio-util = { version = "0.7", features = ["compat"] }
 futures-util = "0.3"
 async-trait = "0.1"
 
