@@ -163,9 +163,10 @@ pub fn format_tool_args(tool_name: &str, args: &Value) -> String {
 }
 
 /// Format tool executing line for display.
+/// Includes trailing newline for use with emit_line.
 pub fn format_tool_executing(name: &str, args: &Value) -> String {
     let args_str = format_tool_args(name, args);
-    format!("┌─ {} {}", name.cyan(), args_str)
+    format!("┌─ {} {}\n", name.cyan(), args_str)
 }
 
 /// Rough token estimate based on `CHARS_PER_TOKEN`.
@@ -395,7 +396,8 @@ pub fn dispatch_event<H: EventHandler>(handler: &mut H, event: &crate::agent::Ag
         AgentEvent::ToolOutput(output) => {
             handler.on_tool_output(output);
             // Tool output lines don't get trailing blank line (they're part of a block)
-            crate::logging::log_event_line(output);
+            // Add newline since tool output doesn't include its own
+            crate::logging::log_event_line(&format!("{}\n", output));
         }
         AgentEvent::Retry {
             attempt,
