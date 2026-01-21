@@ -41,8 +41,8 @@ src/
 ├── lib.rs           # Library crate exposing core types for integration tests
 ├── agent.rs         # Core interaction logic, AgentEvent enum
 ├── diff.rs          # Diff formatting for edit tool output
-├── events.rs        # EventHandler trait, TerminalEventHandler, TextBuffer
-├── format.rs        # Pure formatting functions (format_tool_*, colors)
+├── events.rs        # EventHandler trait, TerminalEventHandler
+├── format.rs        # Pure formatting functions, TextBuffer, markdown rendering
 ├── logging.rs       # OutputSink trait, log_event functions
 ├── mcp.rs           # MCP server implementation
 ├── system_prompt.md # System prompt for Gemini (included at compile time)
@@ -165,7 +165,7 @@ These use `validate_response_semantically()` from `tests/common/mod.rs` - a seco
 | Tool error detail (`└─ error:...`) | `format_error_detail()` in `format.rs` |
 | Tool args format (`key=value`) | `format_tool_args()` in `format.rs` |
 | Context warnings | `format_context_warning()` in `format.rs` |
-| Streaming text (markdown) | `TextBuffer::push()` + `TextBuffer::flush()` in `events.rs` |
+| Streaming text (markdown) | `TextBuffer::push()` + `TextBuffer::flush()` in `format.rs` |
 
 Both EventHandler implementations (`TerminalEventHandler`, `McpEventHandler`) use these shared functions, so changes apply everywhere automatically.
 
@@ -223,8 +223,8 @@ Uses `try_send` (non-blocking) to avoid stalling tools on slow consumers. The fa
 | Module | Responsibility |
 |--------|----------------|
 | `agent.rs` | Core interaction logic, `AgentEvent` enum, `run_interaction()` |
-| `events.rs` | `EventHandler` trait, `TextBuffer`, streaming text rendering |
-| `format.rs` | Pure formatting functions (`format_*` helpers) |
+| `events.rs` | `EventHandler` trait, `TerminalEventHandler`, event dispatch |
+| `format.rs` | Pure formatting functions, `TextBuffer`, markdown rendering |
 | `main.rs` | CLI entry, REPL loop, OutputSink implementations |
 | `mcp.rs` | MCP server protocol, `McpEventHandler` |
 
