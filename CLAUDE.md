@@ -41,7 +41,8 @@ src/
 ├── lib.rs           # Library crate exposing core types for integration tests
 ├── agent.rs         # Core interaction logic, AgentEvent enum
 ├── diff.rs          # Diff formatting for edit tool output
-├── events.rs        # EventHandler trait, TerminalEventHandler
+├── events.rs        # EventHandler trait, TerminalEventHandler, TextBuffer
+├── format.rs        # Pure formatting functions (format_tool_*, colors)
 ├── logging.rs       # OutputSink trait, log_event functions
 ├── mcp.rs           # MCP server implementation
 ├── system_prompt.md # System prompt for Gemini (included at compile time)
@@ -140,7 +141,7 @@ Debugging: `LOUD_WIRE=1` logs all HTTP requests/responses.
 
 **Quality gates before pushing** - All of these must pass:
 - `make clippy` (no warnings)
-- `make fmt` then check for changes (formatted)
+- `make fmt` (run formatter, then commit any changes it makes)
 - `make test` (tests pass)
 
 Don't skip tests. If a test is flaky or legitimately broken by your change, fix the test as part of the PR.
@@ -155,20 +156,28 @@ Run locally with: `cargo test --test <name> -- --include-ignored --nocapture`
 
 These use `validate_response_semantically()` from `tests/common/mod.rs` - a second Gemini call with structured output that judges whether responses are appropriate. This provides a middle ground between brittle string assertions and purely structural checks.
 
-**Visual output changes** - Tool output formatting is centralized in `src/events.rs`:
+**Visual output changes** - Tool output formatting is centralized in `src/format.rs`:
 
 | Change | Location |
 |--------|----------|
-| Tool executing format (`┌─ name...`) | `format_tool_executing()` in `events.rs` |
-| Tool result format (`└─ name...`) | `format_tool_result()` in `events.rs` |
-| Tool error detail (`└─ error:...`) | `format_error_detail()` in `events.rs` |
-| Tool args format (`key=value`) | `format_tool_args()` in `events.rs` |
-| Context warnings | `format_context_warning()` in `events.rs` |
+| Tool executing format (`┌─ name...`) | `format_tool_executing()` in `format.rs` |
+| Tool result format (`└─ name...`) | `format_tool_result()` in `format.rs` |
+| Tool error detail (`└─ error:...`) | `format_error_detail()` in `format.rs` |
+| Tool args format (`key=value`) | `format_tool_args()` in `format.rs` |
+| Context warnings | `format_context_warning()` in `format.rs` |
 | Streaming text (markdown) | `TextBuffer::push()` + `TextBuffer::flush()` in `events.rs` |
 
 Both EventHandler implementations (`TerminalEventHandler`, `McpEventHandler`) use these shared functions, so changes apply everywhere automatically.
 
 Test visual changes by running clemini in each mode and verifying the output looks correct.
+
+**Output formatting tests are critical** - The output formatting has strict contracts that were hard to get right. Keep the test coverage comprehensive:
+
+- `src/format.rs` tests: Format function contracts (newlines, indentation, structure)
+- `src/main.rs` output_tests: Log file spacing, complete tool blocks, edge cases
+- `tests/event_ordering_tests.rs`: End-to-end event ordering and output
+
+When modifying output code, ensure all these tests pass. Add new tests for any new format patterns. Regressions in output spacing are subtle and hard to catch without tests.
 
 ## Design Principles
 
@@ -180,6 +189,7 @@ Test visual changes by running clemini in each mode and verifying the output loo
 | **Graceful unknowns** | Unknown/unexpected data is logged and handled, not crashed on. Tool errors return JSON so the model can retry. |
 | **Formatting owns visual output** | Format functions return complete visual blocks including spacing. Output layer just emits—no newline decisions. |
 | **Pure rendering** | Format/render functions are pure: no side effects, no global state. Color control, file I/O, and logging happen in callers, not formatters. |
+| **Format helpers for all output** | All colored/styled output uses `format_*` helper functions. No inline `.cyan()`, `.bold()`, etc. in handlers or business logic. Keeps formatting testable and centralized. |
 | **Breaking changes over shims** | Clean breaks preferred. No deprecated wrappers, re-exports for compatibility, or `// legacy` code paths. |
 
 ### Architecture Principles
@@ -213,6 +223,23 @@ Uses `try_send` (non-blocking) to avoid stalling tools on slow consumers. The fa
 | Module | Responsibility |
 |--------|----------------|
 | `agent.rs` | Core interaction logic, `AgentEvent` enum, `run_interaction()` |
-| `events.rs` | `EventHandler` trait, formatting functions, streaming text rendering |
+| `events.rs` | `EventHandler` trait, `TextBuffer`, streaming text rendering |
+| `format.rs` | Pure formatting functions (`format_*` helpers) |
 | `main.rs` | CLI entry, REPL loop, OutputSink implementations |
 | `mcp.rs` | MCP server protocol, `McpEventHandler` |
+
+### Output Streams (stdout vs stderr)
+
+**stdout** - The AI conversation (what you'd pipe to a file to save the chat):
+- Model text responses
+- Tool output
+
+**stderr** - Session status and diagnostics:
+- Startup banner and tip
+- User input echo (visual feedback)
+- Builtin command responses (`/model`, `/pwd`, etc.)
+- Status messages (`[conversation cleared]`)
+- ctrl-c message
+- Error messages
+
+This separation allows `clemini -p "prompt" > output.txt` to capture just the conversation.

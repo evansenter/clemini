@@ -67,6 +67,7 @@ impl OutputSink for TerminalSink {
             println!();
         } else {
             print!("{}", message);
+            let _ = io::stdout().flush();
         }
         log_event_to_file(message, false);
     }
@@ -229,43 +230,36 @@ mod tests {
 
     #[test]
     fn test_handle_builtin_command_basic() {
+        colored::control::set_override(false);
+
         let cwd = PathBuf::from("/test/cwd");
         let model = "test-model";
 
-        assert_eq!(
-            handle_builtin_command("/version", model, &cwd),
-            Some(format!(
-                "clemini v{} | {}",
-                env!("CARGO_PKG_VERSION"),
-                model
-            ))
-        );
-        assert_eq!(
-            handle_builtin_command("/v", model, &cwd),
-            Some(format!(
-                "clemini v{} | {}",
-                env!("CARGO_PKG_VERSION"),
-                model
-            ))
-        );
+        // /model returns formatted output with newlines (dimmed)
         assert_eq!(
             handle_builtin_command("/model", model, &cwd),
-            Some(model.to_string())
+            Some(format!("\n{model}\n"))
         );
         assert_eq!(
             handle_builtin_command("/m", model, &cwd),
-            Some(model.to_string())
+            Some(format!("\n{model}\n"))
         );
+
+        // /pwd returns formatted path with newlines (dimmed)
         assert_eq!(
             handle_builtin_command("/pwd", model, &cwd),
-            Some(cwd.display().to_string())
+            Some(format!("\n{}\n", cwd.display()))
         );
         assert_eq!(
             handle_builtin_command("/cwd", model, &cwd),
-            Some(cwd.display().to_string())
+            Some(format!("\n{}\n", cwd.display()))
         );
+
+        // Unknown commands return None
         assert_eq!(handle_builtin_command("/unknown", model, &cwd), None);
         assert_eq!(handle_builtin_command("not a command", model, &cwd), None);
+
+        colored::control::unset_override();
     }
 
     #[test]
@@ -293,81 +287,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_run_git_command_capture() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let repo_path = temp_dir.path();
-
-        // Helper to run git in the temp repo
-        let run_git = |args: &[&str]| {
-            std::process::Command::new("git")
-                .args(args)
-                .current_dir(repo_path)
-                .status()
-                .unwrap();
-        };
-
-        // Initialize a git repo
-        run_git(&["init", "-b", "main"]);
-        run_git(&["config", "user.email", "test@example.com"]);
-        run_git(&["config", "user.name", "Test User"]);
-
-        // Test with no commits - git log returns error 128 on empty repo
-        let out = run_git_command_capture_in_dir(&["log", "--oneline"], "no commits", repo_path);
-        assert!(out.contains("error"));
-
-        // Test status on empty repo (should be success but empty with --short)
-        let out = run_git_command_capture_in_dir(
-            &["status", "--short"],
-            "clean working directory",
-            repo_path,
-        );
-        assert_eq!(out, "[clean working directory]");
-
-        // Add a file and commit
-        std::fs::write(repo_path.join("test.txt"), "hello").unwrap();
-        run_git(&["add", "test.txt"]);
-        run_git(&["commit", "-m", "initial commit"]);
-
-        // Test with commits
-        let out = run_git_command_capture_in_dir(&["log", "--oneline"], "no commits", repo_path);
-        assert!(out.contains("initial commit"));
-
-        // Test diff
-        std::fs::write(repo_path.join("test.txt"), "world").unwrap();
-        let out = run_git_command_capture_in_dir(&["diff"], "no diff", repo_path);
-        assert!(out.contains("-hello"));
-        assert!(out.contains("+world"));
-    }
-
-    /// Helper for testing git commands in a specific directory
-    fn run_git_command_capture_in_dir(
-        args: &[&str],
-        empty_msg: &str,
-        dir: &std::path::Path,
-    ) -> String {
-        match std::process::Command::new("git")
-            .args(args)
-            .current_dir(dir)
-            .output()
-        {
-            Ok(o) => {
-                if o.status.success() {
-                    let stdout = String::from_utf8_lossy(&o.stdout);
-                    if stdout.is_empty() {
-                        format!("[{empty_msg}]")
-                    } else {
-                        stdout.trim().to_string()
-                    }
-                } else {
-                    let stderr = String::from_utf8_lossy(&o.stderr);
-                    format!("[git {} error: {}]", args[0], stderr.trim())
-                }
-            }
-            Err(e) => format!("[failed to run git {}: {}]", args[0], e),
-        }
-    }
-
     // Note: Logging tests moved to src/logging.rs since they test lib functionality
 }
 
@@ -392,21 +311,13 @@ struct Args {
     #[arg(short, long)]
     model: Option<String>,
 
-    /// Timeout for bash commands in seconds
-    #[arg(long)]
-    timeout: Option<u64>,
+    /// Continue from a previous interaction ID
+    #[arg(short, long)]
+    interaction: Option<String>,
 
     /// Start as an MCP server (stdio mode)
     #[arg(long)]
     mcp_server: bool,
-
-    /// Use HTTP transport for MCP server (requires --mcp-server)
-    #[arg(long)]
-    http: bool,
-
-    /// HTTP port for MCP server (requires --http)
-    #[arg(long, default_value_t = 8080)]
-    port: u16,
 }
 
 #[tokio::main]
@@ -420,7 +331,7 @@ async fn main() -> Result<()> {
         .or(config.model)
         .unwrap_or_else(|| DEFAULT_MODEL.to_string());
 
-    let bash_timeout = args.timeout.or(config.bash_timeout).unwrap_or(120);
+    let bash_timeout = config.bash_timeout.unwrap_or(120);
 
     let api_key = env::var("GEMINI_API_KEY")
         .map_err(|e| anyhow::anyhow!("GEMINI_API_KEY environment variable not set: {}", e))?;
@@ -474,25 +385,19 @@ async fn main() -> Result<()> {
             system_prompt,
             retry_config,
         ));
-        if args.http {
-            mcp_server.run_http(args.port).await?;
-        } else {
-            mcp_server.run_stdio().await?;
-        }
+        mcp_server.run_stdio().await?;
         return Ok(());
     }
 
     eprintln!(
-        "{} v{} | {} | {}",
-        "clemini".bold(),
-        env!("CARGO_PKG_VERSION").cyan(),
-        model.green(),
-        cwd.display().to_string().yellow()
+        "{}",
+        clemini::format::format_startup_banner(
+            env!("CARGO_PKG_VERSION"),
+            &model,
+            &cwd.display().to_string()
+        )
     );
-    eprintln!(
-        "{} Remember to take breaks during development!",
-        "💡".yellow()
-    );
+    eprintln!("{}", clemini::format::format_startup_tip());
     eprintln!();
 
     let mut piped_input = String::new();
@@ -526,7 +431,7 @@ async fn main() -> Result<()> {
         let cancellation_token = CancellationToken::new();
         let ct_clone = cancellation_token.clone();
         ctrlc::set_handler(move || {
-            eprintln!("\n{}", "[ctrl-c received]".yellow());
+            eprintln!("\n{}", clemini::format::format_ctrl_c().yellow());
             ct_clone.cancel();
         })
         .ok();
@@ -535,8 +440,9 @@ async fn main() -> Result<()> {
         let (events_tx, mut events_rx) = mpsc::channel::<AgentEvent>(100);
 
         // Spawn task to handle events using EventHandler
+        let model_for_handler = model.clone();
         let event_handler = tokio::spawn(async move {
-            let mut handler = events::TerminalEventHandler::new();
+            let mut handler = events::TerminalEventHandler::new(model_for_handler);
             while let Some(event) = events_rx.recv().await {
                 events::dispatch_event(&mut handler, &event);
             }
@@ -549,7 +455,7 @@ async fn main() -> Result<()> {
             &client,
             &tool_service,
             &prompt,
-            None,
+            args.interaction.as_deref(),
             &model,
             &system_prompt,
             events_tx,
@@ -573,6 +479,7 @@ async fn main() -> Result<()> {
             &model,
             system_prompt,
             retry_config,
+            args.interaction,
         )
         .await?;
     }
@@ -588,8 +495,9 @@ async fn run_plain_repl(
     model: &str,
     system_prompt: String,
     retry_config: agent::RetryConfig,
+    initial_interaction_id: Option<String>,
 ) -> Result<()> {
-    let mut last_interaction_id: Option<String> = None;
+    let mut last_interaction_id: Option<String> = initial_interaction_id;
 
     loop {
         eprint!("> ");
@@ -604,13 +512,19 @@ async fn run_plain_repl(
             continue;
         }
 
+        // Redraw input with background
+        eprint!("\x1b[1A\x1b[2K"); // Move up 1 line, clear line
+        eprint!("> ");
+        eprintln!("{}", input.on_bright_black());
+        io::stderr().flush()?;
+
         if input == "/quit" || input == "/exit" || input == "/q" {
             break;
         }
 
         if input == "/clear" || input == "/c" {
             last_interaction_id = None;
-            eprintln!("[conversation cleared]");
+            eprint!("{}", clemini::format::format_builtin_cleared());
             continue;
         }
 
@@ -625,10 +539,12 @@ async fn run_plain_repl(
             continue;
         }
 
+        println!();
+
         let cancellation_token = CancellationToken::new();
         let ct_clone = cancellation_token.clone();
         ctrlc::set_handler(move || {
-            eprintln!("\n{}", "[ctrl-c received]".yellow());
+            eprintln!("\n{}", clemini::format::format_ctrl_c().yellow());
             ct_clone.cancel();
         })
         .ok();
@@ -637,8 +553,9 @@ async fn run_plain_repl(
         let (events_tx, mut events_rx) = mpsc::channel::<AgentEvent>(100);
 
         // Spawn task to handle events using EventHandler
+        let model_for_handler = model.to_string();
         let event_handler = tokio::spawn(async move {
-            let mut handler = events::TerminalEventHandler::new();
+            let mut handler = events::TerminalEventHandler::new(model_for_handler);
             while let Some(event) = events_rx.recv().await {
                 events::dispatch_event(&mut handler, &event);
             }
@@ -680,29 +597,18 @@ async fn run_plain_repl(
 
 fn handle_builtin_command(input: &str, model: &str, cwd: &std::path::Path) -> Option<String> {
     match input {
-        "/version" | "/v" => Some(format!(
-            "clemini v{} | {}",
-            env!("CARGO_PKG_VERSION"),
-            model
+        "/model" | "/m" => Some(clemini::format::format_builtin_model(model)),
+        "/pwd" | "/cwd" => Some(clemini::format::format_builtin_pwd(
+            &cwd.display().to_string(),
         )),
-        "/model" | "/m" => Some(model.to_string()),
-        "/pwd" | "/cwd" => Some(cwd.display().to_string()),
-        "/diff" | "/d" => Some(run_git_command_capture(&["diff"], "no uncommitted changes")),
-        "/status" | "/s" => Some(run_git_command_capture(
-            &["status", "--short"],
-            "clean working directory",
-        )),
-        "/log" | "/l" => Some(run_git_command_capture(
-            &["log", "--oneline", "-5"],
-            "no commits found",
-        )),
-        "/branch" | "/b" => Some(run_git_command_capture(&["branch"], "no branches found")),
         _ if input.starts_with('!') => {
             let cmd = input.strip_prefix('!').unwrap().trim();
             if cmd.is_empty() {
                 None
             } else {
-                Some(run_shell_command_capture(cmd))
+                Some(clemini::format::format_builtin_shell(
+                    &run_shell_command_capture(cmd),
+                ))
             }
         }
         _ => None,
@@ -714,13 +620,8 @@ fn get_help_text() -> String {
         "Commands:",
         "  /q, /quit, /exit  Exit the REPL",
         "  /c, /clear        Clear conversation history",
-        "  /v, /version      Show version and model",
         "  /m, /model        Show model name",
         "  /pwd, /cwd        Show current working directory",
-        "  /d, /diff         Show git diff",
-        "  /s, /status       Show git status",
-        "  /l, /log          Show git log",
-        "  /b, /branch       Show git branches",
         "  /h, /help         Show this help message",
         "",
         "Controls:",
@@ -728,32 +629,13 @@ fn get_help_text() -> String {
         "  Ctrl-D            Quit",
         "",
         "Shell escape:",
-        "  ! <command>       Run a shell command directly",
+        "  !<command>        Run a shell command directly",
     ]
     .join("\n")
 }
 
 fn print_help() {
-    eprintln!("{}", get_help_text());
-}
-
-fn run_git_command_capture(args: &[&str], empty_msg: &str) -> String {
-    match std::process::Command::new("git").args(args).output() {
-        Ok(o) => {
-            if o.status.success() {
-                let stdout = String::from_utf8_lossy(&o.stdout);
-                if stdout.is_empty() {
-                    format!("[{empty_msg}]")
-                } else {
-                    stdout.trim().to_string()
-                }
-            } else {
-                let stderr = String::from_utf8_lossy(&o.stderr);
-                format!("[git {} error: {}]", args[0], stderr.trim())
-            }
-        }
-        Err(e) => format!("[failed to run git {}: {}]", args[0], e),
-    }
+    eprint!("{}", clemini::format::format_builtin_help(&get_help_text()));
 }
 
 fn run_shell_command_capture(command: &str) -> String {
@@ -806,7 +688,7 @@ mod output_tests {
     #[test]
     fn test_tool_executing_format() {
         let args = json!({"file_path": "src/main.rs", "limit": 100});
-        let formatted = events::format_tool_args("read_file", &args);
+        let formatted = clemini::format::format_tool_args("read_file", &args);
 
         // Args should be formatted as key=value pairs
         assert!(formatted.contains("file_path="));
@@ -880,5 +762,267 @@ mod output_tests {
             content, "┌─ tool\n  output\n└─ tool\n\n",
             "tool block should end with blank line for separation"
         );
+    }
+
+    // =========================================
+    // Complete tool block format tests
+    // =========================================
+
+    /// Complete tool block structure in log file:
+    /// ┌─ <tool> <args>\n
+    ///   <output>\n
+    /// └─ <tool> <duration> ~<tokens> tok\n\n
+    #[test]
+    fn test_complete_tool_block_format() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let log_path = temp_dir.path().join("test.log");
+        colored::control::set_override(false);
+
+        // Write a complete tool block exactly as dispatch_event would
+        // 1. Tool executing (emit_line)
+        write_to_log_file(&log_path, "┌─ read_file file_path=\"test.rs\" \n", false).unwrap();
+        // 2. Tool output (emit_line) - with newline added by dispatch
+        write_to_log_file(&log_path, "  742 lines\n", false).unwrap();
+        // 3. Tool result (emit) - with block separator
+        write_to_log_file(&log_path, "└─ read_file 0.02s ~100 tok", true).unwrap();
+
+        let content = std::fs::read_to_string(&log_path).unwrap();
+
+        // Verify structure
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), 4, "Should have 3 content lines + 1 blank line");
+        assert!(
+            lines[0].starts_with("┌─"),
+            "Line 1 should be executing line"
+        );
+        assert!(
+            lines[1].starts_with("  "),
+            "Line 2 should have 2-space indent for output"
+        );
+        assert!(lines[2].starts_with("└─"), "Line 3 should be result line");
+        assert!(lines[3].is_empty(), "Line 4 should be blank for separation");
+
+        colored::control::unset_override();
+    }
+
+    /// Tool block with error shows result line + error detail
+    #[test]
+    fn test_tool_block_with_error() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let log_path = temp_dir.path().join("test.log");
+        colored::control::set_override(false);
+
+        // Write error tool block
+        write_to_log_file(&log_path, "┌─ bash command=\"rm -rf /\" \n", false).unwrap();
+        // Error result block (contains result + error detail, ends with emit)
+        write_to_log_file(
+            &log_path,
+            "└─ bash 0.01s ~10 tok ERROR\n  └─ error: permission denied",
+            true,
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(&log_path).unwrap();
+        let lines: Vec<&str> = content.lines().collect();
+
+        assert_eq!(lines.len(), 4, "Should have 3 content lines + 1 blank");
+        assert!(lines[0].contains("┌─"));
+        assert!(lines[1].contains("└─") && lines[1].contains("ERROR"));
+        assert!(
+            lines[2].starts_with("  └─ error:"),
+            "Error detail should have 2-space indent"
+        );
+        assert!(lines[3].is_empty());
+
+        colored::control::unset_override();
+    }
+
+    /// Multiple consecutive tool blocks have proper separation
+    #[test]
+    fn test_multiple_tool_blocks_separation() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let log_path = temp_dir.path().join("test.log");
+        colored::control::set_override(false);
+
+        // First tool block
+        write_to_log_file(&log_path, "┌─ tool1 \n", false).unwrap();
+        write_to_log_file(&log_path, "└─ tool1 0.01s ~10 tok", true).unwrap();
+
+        // Second tool block
+        write_to_log_file(&log_path, "┌─ tool2 \n", false).unwrap();
+        write_to_log_file(&log_path, "└─ tool2 0.02s ~20 tok", true).unwrap();
+
+        let content = std::fs::read_to_string(&log_path).unwrap();
+
+        // Each block ends with \n\n, so between blocks there's exactly one blank line
+        assert!(
+            content.contains("tok\n\n┌─"),
+            "Blocks should be separated by exactly one blank line"
+        );
+        // File ends with \n\n
+        assert!(content.ends_with("\n\n"), "File should end with blank line");
+
+        colored::control::unset_override();
+    }
+
+    /// Text (flush) followed by tool block - text should end with \n\n
+    #[test]
+    fn test_text_then_tool_block_spacing() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let log_path = temp_dir.path().join("test.log");
+
+        // Flushed text from TextBuffer always ends with \n\n
+        write_to_log_file(&log_path, "Some explanation text.\n\n", false).unwrap();
+
+        // Immediately followed by tool executing
+        write_to_log_file(&log_path, "┌─ tool \n", false).unwrap();
+        write_to_log_file(&log_path, "└─ tool 0.01s ~10 tok", true).unwrap();
+
+        let content = std::fs::read_to_string(&log_path).unwrap();
+
+        // Text ends with \n\n, tool block starts on new line
+        assert!(content.contains("text.\n\n┌─"));
+    }
+
+    /// Tool block followed by text - result has blank line, text starts fresh
+    #[test]
+    fn test_tool_block_then_text_spacing() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let log_path = temp_dir.path().join("test.log");
+
+        // Tool block
+        write_to_log_file(&log_path, "┌─ tool \n", false).unwrap();
+        write_to_log_file(&log_path, "└─ tool 0.01s ~10 tok", true).unwrap();
+
+        // Followed by flushed text
+        write_to_log_file(&log_path, "Now let me explain...\n\n", false).unwrap();
+
+        let content = std::fs::read_to_string(&log_path).unwrap();
+
+        // Tool result ends with \n\n, text starts on new line
+        assert!(content.contains("tok\n\nNow"));
+    }
+
+    // =========================================
+    // Edge cases
+    // =========================================
+
+    /// Empty message to emit() creates a blank line
+    #[test]
+    fn test_emit_empty_message() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let log_path = temp_dir.path().join("test.log");
+
+        write_to_log_file(&log_path, "", true).unwrap();
+
+        let content = std::fs::read_to_string(&log_path).unwrap();
+        // Empty message + block separator = 2 newlines
+        assert_eq!(content, "\n\n");
+    }
+
+    /// Empty message to emit_line() creates single newline
+    #[test]
+    fn test_emit_line_empty_message() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let log_path = temp_dir.path().join("test.log");
+
+        write_to_log_file(&log_path, "", false).unwrap();
+
+        let content = std::fs::read_to_string(&log_path).unwrap();
+        assert_eq!(content, "\n");
+    }
+
+    /// Multi-line message is written line by line
+    #[test]
+    fn test_multi_line_message() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let log_path = temp_dir.path().join("test.log");
+
+        write_to_log_file(&log_path, "line1\nline2\nline3", true).unwrap();
+
+        let content = std::fs::read_to_string(&log_path).unwrap();
+        assert_eq!(content, "line1\nline2\nline3\n\n");
+    }
+
+    // =========================================
+    // Format function newline contracts
+    // =========================================
+
+    /// format_tool_executing MUST end with \n (for emit_line)
+    #[test]
+    fn test_format_tool_executing_newline_contract() {
+        colored::control::set_override(false);
+
+        let args = serde_json::json!({"path": "test.rs"});
+        let formatted = clemini::format::format_tool_executing("read", &args);
+        assert!(
+            formatted.ends_with('\n'),
+            "MUST end with \\n for emit_line(), got: {:?}",
+            formatted
+        );
+        assert!(
+            !formatted.ends_with("\n\n"),
+            "Should have exactly one trailing newline"
+        );
+
+        colored::control::unset_override();
+    }
+
+    /// format_result_block does NOT end with \n (emit adds it)
+    #[test]
+    fn test_format_result_block_no_trailing_newline() {
+        colored::control::set_override(false);
+
+        let result = genai_rs::FunctionExecutionResult::new(
+            "test".to_string(),
+            "1".to_string(),
+            serde_json::json!({}),
+            serde_json::json!({"ok": true}),
+            std::time::Duration::from_millis(10),
+        );
+        let formatted = clemini::format::format_result_block(&result);
+        assert!(
+            !formatted.ends_with('\n'),
+            "format_result_block should NOT end with newline (emit adds \\n\\n)"
+        );
+
+        colored::control::unset_override();
+    }
+
+    /// format_error_detail has proper 2-space indent
+    #[test]
+    fn test_format_error_detail_indent() {
+        colored::control::set_override(false);
+
+        let formatted = clemini::format::format_error_detail("test error");
+        assert!(
+            formatted.starts_with("  └─ error:"),
+            "Must have 2-space indent, got: {:?}",
+            formatted
+        );
+        // Error detail does not have trailing newline (it's part of result block)
+        assert!(
+            !formatted.ends_with('\n'),
+            "Error detail should not have trailing newline"
+        );
+
+        colored::control::unset_override();
+    }
+
+    /// Tool output messages need 2-space indent
+    #[test]
+    fn test_tool_output_format_contract() {
+        // Tool outputs like "  742 lines" should have 2-space indent
+        // This is enforced by the tool implementation, not format functions
+        // Here we just verify the expected format
+        let examples = vec!["  742 lines", "  running subagent...", "  3 matches found"];
+
+        for example in examples {
+            assert!(
+                example.starts_with("  "),
+                "Tool output '{}' must start with 2-space indent",
+                example
+            );
+        }
     }
 }

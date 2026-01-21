@@ -202,12 +202,21 @@ async fn execute_tools(
         }
 
         let start = Instant::now();
-        let result: Value = match tool_service.execute(call_name, call_args.clone()).await {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!("Tool {} failed: {}", call_name, e);
-                // Return error as JSON so Gemini can see it and retry
-                serde_json::json!({"error": e.to_string()})
+        let result: Value = tokio::select! {
+            res = tool_service.execute(call_name, call_args.clone()) => match res {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!("Tool {} failed: {}", call_name, e);
+                    // Return error as JSON so Gemini can see it and retry
+                    serde_json::json!({"error": e.to_string()})
+                }
+            },
+            _ = cancellation_token.cancelled() => {
+                return ToolExecutionResult {
+                    results,
+                    cancelled: true,
+                    needs_confirmation: None,
+                };
             }
         };
         let duration = start.elapsed();

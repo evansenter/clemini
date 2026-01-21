@@ -1,22 +1,12 @@
 use anyhow::{Result, anyhow};
-use axum::{
-    Json, Router,
-    extract::State,
-    response::sse::{Event, Sse},
-    routing::{get, post},
-};
 use colored::Colorize;
-use futures_util::stream::Stream;
 use genai_rs::{Client, FunctionExecutionResult, OwnedFunctionCallInfo};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::convert::Infallible;
 use std::sync::Arc;
 use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::sync::broadcast;
 use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio_util::sync::CancellationToken;
-use tower_http::cors::CorsLayer;
 use tracing::instrument;
 // Note: info! macro goes to JSON logs only. For human-readable logs, use crate::logging::log_event()
 
@@ -49,7 +39,12 @@ pub struct McpServer {
     model: String,
     system_prompt: String,
     retry_config: RetryConfig,
-    notification_tx: broadcast::Sender<String>,
+}
+
+/// Format interaction ID for MCP protocol log lines (IN/OUT).
+/// Format: ` --interaction <id>` with appropriate coloring.
+fn format_mcp_interaction(id: &str) -> String {
+    format!(" {} {}", "--interaction".dimmed(), id.yellow())
 }
 
 /// Extract detail and message body from MCP request params.
@@ -64,11 +59,7 @@ fn extract_request_parts(method: &str, params: &Option<Value>) -> (String, Optio
         }
         if let Some(args) = params.get("arguments") {
             if let Some(interaction_id) = args.get("interaction_id").and_then(|v| v.as_str()) {
-                detail.push_str(&format!(
-                    " {}={}",
-                    "interaction".dimmed(),
-                    format!("\"{}\"", interaction_id).yellow()
-                ));
+                detail.push_str(&format_mcp_interaction(interaction_id));
             }
             if let Some(msg) = args.get("message").and_then(|v| v.as_str()) {
                 for line in msg.lines() {
@@ -233,59 +224,6 @@ impl EventHandler for McpEventHandler {
     }
 }
 
-#[instrument(skip(server, request))]
-async fn handle_post(
-    State(server): State<Arc<McpServer>>,
-    Json(request): Json<JsonRpcRequest>,
-) -> Json<JsonRpcResponse> {
-    crate::logging::log_event(&format_mcp_request(&request.method, &request.params));
-
-    // For HTTP, we use the server's broadcast channel for notifications
-    let (tx, mut rx) = mpsc::unbounded_channel::<String>();
-    let notification_tx = server.notification_tx.clone();
-    tokio::spawn(async move {
-        while let Some(msg) = rx.recv().await {
-            let _ = notification_tx.send(msg);
-        }
-    });
-
-    let cancellation_token = CancellationToken::new();
-    match server
-        .handle_request(request.clone(), tx, cancellation_token)
-        .await
-    {
-        Ok(response) => {
-            crate::logging::log_event(&format_mcp_response(
-                &request.method,
-                &format_status(&response),
-                "",
-                "",
-            ));
-            Json(response)
-        }
-        Err(e) => Json(JsonRpcResponse {
-            jsonrpc: "2.0".to_string(),
-            result: None,
-            error: Some(json!({"code": -32603, "message": format!("{}", e)})),
-            id: request.id,
-        }),
-    }
-}
-
-async fn handle_sse(
-    State(server): State<Arc<McpServer>>,
-) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    let mut rx = server.notification_tx.subscribe();
-
-    let stream = async_stream::stream! {
-        while let Ok(msg) = rx.recv().await {
-            yield Ok(Event::default().data(msg));
-        }
-    };
-
-    Sse::new(stream).keep_alive(axum::response::sse::KeepAlive::default())
-}
-
 impl McpServer {
     pub fn new(
         client: Client,
@@ -294,53 +232,19 @@ impl McpServer {
         system_prompt: String,
         retry_config: RetryConfig,
     ) -> Self {
-        let (notification_tx, _) = broadcast::channel(100);
         Self {
             client,
             tool_service,
             model,
             system_prompt,
             retry_config,
-            notification_tx,
         }
     }
 
     #[instrument(skip(self))]
-    pub async fn run_http(self: Arc<Self>, port: u16) -> Result<()> {
-        crate::logging::log_event(&format!(
-            "MCP HTTP server starting on {} ({} enable multi-turn conversations)",
-            format!("http://0.0.0.0:{}", port).cyan(),
-            "interaction IDs".cyan()
-        ));
-
-        let app = Router::new()
-            .route("/", post(handle_post))
-            .route("/sse", get(handle_sse))
-            .layer(CorsLayer::permissive())
-            .with_state(self);
-
-        let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
-        axum::serve(listener, app).await?;
-
-        Ok(())
-    }
-
-    #[instrument(skip(self))]
     pub async fn run_stdio(self: Arc<Self>) -> Result<()> {
-        crate::logging::log_event(&format!(
-            "MCP server starting ({} enable multi-turn conversations)",
-            "interaction IDs".cyan()
-        ));
+        crate::logging::log_event(&clemini::format::format_mcp_startup());
         let (tx, mut rx) = mpsc::unbounded_channel::<String>();
-
-        // Bridge broadcast to this stdio session
-        let mut bcast_rx = self.notification_tx.subscribe();
-        let tx_for_bcast = tx.clone();
-        tokio::spawn(async move {
-            while let Ok(msg) = bcast_rx.recv().await {
-                let _ = tx_for_bcast.send(msg);
-            }
-        });
 
         // Spawn a dedicated writer task for stdout to handle concurrent notifications
         tokio::spawn(async move {
@@ -391,10 +295,7 @@ impl McpServer {
                 {
                     token.cancel();
                     handle.abort();
-                    crate::logging::log_event(&format!(
-                        "{} task cancelled by client",
-                        "ABORTED".red()
-                    ));
+                    crate::logging::log_event(&clemini::format::format_cancelled());
                 }
                 continue;
             }
@@ -425,11 +326,7 @@ impl McpServer {
                         if let Some(interaction_id) =
                             res.get("interaction_id").and_then(|v| v.as_str())
                         {
-                            detail.push_str(&format!(
-                                " {}={}",
-                                "interaction".dimmed(),
-                                format!("\"{}\"", interaction_id).yellow()
-                            ));
+                            detail.push_str(&format_mcp_interaction(interaction_id));
                         }
                         if let Some(content) = res.get("content").and_then(|v| v.as_array())
                             && let Some(text) = content
@@ -459,7 +356,8 @@ impl McpServer {
                     } else if let Some(err) = &response.error
                         && let Some(msg) = err.get("message").and_then(|v| v.as_str())
                     {
-                        resp_body.push_str(&format!("\n{}", msg.red()));
+                        resp_body
+                            .push_str(&format!("\n{}", clemini::format::format_error_message(msg)));
                     }
                     if let Ok(resp_str) = serde_json::to_string(&response) {
                         crate::logging::log_event(&format_mcp_response(
@@ -861,6 +759,67 @@ mod tests {
         assert_eq!(format_status(&err_resp).to_string(), "ERROR");
 
         // Re-enable colors
+        colored::control::unset_override();
+    }
+
+    #[test]
+    fn test_format_mcp_interaction() {
+        colored::control::set_override(false);
+
+        // Basic format: ` --interaction <id>` (note leading space, --interaction is dimmed)
+        let formatted = format_mcp_interaction("test-id");
+        assert_eq!(formatted, " --interaction test-id");
+
+        // Long ID (typical format from API)
+        let long_id = "v1_ChdTQjl3YWFIRk9lN3Ruc0VQaU1HRm9RNBIXVVI5d2FhbXlCN3ZkbnNFUDVfT09xQXc";
+        let formatted = format_mcp_interaction(long_id);
+        assert!(formatted.starts_with(" --interaction "));
+        assert!(formatted.contains(long_id));
+        // No quotes around the ID
+        assert!(!formatted.contains('"'));
+
+        colored::control::unset_override();
+    }
+
+    #[test]
+    fn test_format_mcp_interaction_used_in_request() {
+        colored::control::set_override(false);
+
+        // Verify format_mcp_interaction is used correctly in extract_request_parts
+        let params = json!({
+            "name": "clemini_chat",
+            "arguments": {
+                "interaction_id": "v1_abc123"
+            }
+        });
+        let (detail, _) = extract_request_parts("tools/call", &Some(params));
+
+        // Should contain the interaction in the expected format (no quotes)
+        assert!(detail.contains("--interaction v1_abc123"));
+        assert!(!detail.contains("\"v1_abc123\""));
+
+        colored::control::unset_override();
+    }
+
+    #[test]
+    fn test_format_mcp_response() {
+        colored::control::set_override(false);
+
+        // Response without body
+        let formatted = format_mcp_response("tools/call", &"OK".into(), "", "");
+        assert!(formatted.starts_with("OUT"));
+        assert!(formatted.contains("tools/call"));
+        assert!(formatted.contains("OK"));
+
+        // Response with detail
+        let formatted =
+            format_mcp_response("tools/call", &"OK".into(), " --interaction test-id", "");
+        assert!(formatted.contains("--interaction test-id"));
+
+        // Response with body
+        let formatted = format_mcp_response("tools/call", &"OK".into(), "", "response body");
+        assert!(formatted.contains("response body"));
+
         colored::control::unset_override();
     }
 
