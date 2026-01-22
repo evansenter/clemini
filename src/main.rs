@@ -669,7 +669,7 @@ fn spawn_reedline_thread(
 
         // Simple prompt: "> "
         let prompt = DefaultPrompt::new(
-            DefaultPromptSegment::Basic("> ".to_string()),
+            DefaultPromptSegment::Basic("〉 ".to_string()),
             DefaultPromptSegment::Empty,
         );
 
