@@ -24,6 +24,8 @@ use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
+use crate::tools::get_clemini_command;
+
 /// Global counter for generating unique ACP task IDs.
 pub static NEXT_ACP_TASK_ID: AtomicUsize = AtomicUsize::new(1);
 
@@ -135,13 +137,17 @@ impl acp::Client for SubagentClient {
     async fn session_notification(&self, args: acp::SessionNotification) -> acp::Result<()> {
         match args.update {
             acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk { content, .. }) => {
+                // ContentBlock is #[non_exhaustive], catch-all required
                 let text = match content {
                     acp::ContentBlock::Text(text_content) => text_content.text,
                     acp::ContentBlock::Image(_) => "[image]".into(),
                     acp::ContentBlock::Audio(_) => "[audio]".into(),
                     acp::ContentBlock::ResourceLink(link) => format!("[link: {}]", link.uri),
                     acp::ContentBlock::Resource(_) => "[resource]".into(),
-                    _ => "[unknown content]".into(),
+                    other => {
+                        tracing::debug!("Unhandled ACP content block: {:?}", other);
+                        "[unknown content]".into()
+                    }
                 };
                 let mut buffer = self.output_buffer.lock().unwrap();
                 buffer.push_str(&text);
@@ -359,24 +365,6 @@ where
     Ok(())
 }
 
-/// Get the clemini executable path.
-fn get_clemini_command() -> (String, Vec<String>) {
-    // Try current executable first
-    if let Ok(exe) = std::env::current_exe()
-        && exe.exists()
-    {
-        return (exe.to_string_lossy().to_string(), vec![]);
-    }
-    // Fallback to cargo run - only useful during development
-    tracing::warn!(
-        "Could not find clemini executable, falling back to 'cargo run' (dev mode only)"
-    );
-    (
-        "cargo".to_string(),
-        vec!["run".to_string(), "--quiet".to_string(), "--".to_string()],
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -408,7 +396,7 @@ mod tests {
 
     #[test]
     fn test_get_clemini_command() {
-        let (cmd, args) = get_clemini_command();
+        let (cmd, args) = crate::tools::get_clemini_command();
         assert!(!cmd.is_empty());
         // If it's cargo, should have the run args
         if cmd == "cargo" {

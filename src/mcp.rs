@@ -576,8 +576,8 @@ impl McpServer {
             }
         });
 
-        // Set events_tx so tools emit ToolOutput events instead of calling log_event directly
-        self.tool_service.set_events_tx(Some(events_tx.clone()));
+        // Set events_tx so tools emit ToolOutput events - guard clears it when dropped
+        let _events_guard = self.tool_service.with_events_tx(events_tx.clone());
 
         let result = run_interaction(
             &self.client,
@@ -591,10 +591,7 @@ impl McpServer {
             self.retry_config,
         )
         .await?;
-
-        // Clear events_tx after interaction completes - this closes the channel
-        // which causes the event handler loop to exit
-        self.tool_service.set_events_tx(None);
+        // _events_guard dropped here, clearing events_tx and closing channel
 
         // Wait for event handler to finish processing all events before continuing
         // This ensures streaming output is fully flushed before we return the response

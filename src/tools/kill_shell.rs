@@ -55,7 +55,7 @@ impl CallableFunction for KillShellTool {
         };
 
         if let Some(mut task) = task {
-            if let Some(mut child) = task.child.take() {
+            if let Some(mut child) = task.take_child() {
                 match child.kill().await {
                     Ok(_) => {
                         self.emit(&format!("  {}", "killed".dimmed()));

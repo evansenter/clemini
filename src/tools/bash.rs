@@ -676,7 +676,7 @@ mod tests {
             tasks.remove(&task_id)
         };
         if let Some(mut task) = task
-            && let Some(mut child) = task.child.take()
+            && let Some(mut child) = task.take_child()
         {
             let _ = child.kill().await;
         }
@@ -716,12 +716,12 @@ mod tests {
             (tasks.remove(id1), tasks.remove(id2))
         };
         if let Some(mut task) = task1
-            && let Some(mut child) = task.child.take()
+            && let Some(mut child) = task.take_child()
         {
             let _ = child.kill().await;
         }
         if let Some(mut task) = task2
-            && let Some(mut child) = task.child.take()
+            && let Some(mut child) = task.take_child()
         {
             let _ = child.kill().await;
         }

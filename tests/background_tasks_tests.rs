@@ -48,9 +48,10 @@ async fn run_test_interaction(
 ) -> clemini::InteractionResult {
     let cancellation = CancellationToken::new();
 
-    tool_service.set_events_tx(Some(events_tx.clone()));
+    // Guard clears events_tx when dropped
+    let _events_guard = tool_service.with_events_tx(events_tx.clone());
 
-    let result = run_interaction(
+    run_interaction(
         client,
         tool_service,
         input,
@@ -62,11 +63,7 @@ async fn run_test_interaction(
         clemini::RetryConfig::default(),
     )
     .await
-    .expect("Interaction failed");
-
-    tool_service.set_events_tx(None);
-
-    result
+    .expect("Interaction failed")
 }
 
 #[tokio::test]

@@ -27,26 +27,6 @@ impl TaskTool {
     pub fn new(cwd: PathBuf, events_tx: Option<mpsc::Sender<AgentEvent>>) -> Self {
         Self { cwd, events_tx }
     }
-
-    /// Get the clemini executable path.
-    /// Tries current executable first, falls back to cargo run (development only).
-    fn get_clemini_command() -> (String, Vec<String>) {
-        // Try current executable first
-        if let Ok(exe) = std::env::current_exe()
-            && exe.exists()
-        {
-            return (exe.to_string_lossy().to_string(), vec![]);
-        }
-        // Fallback to cargo run - only useful during development
-        tracing::warn!(
-            "current_exe() failed or doesn't exist, falling back to 'cargo run'. \
-             This is expected during development but indicates an issue in production."
-        );
-        (
-            "cargo".to_string(),
-            vec!["run".to_string(), "--quiet".to_string(), "--".to_string()],
-        )
-    }
 }
 
 #[async_trait]
@@ -87,7 +67,7 @@ impl CallableFunction for TaskTool {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
-        let (cmd, mut cmd_args) = Self::get_clemini_command();
+        let (cmd, mut cmd_args) = super::get_clemini_command();
         cmd_args.extend(["-p".to_string(), prompt.to_string()]);
         // Note: subagent gets its own sandbox based on cwd. It does not inherit the parent's
         // allowed_paths - this is intentional as the subagent operates as an independent instance.
@@ -170,7 +150,7 @@ mod tests {
 
     #[test]
     fn test_get_clemini_command() {
-        let (cmd, args) = TaskTool::get_clemini_command();
+        let (cmd, args) = crate::tools::get_clemini_command();
         // Should either be the current exe or cargo
         assert!(!cmd.is_empty());
         // If it's cargo, should have the run args

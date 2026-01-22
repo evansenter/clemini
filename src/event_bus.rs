@@ -16,7 +16,7 @@
 //! let bus = EventBus::open()?;
 //! let session_id = bus.register_session("my-branch", None, None, None)?;
 //! bus.publish_event("task_completed", "Done!", Some(&session_id), "all")?;
-//! let events = bus.get_events(None, 50, Some(&session_id), "desc", None, false, None)?;
+//! let events = bus.get_events(&GetEventsOptions::new())?;
 //! ```
 
 use rusqlite::{Connection, params};
@@ -70,6 +70,38 @@ pub struct Event {
 pub struct ChannelInfo {
     pub name: String,
     pub subscriber_count: i64,
+}
+
+/// Options for get_events query.
+#[derive(Debug)]
+pub struct GetEventsOptions<'a> {
+    pub cursor: Option<i64>,
+    pub limit: usize,
+    pub session_id: Option<&'a str>,
+    pub order: &'a str,
+    pub channel: Option<&'a str>,
+    pub resume: bool,
+    pub event_types: Option<&'a [String]>,
+}
+
+impl Default for GetEventsOptions<'_> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<'a> GetEventsOptions<'a> {
+    pub fn new() -> Self {
+        Self {
+            cursor: None,
+            limit: 50,
+            session_id: None,
+            order: "desc",
+            channel: None,
+            resume: false,
+            event_types: None,
+        }
+    }
 }
 
 /// Event bus backed by SQLite.
@@ -395,29 +427,13 @@ impl EventBus {
     /// Get events with optional filtering.
     ///
     /// # Arguments
-    /// - `cursor`: Start from this event ID (exclusive)
-    /// - `limit`: Maximum events to return
-    /// - `session_id`: Session requesting events (for cursor tracking)
-    /// - `order`: "asc" or "desc"
-    /// - `channel`: Filter to specific channel
-    /// - `resume`: Use session's saved cursor
-    /// - `event_types`: Filter by event types
-    #[allow(clippy::too_many_arguments)]
-    pub fn get_events(
-        &self,
-        cursor: Option<i64>,
-        limit: usize,
-        session_id: Option<&str>,
-        order: &str,
-        channel: Option<&str>,
-        resume: bool,
-        event_types: Option<&[String]>,
-    ) -> Result<(Vec<Event>, Option<i64>)> {
+    /// Get events from the bus with options.
+    pub fn get_events(&self, opts: &GetEventsOptions<'_>) -> Result<(Vec<Event>, Option<i64>)> {
         let conn = self.conn.lock().unwrap();
         let now = Self::now();
 
         // Update heartbeat if session provided
-        if let Some(sid) = session_id {
+        if let Some(sid) = opts.session_id {
             conn.execute(
                 "UPDATE sessions SET last_heartbeat = ?1 WHERE id = ?2",
                 params![now, sid],
@@ -425,8 +441,8 @@ impl EventBus {
         }
 
         // Get cursor from session if resuming
-        let effective_cursor = if resume {
-            if let Some(sid) = session_id {
+        let effective_cursor = if opts.resume {
+            if let Some(sid) = opts.session_id {
                 let saved: Option<i64> = conn
                     .query_row(
                         "SELECT cursor FROM sessions WHERE id = ?1",
@@ -434,17 +450,17 @@ impl EventBus {
                         |row| row.get(0),
                     )
                     .ok();
-                saved.or(cursor)
+                saved.or(opts.cursor)
             } else {
-                cursor
+                opts.cursor
             }
         } else {
-            cursor
+            opts.cursor
         };
 
         // Build query
-        let order_dir = if order == "asc" { "ASC" } else { "DESC" };
-        let cursor_op = if order == "asc" { ">" } else { "<" };
+        let order_dir = if opts.order == "asc" { "ASC" } else { "DESC" };
+        let cursor_op = if opts.order == "asc" { ">" } else { "<" };
 
         let mut sql = String::from(
             "SELECT id, event_type, payload, channel, session_id, created_at FROM events WHERE 1=1",
@@ -456,12 +472,12 @@ impl EventBus {
             params_vec.push(Box::new(c));
         }
 
-        if let Some(ch) = channel {
+        if let Some(ch) = opts.channel {
             sql.push_str(" AND channel = ?");
             params_vec.push(Box::new(ch.to_string()));
         }
 
-        if let Some(types) = event_types
+        if let Some(types) = opts.event_types
             && !types.is_empty()
         {
             let placeholders: Vec<String> = types.iter().map(|_| "?".to_string()).collect();
@@ -472,7 +488,7 @@ impl EventBus {
         }
 
         sql.push_str(&format!(" ORDER BY id {} LIMIT ?", order_dir));
-        params_vec.push(Box::new(limit as i64));
+        params_vec.push(Box::new(opts.limit as i64));
 
         let params_refs: Vec<&dyn rusqlite::ToSql> =
             params_vec.iter().map(|p| p.as_ref()).collect();
@@ -493,7 +509,7 @@ impl EventBus {
 
         // Update session cursor if we got events
         let new_cursor = events.last().map(|e| e.id);
-        if let (Some(sid), Some(nc)) = (session_id, new_cursor) {
+        if let (Some(sid), Some(nc)) = (opts.session_id, new_cursor) {
             conn.execute(
                 "UPDATE sessions SET cursor = ?1 WHERE id = ?2",
                 params![nc, sid],
@@ -643,7 +659,12 @@ mod tests {
             .unwrap();
 
         let (events, _) = bus
-            .get_events(None, 10, Some(&session.id), "desc", None, false, None)
+            .get_events(&GetEventsOptions {
+                limit: 10,
+                session_id: Some(&session.id),
+                order: "desc",
+                ..Default::default()
+            })
             .unwrap();
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].event_type, "ci_passed"); // desc order
@@ -658,7 +679,12 @@ mod tests {
         bus.publish_event("e3", "p3", None, "repo:bar").unwrap();
 
         let (events, _) = bus
-            .get_events(None, 10, None, "asc", Some("repo:foo"), false, None)
+            .get_events(&GetEventsOptions {
+                limit: 10,
+                order: "asc",
+                channel: Some("repo:foo"),
+                ..Default::default()
+            })
             .unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].event_type, "e2");
@@ -676,7 +702,12 @@ mod tests {
 
         let types = vec!["task_completed".to_string()];
         let (events, _) = bus
-            .get_events(None, 10, None, "asc", None, false, Some(&types))
+            .get_events(&GetEventsOptions {
+                limit: 10,
+                order: "asc",
+                event_types: Some(&types),
+                ..Default::default()
+            })
             .unwrap();
         assert_eq!(events.len(), 2);
     }
@@ -692,14 +723,25 @@ mod tests {
 
         // Get first 2
         let (events, cursor) = bus
-            .get_events(None, 2, Some(&session.id), "asc", None, false, None)
+            .get_events(&GetEventsOptions {
+                limit: 2,
+                session_id: Some(&session.id),
+                order: "asc",
+                ..Default::default()
+            })
             .unwrap();
         assert_eq!(events.len(), 2);
         assert!(cursor.is_some());
 
         // Get remaining with cursor
         let (events, _) = bus
-            .get_events(cursor, 10, Some(&session.id), "asc", None, false, None)
+            .get_events(&GetEventsOptions {
+                cursor,
+                limit: 10,
+                session_id: Some(&session.id),
+                order: "asc",
+                ..Default::default()
+            })
             .unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].event_type, "e3");
@@ -715,7 +757,12 @@ mod tests {
 
         // Get events (cursor saved)
         let _ = bus
-            .get_events(None, 1, Some(&session.id), "asc", None, false, None)
+            .get_events(&GetEventsOptions {
+                limit: 1,
+                session_id: Some(&session.id),
+                order: "asc",
+                ..Default::default()
+            })
             .unwrap();
 
         // Add more events
@@ -723,7 +770,13 @@ mod tests {
 
         // Resume from saved cursor
         let (events, _) = bus
-            .get_events(None, 10, Some(&session.id), "asc", None, true, None)
+            .get_events(&GetEventsOptions {
+                limit: 10,
+                session_id: Some(&session.id),
+                order: "asc",
+                resume: true,
+                ..Default::default()
+            })
             .unwrap();
         assert_eq!(events.len(), 2); // e2 and e3
     }
@@ -748,8 +801,35 @@ mod tests {
         assert_eq!(pruned, 1);
 
         let (events, _) = bus
-            .get_events(None, 10, None, "asc", None, false, None)
+            .get_events(&GetEventsOptions {
+                limit: 10,
+                order: "asc",
+                ..Default::default()
+            })
             .unwrap();
         assert!(events.is_empty());
+    }
+
+    #[test]
+    fn test_get_session_found() {
+        let bus = EventBus::open_in_memory().unwrap();
+        let session = bus
+            .register_session("test-branch", Some("localhost"), Some("/tmp"), None)
+            .unwrap();
+
+        let retrieved = bus.get_session(&session.id).unwrap();
+        assert!(retrieved.is_some());
+        let retrieved = retrieved.unwrap();
+        assert_eq!(retrieved.id, session.id);
+        assert_eq!(retrieved.name, "test-branch");
+        assert_eq!(retrieved.machine, "localhost");
+        assert_eq!(retrieved.cwd, "/tmp");
+    }
+
+    #[test]
+    fn test_get_session_not_found() {
+        let bus = EventBus::open_in_memory().unwrap();
+        let session = bus.get_session("nonexistent-session-id").unwrap();
+        assert!(session.is_none());
     }
 }

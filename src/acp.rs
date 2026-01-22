@@ -125,15 +125,10 @@ impl AcpServer {
 
 /// Clemini's implementation of the ACP Agent trait.
 struct CleminiAgent {
-    #[allow(dead_code)]
     client: Client,
-    #[allow(dead_code)]
     tool_service: Arc<CleminiToolService>,
-    #[allow(dead_code)]
     model: String,
-    #[allow(dead_code)]
     system_prompt: String,
-    #[allow(dead_code)]
     retry_config: RetryConfig,
     session_update_tx: mpsc::UnboundedSender<acp::SessionNotification>,
     next_session_id: AtomicU64,
@@ -337,8 +332,8 @@ impl acp::Agent for CleminiAgent {
             }
         });
 
-        // Set up events channel for tool service
-        self.tool_service.set_events_tx(Some(events_tx.clone()));
+        // Set up events channel for tool service - guard clears it when dropped
+        let _events_guard = self.tool_service.with_events_tx(events_tx.clone());
 
         // Run the interaction
         let result = run_interaction(
@@ -354,6 +349,7 @@ impl acp::Agent for CleminiAgent {
         )
         .await;
 
+        // _events_guard dropped here, clearing events_tx
         match result {
             Ok(_) => Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)),
             Err(e) => {
