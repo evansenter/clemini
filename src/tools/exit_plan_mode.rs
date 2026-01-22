@@ -72,37 +72,36 @@ impl CallableFunction for ExitPlanModeTool {
             .and_then(|v| serde_json::from_value(v.clone()).ok())
             .unwrap_or_default();
 
+        // Acquire write lock once and extract all needed data before exiting
+        let mut manager = PLAN_MANAGER
+            .write()
+            .map_err(|e| FunctionError::ExecutionError(format!("Lock error: {}", e).into()))?;
+
         // Get plan file path before exiting
-        let plan_file = PLAN_MANAGER
-            .read()
-            .ok()
-            .and_then(|m| m.plan_file_path().map(|p| p.display().to_string()));
+        let plan_file = manager.plan_file_path().map(|p| p.display().to_string());
 
         // Get current plan entries
-        let plan_entries: Vec<Value> = PLAN_MANAGER
-            .read()
-            .ok()
-            .and_then(|m| {
-                m.current_plan().map(|p| {
-                    p.entries
-                        .iter()
-                        .map(|e| {
-                            json!({
-                                "content": e.content,
-                                "priority": format!("{:?}", e.priority),
-                                "status": format!("{:?}", e.status)
-                            })
+        let plan_entries: Vec<Value> = manager
+            .current_plan()
+            .map(|p| {
+                p.entries
+                    .iter()
+                    .map(|e| {
+                        json!({
+                            "content": e.content,
+                            "priority": format!("{:?}", e.priority),
+                            "status": format!("{:?}", e.status)
                         })
-                        .collect()
-                })
+                    })
+                    .collect()
             })
             .unwrap_or_default();
 
         // Exit plan mode
-        let was_in_plan_mode = PLAN_MANAGER
-            .write()
-            .map_err(|e| FunctionError::ExecutionError(format!("Lock error: {}", e).into()))?
-            .exit_plan_mode();
+        let was_in_plan_mode = manager.exit_plan_mode();
+
+        // Drop the lock before emitting
+        drop(manager);
 
         if !was_in_plan_mode {
             return Ok(json!({
@@ -126,8 +125,10 @@ impl CallableFunction for ExitPlanModeTool {
 mod tests {
     use super::*;
     use crate::plan::{PlanEntryInput, PlanEntryPriority};
+    use serial_test::serial;
 
     #[tokio::test]
+    #[serial]
     async fn test_exit_plan_mode_not_in_plan_mode() {
         // Ensure we're not in plan mode
         if let Ok(mut manager) = PLAN_MANAGER.write() {
@@ -141,6 +142,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn test_exit_plan_mode_with_plan() {
         // Reset and enter plan mode
         if let Ok(mut manager) = PLAN_MANAGER.write() {

@@ -20,6 +20,7 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use crate::plan::{PLAN_MANAGER, is_tool_allowed_in_plan_mode};
 use crate::tools::CleminiToolService;
 
 /// Calculate exponential backoff delay with saturation to prevent overflow.
@@ -199,6 +200,38 @@ async fn execute_tools(
                 cancelled: true,
                 needs_confirmation: None,
             };
+        }
+
+        // Check if we're in plan mode and this tool is blocked
+        let in_plan_mode = PLAN_MANAGER
+            .read()
+            .map(|m| m.is_in_plan_mode())
+            .unwrap_or(false);
+
+        if in_plan_mode && !is_tool_allowed_in_plan_mode(call_name) {
+            let start = Instant::now();
+            let result = serde_json::json!({
+                "error": format!("Tool '{}' is not allowed in plan mode. Only read-only tools (read, glob, grep, web_fetch, web_search, ask_user, todo_write) are available. Use exit_plan_mode when your plan is ready.", call_name)
+            });
+            let duration = start.elapsed();
+
+            // Send ToolResult event
+            let execution_result = FunctionExecutionResult::new(
+                call_name.clone(),
+                call_id.clone().unwrap_or_default(),
+                call_args.clone(),
+                result.clone(),
+                duration,
+            );
+            let _ = events_tx.try_send(AgentEvent::ToolResult(execution_result));
+
+            // Add to results as Content for the model
+            results.push(Content::function_result(
+                call_name.to_string(),
+                call_id.clone().unwrap_or_default(),
+                result,
+            ));
+            continue;
         }
 
         let start = Instant::now();

@@ -35,9 +35,10 @@ impl CallableFunction for EnterPlanModeTool {
         FunctionDeclaration::new(
             "enter_plan_mode".to_string(),
             "Transition to planning mode. In plan mode, only read-only tools are available \
-             (read, glob, grep, web_fetch, web_search). Write tools (edit, write, bash) are \
-             disabled. Use this when you need to explore the codebase and design an approach \
-             before executing changes. Call exit_plan_mode when your plan is ready for user review."
+             (read, glob, grep, web_fetch, web_search, ask_user, todo_write). Write tools \
+             (edit, write, bash) are disabled. Use this when you need to explore the codebase \
+             and design an approach before executing changes. Call exit_plan_mode when your plan \
+             is ready for user review."
                 .to_string(),
             FunctionParameters::new("object".to_string(), json!({}), vec![]),
         )
@@ -76,8 +77,10 @@ impl CallableFunction for EnterPlanModeTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     #[tokio::test]
+    #[serial]
     async fn test_enter_plan_mode() {
         // Reset plan manager state
         if let Ok(mut manager) = PLAN_MANAGER.write() {
@@ -97,6 +100,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn test_enter_plan_mode_twice_fails() {
         // Reset plan manager state
         if let Ok(mut manager) = PLAN_MANAGER.write() {
