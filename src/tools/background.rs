@@ -1,12 +1,8 @@
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicI32};
+use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Child;
 use tokio::task::JoinHandle;
-
-/// Global counter for generating unique task IDs.
-pub static NEXT_TASK_ID: AtomicUsize = AtomicUsize::new(1);
 
 /// Represents a running or completed background task.
 pub struct BackgroundTask {
@@ -35,10 +31,6 @@ pub struct BackgroundTask {
     #[allow(dead_code)]
     stderr_task: Option<JoinHandle<()>>,
 }
-
-/// Global registry of background tasks.
-pub static BACKGROUND_TASKS: LazyLock<Mutex<HashMap<String, BackgroundTask>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 impl BackgroundTask {
     /// Check if the task has completed.
@@ -185,7 +177,6 @@ fn spawn_output_collector<R: tokio::io::AsyncRead + Unpin + Send + 'static>(
 mod tests {
     use super::*;
     use std::process::Stdio;
-    use std::sync::atomic::Ordering;
     use tokio::process::Command;
     use tokio::time::{Duration, sleep};
 
@@ -320,12 +311,5 @@ mod tests {
         // update_status should mark as completed when child is None
         task.update_status();
         assert!(task.is_completed());
-    }
-
-    #[tokio::test]
-    async fn test_next_task_id_increments() {
-        let id1 = NEXT_TASK_ID.fetch_add(1, Ordering::SeqCst);
-        let id2 = NEXT_TASK_ID.fetch_add(1, Ordering::SeqCst);
-        assert_eq!(id2, id1 + 1);
     }
 }
