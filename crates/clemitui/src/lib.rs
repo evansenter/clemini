@@ -14,7 +14,7 @@
 //!
 //! # Modules
 //!
-//! - [`format`] - Pure formatting functions for tool output, warnings, etc.
+//! - [`mod@format`] - Pure formatting functions for tool output, warnings, etc.
 //! - [`logging`] - OutputSink trait and global logging infrastructure
 //! - [`text_buffer`] - Streaming text accumulation with markdown rendering
 
