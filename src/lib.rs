@@ -15,6 +15,7 @@ pub mod plan;
 pub mod tools;
 
 // Re-export commonly used types
+pub use acp_client::{SubagentResult, spawn_subagent};
 pub use agent::{AgentEvent, InteractionResult, RetryConfig, run_interaction};
 pub use logging::{OutputSink, log_event, set_output_sink};
 pub use tools::CleminiToolService;

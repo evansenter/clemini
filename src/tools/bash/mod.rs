@@ -1,69 +1,31 @@
+//! Bash command execution tool.
+//!
+//! This module provides safe bash command execution with:
+//! - Pattern-based safety validation (blocked and caution patterns)
+//! - Confirmation flow for destructive commands
+//! - Background task support
+//! - Streaming output capture
+//! - Timeout handling
+
+mod safety;
+
+pub use safety::{is_blocked, needs_caution};
+
 use crate::agent::AgentEvent;
-use crate::tools::background::{BACKGROUND_TASKS, BackgroundTask, NEXT_TASK_ID};
+use crate::tools::background::BackgroundTask;
+use crate::tools::tasks::register_background_task;
 use crate::tools::{MAX_TOOL_OUTPUT_LEN, ToolEmitter, error_codes, error_response};
 use async_trait::async_trait;
 use colored::Colorize;
 use genai_rs::{CallableFunction, FunctionDeclaration, FunctionError, FunctionParameters};
-use regex::Regex;
 use serde_json::{Value, json};
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::LazyLock;
-use std::sync::atomic::Ordering;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 use tracing::instrument;
-
-/// Blocked command patterns that are always rejected.
-static BLOCKED_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
-    vec![
-        // Destructive filesystem operations
-        Regex::new(r"rm\s+(-[rfRF]+\s+)*[/~](\s|$)").unwrap(),
-        Regex::new(r"rm\s+(-[rfRF]+\s+)*/\*").unwrap(),
-        Regex::new(r"rm\s+(-[rfRF]+\s+)*~").unwrap(),
-        // Disk/device operations
-        Regex::new(r"dd\s+.*if=").unwrap(),
-        Regex::new(r"mkfs").unwrap(),
-        Regex::new(r">\s*/dev/sd").unwrap(),
-        Regex::new(r">\s*/dev/nvme").unwrap(),
-        // Permission bombs
-        Regex::new(r"chmod\s+(-[rR]+\s+)*777\s+/").unwrap(),
-        Regex::new(r"chown\s+(-[rR]+\s+)*.*\s+/").unwrap(),
-        // Fork bomb
-        Regex::new(r":\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;").unwrap(),
-        // Dangerous redirects
-        Regex::new(r">\s*/etc/").unwrap(),
-        Regex::new(r">\s*/boot/").unwrap(),
-        // History/config manipulation
-        Regex::new(r">\s*~/\.bash").unwrap(),
-        Regex::new(r">\s*~/\.profile").unwrap(),
-        Regex::new(r">\s*~/\.zsh").unwrap(),
-    ]
-});
-
-/// Commands that require extra caution (requires user confirmation).
-static CAUTION_PATTERNS: LazyLock<Vec<&str>> = LazyLock::new(|| {
-    vec![
-        "sudo",
-        "su ",
-        "rm ",
-        "mv ",
-        "chmod",
-        "chown",
-        "kill",
-        "pkill",
-        "killall",
-        "git push --force",
-        "git push -f",
-        "git reset --hard",
-        "cargo publish",
-        "npm publish",
-        "docker rm",
-        "docker rmi",
-    ]
-});
 
 pub struct BashTool {
     cwd: PathBuf,
@@ -88,21 +50,6 @@ impl BashTool {
             is_mcp_mode,
             events_tx,
         }
-    }
-
-    fn is_blocked(command: &str) -> Option<String> {
-        for pattern in BLOCKED_PATTERNS.iter() {
-            if pattern.is_match(command) {
-                return Some(pattern.as_str().to_string());
-            }
-        }
-        None
-    }
-
-    fn needs_caution(command: &str) -> bool {
-        CAUTION_PATTERNS
-            .iter()
-            .any(|pattern| command.contains(pattern))
     }
 
     fn truncate_output(output: String, max_len: usize) -> String {
@@ -231,7 +178,7 @@ impl CallableFunction for BashTool {
         };
 
         // Safety check
-        if let Some(pattern) = Self::is_blocked(command) {
+        if let Some(pattern) = is_blocked(command) {
             let msg = format!(
                 "  {} {}",
                 format!("BLOCKED (matches pattern: {pattern}):").red(),
@@ -248,7 +195,7 @@ impl CallableFunction for BashTool {
             ));
         }
 
-        if Self::needs_caution(command) {
+        if needs_caution(command) {
             if self.is_mcp_mode {
                 if !confirmed {
                     let msg = format!(
@@ -288,7 +235,6 @@ impl CallableFunction for BashTool {
         }
 
         if run_in_background {
-            let task_id = NEXT_TASK_ID.fetch_add(1, Ordering::SeqCst).to_string();
             let child = Command::new("bash")
                 .arg("-c")
                 .arg(command)
@@ -301,10 +247,8 @@ impl CallableFunction for BashTool {
                     FunctionError::ExecutionError(format!("Failed to spawn process: {}", e).into())
                 })?;
 
-            BACKGROUND_TASKS
-                .lock()
-                .unwrap()
-                .insert(task_id.clone(), BackgroundTask::new(child));
+            // Register in unified task registry with namespaced ID (bg-1, bg-2, etc.)
+            let task_id = register_background_task(BackgroundTask::new(child));
 
             let mut response = json!({
                 "command": command,
@@ -450,6 +394,7 @@ impl CallableFunction for BashTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::tasks::{TASKS, Task};
     use tempfile::tempdir;
 
     #[tokio::test]
@@ -524,30 +469,6 @@ mod tests {
         let result = tool.call(args).await.unwrap();
         assert!(result["error"].as_str().unwrap().contains("timed out"));
         assert_eq!(result["error_code"], error_codes::TIMEOUT);
-    }
-
-    #[test]
-    fn test_bash_tool_blocked_patterns() {
-        assert!(BashTool::is_blocked("rm -rf /").is_some());
-        assert!(BashTool::is_blocked("rm -rf /*").is_some());
-        assert!(BashTool::is_blocked("rm -rf ~").is_some());
-        assert!(BashTool::is_blocked("dd if=/dev/zero of=/dev/sda").is_some());
-        assert!(BashTool::is_blocked("mkfs.ext4 /dev/sda1").is_some());
-        assert!(BashTool::is_blocked("chmod 777 /").is_some());
-        assert!(BashTool::is_blocked("chmod -R 777 /").is_some());
-        assert!(BashTool::is_blocked("chown user /").is_some());
-        assert!(BashTool::is_blocked(":(){ :|:& };:").is_some());
-        assert!(BashTool::is_blocked("echo 'malicious' > /etc/passwd").is_some());
-        assert!(BashTool::is_blocked("ls -l").is_none());
-    }
-
-    #[test]
-    fn test_bash_tool_needs_caution() {
-        assert!(BashTool::needs_caution("sudo apt update"));
-        assert!(BashTool::needs_caution("rm file.txt"));
-        assert!(BashTool::needs_caution("git push --force"));
-        assert!(BashTool::needs_caution("git reset --hard HEAD"));
-        assert!(!BashTool::needs_caution("ls -l"));
     }
 
     #[tokio::test]
@@ -664,19 +585,22 @@ mod tests {
 
         let task_id = result["task_id"].as_str().unwrap().to_string();
 
-        // Check if it's in the BACKGROUND_TASKS map
+        // Task IDs now have "bg-" prefix
+        assert!(task_id.starts_with("bg-"));
+
+        // Check if it's in the unified TASKS registry
         {
-            let tasks = BACKGROUND_TASKS.lock().unwrap();
+            let tasks = TASKS.lock().unwrap();
             assert!(tasks.contains_key(&task_id));
         }
 
         // Cleanup: kill the background process
-        let task = {
-            let mut tasks = BACKGROUND_TASKS.lock().unwrap();
+        let mut task = {
+            let mut tasks = TASKS.lock().unwrap();
             tasks.remove(&task_id)
         };
-        if let Some(mut task) = task
-            && let Some(mut child) = task.take_child()
+        if let Some(Task::Background(ref mut bg)) = task
+            && let Some(mut child) = bg.take_child()
         {
             let _ = child.kill().await;
         }
@@ -708,20 +632,23 @@ mod tests {
         let id1 = result1["task_id"].as_str().unwrap();
         let id2 = result2["task_id"].as_str().unwrap();
 
+        // Both should have "bg-" prefix and be unique
+        assert!(id1.starts_with("bg-"));
+        assert!(id2.starts_with("bg-"));
         assert_ne!(id1, id2);
 
         // Cleanup - extract children before dropping lock to avoid holding across await
-        let (task1, task2) = {
-            let mut tasks = BACKGROUND_TASKS.lock().unwrap();
+        let (mut task1, mut task2) = {
+            let mut tasks = TASKS.lock().unwrap();
             (tasks.remove(id1), tasks.remove(id2))
         };
-        if let Some(mut task) = task1
-            && let Some(mut child) = task.take_child()
+        if let Some(Task::Background(ref mut bg)) = task1
+            && let Some(mut child) = bg.take_child()
         {
             let _ = child.kill().await;
         }
-        if let Some(mut task) = task2
-            && let Some(mut child) = task.take_child()
+        if let Some(Task::Background(ref mut bg)) = task2
+            && let Some(mut child) = bg.take_child()
         {
             let _ = child.kill().await;
         }

@@ -20,7 +20,7 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::plan::{PLAN_MANAGER, is_tool_allowed_in_plan_mode};
+use crate::plan::is_tool_allowed_in_plan_mode;
 use crate::tools::CleminiToolService;
 
 /// Calculate exponential backoff delay with saturation to prevent overflow.
@@ -203,7 +203,8 @@ async fn execute_tools(
         }
 
         // Check if we're in plan mode and this tool is blocked
-        let in_plan_mode = PLAN_MANAGER
+        let in_plan_mode = tool_service
+            .plan_manager()
             .read()
             .map(|m| m.is_in_plan_mode())
             .unwrap_or(false);

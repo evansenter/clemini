@@ -1,4 +1,5 @@
 use crate::agent::AgentEvent;
+use crate::tools::tasks::{TASKS, Task};
 use crate::tools::{ToolEmitter, error_codes, error_response};
 use async_trait::async_trait;
 use colored::Colorize;
@@ -28,13 +29,13 @@ impl CallableFunction for KillShellTool {
     fn declaration(&self) -> FunctionDeclaration {
         FunctionDeclaration::new(
             "kill_shell".to_string(),
-            "Kill a background bash task started with run_in_background=true. Returns: {task_id, status, success}".to_string(),
+            "Kill a background task. Works for both bash tasks (run_in_background=true) and ACP subagent tasks. Returns: {task_id, status, success}".to_string(),
             FunctionParameters::new(
                 "object".to_string(),
                 json!({
                     "task_id": {
                         "type": "string",
-                        "description": "The task ID to kill (returned by bash with run_in_background=true)"
+                        "description": "The task ID to kill (e.g., 'bg-1' for bash, 'acp-1' for subagent)"
                     }
                 }),
                 vec!["task_id".to_string()],
@@ -50,17 +51,34 @@ impl CallableFunction for KillShellTool {
             .ok_or_else(|| FunctionError::ArgumentMismatch("Missing task_id".to_string()))?;
 
         let task = {
-            let mut tasks = crate::tools::background::BACKGROUND_TASKS.lock().unwrap();
+            let mut tasks = TASKS.lock().unwrap();
             tasks.remove(task_id)
         };
 
         if let Some(mut task) = task {
-            if let Some(mut child) = task.take_child() {
+            let task_type = task.task_type();
+
+            // For ACP tasks, send cancel signal first to allow graceful shutdown
+            if let Task::Acp(ref acp) = task
+                && let Some(cancel_tx) = acp.cancel_tx()
+            {
+                // Non-blocking send - if receiver is gone, that's fine
+                let _ = cancel_tx.try_send(());
+            }
+
+            // Extract child process based on task type
+            let child = match &mut task {
+                Task::Background(bg) => bg.take_child(),
+                Task::Acp(acp) => acp.take_child(),
+            };
+
+            if let Some(mut child) = child {
                 match child.kill().await {
                     Ok(_) => {
                         self.emit(&format!("  {}", "killed".dimmed()));
                         Ok(json!({
                             "task_id": task_id,
+                            "task_type": task_type,
                             "status": "killed",
                             "success": true
                         }))
@@ -124,8 +142,8 @@ mod tests {
         assert!(kill_result["success"].as_bool().unwrap());
         assert_eq!(kill_result["status"], "killed");
 
-        // Verify it's gone from the map
-        let tasks = crate::tools::background::BACKGROUND_TASKS.lock().unwrap();
+        // Verify it's gone from the unified registry
+        let tasks = TASKS.lock().unwrap();
         assert!(!tasks.contains_key(task_id));
     }
 

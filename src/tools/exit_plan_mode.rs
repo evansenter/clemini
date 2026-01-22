@@ -4,22 +4,30 @@
 //! optionally requests permissions for the implementation phase.
 
 use crate::agent::AgentEvent;
-use crate::plan::{AllowedPrompt, PLAN_MANAGER};
+use crate::plan::{AllowedPrompt, PlanManager};
 use crate::tools::ToolEmitter;
 
 use async_trait::async_trait;
 use genai_rs::{CallableFunction, FunctionDeclaration, FunctionError, FunctionParameters};
 use serde_json::{Value, json};
+use std::sync::{Arc, RwLock};
 use tokio::sync::mpsc;
 
 /// Tool for exiting plan mode and requesting user approval.
 pub struct ExitPlanModeTool {
     events_tx: Option<mpsc::Sender<AgentEvent>>,
+    plan_manager: Arc<RwLock<PlanManager>>,
 }
 
 impl ExitPlanModeTool {
-    pub fn new(events_tx: Option<mpsc::Sender<AgentEvent>>) -> Self {
-        Self { events_tx }
+    pub fn new(
+        events_tx: Option<mpsc::Sender<AgentEvent>>,
+        plan_manager: Arc<RwLock<PlanManager>>,
+    ) -> Self {
+        Self {
+            events_tx,
+            plan_manager,
+        }
     }
 }
 
@@ -73,7 +81,8 @@ impl CallableFunction for ExitPlanModeTool {
             .unwrap_or_default();
 
         // Acquire write lock once and extract all needed data before exiting
-        let mut manager = PLAN_MANAGER
+        let mut manager = self
+            .plan_manager
             .write()
             .map_err(|e| FunctionError::ExecutionError(format!("Lock error: {}", e).into()))?;
 
@@ -125,28 +134,27 @@ impl CallableFunction for ExitPlanModeTool {
 mod tests {
     use super::*;
     use crate::plan::{PlanEntryInput, PlanEntryPriority};
-    use serial_test::serial;
+
+    fn create_test_plan_manager() -> Arc<RwLock<PlanManager>> {
+        Arc::new(RwLock::new(PlanManager::new()))
+    }
 
     #[tokio::test]
-    #[serial]
     async fn test_exit_plan_mode_not_in_plan_mode() {
-        // Ensure we're not in plan mode
-        if let Ok(mut manager) = PLAN_MANAGER.write() {
-            manager.exit_plan_mode();
-        }
-
-        let tool = ExitPlanModeTool::new(None);
+        let plan_manager = create_test_plan_manager();
+        let tool = ExitPlanModeTool::new(None, plan_manager);
         let result = tool.call(json!({})).await.unwrap();
 
         assert!(result["error"].as_str().is_some());
     }
 
     #[tokio::test]
-    #[serial]
     async fn test_exit_plan_mode_with_plan() {
-        // Reset and enter plan mode
-        if let Ok(mut manager) = PLAN_MANAGER.write() {
-            manager.exit_plan_mode();
+        let plan_manager = create_test_plan_manager();
+
+        // Enter plan mode and create plan
+        {
+            let mut manager = plan_manager.write().unwrap();
             manager.enter_plan_mode(None).unwrap();
             manager.create_plan(vec![PlanEntryInput {
                 content: "Step 1".to_string(),
@@ -154,7 +162,7 @@ mod tests {
             }]);
         }
 
-        let tool = ExitPlanModeTool::new(None);
+        let tool = ExitPlanModeTool::new(None, plan_manager);
         let result = tool
             .call(json!({
                 "allowed_prompts": [

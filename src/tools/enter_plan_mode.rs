@@ -4,22 +4,30 @@
 //! explore the codebase and design an approach before executing any changes.
 
 use crate::agent::AgentEvent;
-use crate::plan::PLAN_MANAGER;
+use crate::plan::PlanManager;
 use crate::tools::ToolEmitter;
 
 use async_trait::async_trait;
 use genai_rs::{CallableFunction, FunctionDeclaration, FunctionError, FunctionParameters};
 use serde_json::{Value, json};
+use std::sync::{Arc, RwLock};
 use tokio::sync::mpsc;
 
 /// Tool for entering plan mode.
 pub struct EnterPlanModeTool {
     events_tx: Option<mpsc::Sender<AgentEvent>>,
+    plan_manager: Arc<RwLock<PlanManager>>,
 }
 
 impl EnterPlanModeTool {
-    pub fn new(events_tx: Option<mpsc::Sender<AgentEvent>>) -> Self {
-        Self { events_tx }
+    pub fn new(
+        events_tx: Option<mpsc::Sender<AgentEvent>>,
+        plan_manager: Arc<RwLock<PlanManager>>,
+    ) -> Self {
+        Self {
+            events_tx,
+            plan_manager,
+        }
     }
 }
 
@@ -45,14 +53,16 @@ impl CallableFunction for EnterPlanModeTool {
     }
 
     async fn call(&self, _args: Value) -> Result<Value, FunctionError> {
-        let result = PLAN_MANAGER
+        let result = self
+            .plan_manager
             .write()
             .map_err(|e| FunctionError::ExecutionError(format!("Lock error: {}", e).into()))?
             .enter_plan_mode(None);
 
         match result {
             Ok(()) => {
-                let plan_path = PLAN_MANAGER
+                let plan_path = self
+                    .plan_manager
                     .read()
                     .ok()
                     .and_then(|m| m.plan_file_path().map(|p| p.display().to_string()))
@@ -77,37 +87,25 @@ impl CallableFunction for EnterPlanModeTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serial_test::serial;
+
+    fn create_test_plan_manager() -> Arc<RwLock<PlanManager>> {
+        Arc::new(RwLock::new(PlanManager::new()))
+    }
 
     #[tokio::test]
-    #[serial]
     async fn test_enter_plan_mode() {
-        // Reset plan manager state
-        if let Ok(mut manager) = PLAN_MANAGER.write() {
-            manager.exit_plan_mode();
-        }
-
-        let tool = EnterPlanModeTool::new(None);
+        let plan_manager = create_test_plan_manager();
+        let tool = EnterPlanModeTool::new(None, plan_manager.clone());
         let result = tool.call(json!({})).await.unwrap();
 
         assert_eq!(result["status"], "entered_plan_mode");
         assert!(result["plan_file"].as_str().is_some());
-
-        // Clean up
-        if let Ok(mut manager) = PLAN_MANAGER.write() {
-            manager.exit_plan_mode();
-        }
     }
 
     #[tokio::test]
-    #[serial]
     async fn test_enter_plan_mode_twice_fails() {
-        // Reset plan manager state
-        if let Ok(mut manager) = PLAN_MANAGER.write() {
-            manager.exit_plan_mode();
-        }
-
-        let tool = EnterPlanModeTool::new(None);
+        let plan_manager = create_test_plan_manager();
+        let tool = EnterPlanModeTool::new(None, plan_manager.clone());
 
         // First call succeeds
         let result1 = tool.call(json!({})).await.unwrap();
@@ -116,10 +114,5 @@ mod tests {
         // Second call fails
         let result2 = tool.call(json!({})).await.unwrap();
         assert!(result2["error"].as_str().is_some());
-
-        // Clean up
-        if let Ok(mut manager) = PLAN_MANAGER.write() {
-            manager.exit_plan_mode();
-        }
     }
 }
