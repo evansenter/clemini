@@ -11,7 +11,7 @@ use termimad::MadSkin;
 // ============================================================================
 
 /// Termimad skin for markdown rendering. Left-aligns headers.
-pub static SKIN: LazyLock<MadSkin> = LazyLock::new(|| {
+pub(crate) static SKIN: LazyLock<MadSkin> = LazyLock::new(|| {
     let mut skin = MadSkin::default();
     for h in &mut skin.headers {
         h.align = termimad::Alignment::Left;
@@ -21,7 +21,7 @@ pub static SKIN: LazyLock<MadSkin> = LazyLock::new(|| {
 
 /// Render text with markdown formatting but without line wrapping.
 /// Uses a very large width to effectively disable termimad's wrapping.
-pub fn render_markdown_nowrap(text: &str) -> String {
+pub(crate) fn render_markdown_nowrap(text: &str) -> String {
     use termimad::FmtText;
     FmtText::from(&SKIN, text, Some(10000)).to_string()
 }
@@ -182,7 +182,31 @@ mod tests {
     #[test]
     fn test_render_markdown_nowrap() {
         let rendered = render_markdown_nowrap("**bold** and *italic*");
-        // Just verify it doesn't crash and produces output
+        // Verify markdown is processed - should contain ANSI escape codes
         assert!(!rendered.is_empty());
+        // ANSI escape codes start with \x1b[ (ESC[)
+        assert!(
+            rendered.contains("\x1b["),
+            "Expected ANSI codes for bold/italic formatting, got: {:?}",
+            rendered
+        );
+        // The text content should still be present
+        assert!(rendered.contains("bold"), "Should contain 'bold' text");
+        assert!(rendered.contains("italic"), "Should contain 'italic' text");
+    }
+
+    #[test]
+    fn test_render_markdown_nowrap_plain_text() {
+        // Plain text without markdown should pass through
+        let rendered = render_markdown_nowrap("plain text");
+        assert!(rendered.contains("plain text"));
+    }
+
+    #[test]
+    fn test_render_markdown_nowrap_headers() {
+        // Headers should be rendered (SKIN left-aligns them)
+        let rendered = render_markdown_nowrap("# Header");
+        assert!(!rendered.is_empty());
+        assert!(rendered.contains("Header"));
     }
 }

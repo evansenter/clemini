@@ -288,6 +288,43 @@ mod tests {
     }
 
     #[test]
+    fn test_format_tool_args_truncation_boundary() {
+        // MAX_ARG_DISPLAY_LEN is 80
+        // Test exactly at boundaries: 79, 80, 81 chars
+
+        // 79 chars - should NOT be truncated
+        let str_79 = "a".repeat(79);
+        let args = serde_json::json!({"s": str_79});
+        let formatted = format_tool_args("test", &args);
+        assert!(
+            !formatted.contains("..."),
+            "79-char string should not be truncated"
+        );
+        assert_eq!(formatted, format!("s=\"{}\" ", "a".repeat(79)));
+
+        // 80 chars - should NOT be truncated (equal to max)
+        let str_80 = "a".repeat(80);
+        let args = serde_json::json!({"s": str_80});
+        let formatted = format_tool_args("test", &args);
+        assert!(
+            !formatted.contains("..."),
+            "80-char string should not be truncated"
+        );
+        assert_eq!(formatted, format!("s=\"{}\" ", "a".repeat(80)));
+
+        // 81 chars - should be truncated
+        let str_81 = "a".repeat(81);
+        let args = serde_json::json!({"s": str_81});
+        let formatted = format_tool_args("test", &args);
+        assert!(
+            formatted.contains("..."),
+            "81-char string should be truncated"
+        );
+        // Truncated to 77 chars + "..."
+        assert_eq!(formatted, format!("s=\"{}...\" ", "a".repeat(77)));
+    }
+
+    #[test]
     fn test_format_tool_args_newlines() {
         let args = serde_json::json!({"text": "hello\nworld"});
         let formatted = format_tool_args("test", &args);
@@ -361,6 +398,28 @@ mod tests {
     fn test_estimate_tokens() {
         assert_eq!(estimate_tokens(&serde_json::json!("hello")), 1);
         assert_eq!(estimate_tokens(&serde_json::json!({"key": "value"})), 3);
+    }
+
+    #[test]
+    fn test_estimate_tokens_edge_cases() {
+        // Empty/minimal values
+        assert_eq!(estimate_tokens(&serde_json::json!(null)), 1); // "null" = 4 chars
+        assert_eq!(estimate_tokens(&serde_json::json!("")), 0); // "\"\"" = 2 chars / 4 = 0
+        assert_eq!(estimate_tokens(&serde_json::json!([])), 0); // "[]" = 2 chars / 4 = 0
+        assert_eq!(estimate_tokens(&serde_json::json!({})), 0); // "{}" = 2 chars / 4 = 0
+
+        // Large string (4000 chars = ~1000 tokens)
+        let large_str = "a".repeat(4000);
+        let tokens = estimate_tokens(&serde_json::json!(large_str));
+        // "\"" + 4000 + "\"" = 4002 chars / 4 = 1000
+        assert_eq!(tokens, 1000);
+
+        // Deeply nested object
+        let nested = serde_json::json!({
+            "a": {"b": {"c": {"d": "value"}}}
+        });
+        let tokens = estimate_tokens(&nested);
+        assert!(tokens > 0, "Nested objects should have non-zero tokens");
     }
 
     #[test]

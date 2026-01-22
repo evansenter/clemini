@@ -42,6 +42,11 @@ pub fn disable_logging() {
     LOGGING_DISABLED.store(true, Ordering::SeqCst);
 }
 
+/// Re-enable logging after it was disabled. Primarily for test cleanup.
+pub fn enable_logging() {
+    LOGGING_DISABLED.store(false, Ordering::SeqCst);
+}
+
 /// Check if logging is enabled. Returns true unless explicitly disabled via `disable_logging()`.
 pub fn is_logging_enabled() -> bool {
     !LOGGING_DISABLED.load(Ordering::SeqCst)
@@ -79,6 +84,9 @@ pub fn get_output_sink() -> Option<Arc<dyn OutputSink>> {
 
 /// Log a complete block with trailing blank line for visual separation.
 pub fn log_event(message: &str) {
+    if !is_logging_enabled() {
+        return;
+    }
     if let Some(sink) = get_output_sink() {
         sink.emit(message);
     }
@@ -88,6 +96,9 @@ pub fn log_event(message: &str) {
 
 /// Log a line without trailing blank line (for multi-line tool output).
 pub fn log_event_line(message: &str) {
+    if !is_logging_enabled() {
+        return;
+    }
     if let Some(sink) = get_output_sink() {
         sink.emit_line(message);
     }
@@ -163,6 +174,7 @@ mod tests {
 
     #[test]
     fn test_output_sink_replacement() {
+        enable_logging(); // Ensure logging is enabled (may have been disabled by other tests)
         reset_output_sink();
 
         // Set first sink and emit
@@ -186,6 +198,7 @@ mod tests {
 
     #[test]
     fn test_log_event_routes_to_emit() {
+        enable_logging(); // Ensure logging is enabled (may have been disabled by other tests)
         reset_output_sink();
 
         let sink = Arc::new(MockSink::new());
@@ -200,6 +213,7 @@ mod tests {
 
     #[test]
     fn test_log_event_line_routes_to_emit_line() {
+        enable_logging(); // Ensure logging is enabled (may have been disabled by other tests)
         reset_output_sink();
 
         let sink = Arc::new(MockSink::new());

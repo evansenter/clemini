@@ -28,5 +28,8 @@ pub use format::{
     format_error_message, format_retry, format_tool_args, format_tool_executing,
     format_tool_result,
 };
-pub use logging::{OutputSink, log_event, log_event_line, set_output_sink};
+pub use logging::{
+    OutputSink, disable_logging, enable_logging, is_logging_enabled, log_event, log_event_line,
+    set_output_sink,
+};
 pub use text_buffer::TextBuffer;
