@@ -75,7 +75,7 @@ Standalone crate for terminal UI, usable by any ACP-compatible agent:
 
 ```
 crates/clemitui/
-├── Cargo.toml       # Depends on agent-client-protocol, NOT genai-rs
+├── Cargo.toml
 └── src/
     ├── lib.rs       # Re-exports
     ├── format.rs    # Primitive formatting functions (tool output, warnings)
