@@ -2,6 +2,8 @@ mod ask_user;
 pub mod background;
 mod bash;
 mod edit;
+mod enter_plan_mode;
+mod exit_plan_mode;
 mod glob;
 mod grep;
 mod kill_shell;
@@ -47,6 +49,8 @@ pub trait ToolEmitter {
 pub use ask_user::AskUserTool;
 pub use bash::BashTool;
 pub use edit::EditTool;
+pub use enter_plan_mode::EnterPlanModeTool;
+pub use exit_plan_mode::ExitPlanModeTool;
 pub use glob::GlobTool;
 pub use grep::GrepTool;
 pub use kill_shell::KillShellTool;
@@ -185,6 +189,8 @@ impl ToolService for CleminiToolService {
             Arc::new(WebSearchTool::new(events_tx.clone())),
             Arc::new(AskUserTool::new(events_tx.clone())),
             Arc::new(TodoWriteTool::new(events_tx.clone())),
+            Arc::new(EnterPlanModeTool::new(events_tx.clone())),
+            Arc::new(ExitPlanModeTool::new(events_tx)),
         ]
     }
 }
