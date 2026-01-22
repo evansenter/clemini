@@ -314,15 +314,25 @@ where
     let mut response: Option<InteractionResponse> = None;
     let mut accumulated_function_calls: Vec<(Option<String>, String, Value)> = Vec::new();
 
-    while let Some(event) = stream.next().await {
-        if cancellation_token.is_cancelled() {
-            let _ = events_tx.try_send(AgentEvent::Cancelled);
-            return Ok(StreamProcessingResult {
-                response: None,
-                accumulated_function_calls: Vec::new(),
-                cancelled: true,
-            });
-        }
+    loop {
+        // Race stream.next() against cancellation for immediate response to ctrl-c
+        let event = tokio::select! {
+            biased; // Check cancellation first
+            _ = cancellation_token.cancelled() => {
+                let _ = events_tx.try_send(AgentEvent::Cancelled);
+                return Ok(StreamProcessingResult {
+                    response: None,
+                    accumulated_function_calls: Vec::new(),
+                    cancelled: true,
+                });
+            }
+            event = stream.next() => event,
+        };
+
+        let Some(event) = event else {
+            // Stream ended
+            break;
+        };
 
         match event {
             Ok(event) => match event.chunk {

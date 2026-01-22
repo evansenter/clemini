@@ -2,6 +2,7 @@ use anyhow::Result;
 use clap::Parser;
 use colored::Colorize;
 use genai_rs::Client;
+use reedline::{DefaultPrompt, DefaultPromptSegment, FileBackedHistory, Reedline, Signal};
 use serde::Deserialize;
 use std::env;
 use std::io::{self, IsTerminal, Read, Write};
@@ -507,6 +508,88 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+/// Events from the reedline input thread to the async REPL loop.
+enum InputEvent {
+    /// User submitted a line of input.
+    Line(String),
+    /// User pressed Ctrl-C during input.
+    Cancel,
+}
+
+/// Spawn a dedicated thread for reedline input.
+///
+/// Reedline is synchronous and blocks on input. We run it in a separate thread
+/// and communicate with the async REPL loop via a channel.
+fn spawn_reedline_thread(cwd: PathBuf, model: String) -> mpsc::UnboundedReceiver<InputEvent> {
+    let (tx, rx) = mpsc::unbounded_channel();
+
+    std::thread::spawn(move || {
+        // Set up history file
+        let history_path = dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".clemini/history.txt");
+
+        // Ensure directory exists
+        if let Some(parent) = history_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+
+        let history = FileBackedHistory::with_file(10_000, history_path.clone())
+            .map(Box::new)
+            .ok();
+
+        // Create reedline editor
+        let mut line_editor = Reedline::create();
+        if let Some(h) = history {
+            line_editor = line_editor.with_history(h);
+        }
+
+        // Simple prompt: "> "
+        let prompt = DefaultPrompt::new(
+            DefaultPromptSegment::Basic("> ".to_string()),
+            DefaultPromptSegment::Empty,
+        );
+
+        loop {
+            match line_editor.read_line(&prompt) {
+                Ok(Signal::Success(buffer)) => {
+                    let input = buffer.trim();
+                    if input.is_empty() {
+                        continue;
+                    }
+
+                    // Handle quit commands in the input thread
+                    if input == "/quit" || input == "/exit" || input == "/q" {
+                        break;
+                    }
+
+                    // Handle other builtin commands that don't need async
+                    if let Some(response) = handle_builtin_command(input, &model, &cwd) {
+                        // Print response directly (we're on the input thread)
+                        eprintln!("{response}");
+                        continue;
+                    }
+
+                    // Send to async REPL loop
+                    if tx.send(InputEvent::Line(input.to_string())).is_err() {
+                        break; // Channel closed
+                    }
+                }
+                Ok(Signal::CtrlC) => {
+                    // Ctrl-C during input - send cancel event
+                    let _ = tx.send(InputEvent::Cancel);
+                }
+                Ok(Signal::CtrlD) | Err(_) => {
+                    // EOF or error - exit
+                    break;
+                }
+            }
+        }
+    });
+
+    rx
+}
+
 /// Plain text REPL
 async fn run_plain_repl(
     client: &Client,
@@ -519,29 +602,26 @@ async fn run_plain_repl(
 ) -> Result<()> {
     let mut last_interaction_id: Option<String> = initial_interaction_id;
 
+    // Spawn reedline input thread
+    let mut input_rx = spawn_reedline_thread(cwd.clone(), model.to_string());
+
     loop {
-        eprint!("> ");
-        io::stderr().flush()?;
+        // Receive input from reedline thread
+        let event = match input_rx.recv().await {
+            Some(e) => e,
+            None => break, // Channel closed (Ctrl-D or quit)
+        };
 
-        let mut input = String::new();
-        if io::stdin().read_line(&mut input)? == 0 {
-            break; // EOF
-        }
-        let input = input.trim();
-        if input.is_empty() {
-            continue;
-        }
+        let input = match event {
+            InputEvent::Cancel => {
+                // Ctrl-C during input - just continue to next prompt
+                // (reedline already cleared the line)
+                continue;
+            }
+            InputEvent::Line(line) => line,
+        };
 
-        // Redraw input with background
-        eprint!("\x1b[1A\x1b[2K"); // Move up 1 line, clear line
-        eprint!("> ");
-        eprintln!("{}", input.on_bright_black());
-        io::stderr().flush()?;
-
-        if input == "/quit" || input == "/exit" || input == "/q" {
-            break;
-        }
-
+        // Handle clear and help (these need access to REPL state)
         if input == "/clear" || input == "/c" {
             last_interaction_id = None;
             eprint!("{}", clemini::format::format_builtin_cleared());
@@ -550,12 +630,6 @@ async fn run_plain_repl(
 
         if input == "/help" || input == "/h" {
             print_help();
-            continue;
-        }
-
-        // Handle other commands
-        if let Some(response) = handle_builtin_command(input, model, &cwd) {
-            eprintln!("{response}");
             continue;
         }
 
@@ -587,7 +661,7 @@ async fn run_plain_repl(
         match run_interaction(
             client,
             tool_service,
-            input,
+            &input,
             last_interaction_id.as_deref(),
             model,
             &system_prompt,
@@ -645,8 +719,11 @@ fn get_help_text() -> String {
         "  /h, /help         Show this help message",
         "",
         "Controls:",
-        "  Ctrl-C            Cancel current operation",
+        "  Enter             Submit input",
+        "  Ctrl-C            Cancel current operation / clear line",
         "  Ctrl-D            Quit",
+        "  Up/Down           Navigate history",
+        "  Ctrl-R            Search history",
         "",
         "Shell escape:",
         "  !<command>        Run a shell command directly",
