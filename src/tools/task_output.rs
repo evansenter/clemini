@@ -85,7 +85,7 @@ impl CallableFunction for TaskOutputTool {
                     let mut tasks = BACKGROUND_TASKS.lock().unwrap();
                     if let Some(task) = tasks.get_mut(task_id) {
                         task.update_status();
-                        task.completed.load(std::sync::atomic::Ordering::SeqCst)
+                        task.is_completed()
                     } else {
                         // Task disappeared?
                         return Ok(error_response(
@@ -111,12 +111,12 @@ impl CallableFunction for TaskOutputTool {
         // Fetch final result
         let tasks = BACKGROUND_TASKS.lock().unwrap();
         if let Some(task) = tasks.get(task_id) {
-            let completed = task.completed.load(std::sync::atomic::Ordering::SeqCst);
+            let completed = task.is_completed();
             let status = if completed { "completed" } else { "running" };
 
-            let exit_code = task.exit_code.load(std::sync::atomic::Ordering::SeqCst);
-            let stdout = task.stdout_buffer.lock().unwrap().clone();
-            let stderr = task.stderr_buffer.lock().unwrap().clone();
+            let exit_code = task.exit_code();
+            let stdout = task.stdout();
+            let stderr = task.stderr();
 
             let mut resp = json!({
                 "task_id": task_id,
@@ -223,7 +223,7 @@ mod tests {
         // Clean up - extract child before dropping lock to avoid holding across await
         let child = {
             let mut tasks = BACKGROUND_TASKS.lock().unwrap();
-            tasks.remove(task_id).and_then(|mut task| task.child.take())
+            tasks.remove(task_id).and_then(|mut task| task.take_child())
         };
         if let Some(mut child) = child {
             let _ = child.kill().await;
@@ -283,7 +283,7 @@ mod tests {
         // Clean up
         let child = {
             let mut tasks = BACKGROUND_TASKS.lock().unwrap();
-            tasks.remove(task_id).and_then(|mut task| task.child.take())
+            tasks.remove(task_id).and_then(|mut task| task.take_child())
         };
         if let Some(mut child) = child {
             let _ = child.kill().await;

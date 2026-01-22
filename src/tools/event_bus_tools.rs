@@ -3,7 +3,7 @@
 //! These tools allow clemini to communicate with other sessions via the event bus.
 
 use crate::agent::AgentEvent;
-use crate::event_bus::{EventBus, format_timestamp};
+use crate::event_bus::{EventBus, GetEventsOptions, format_timestamp};
 use crate::tools::ToolEmitter;
 
 use async_trait::async_trait;
@@ -367,19 +367,18 @@ impl CallableFunction for EventBusGetEventsTool {
             FunctionError::ExecutionError(format!("Failed to open event bus: {}", e).into())
         })?;
 
-        let (events, new_cursor) = bus
-            .get_events(
-                cursor,
-                limit,
-                session_id,
-                order,
-                channel,
-                resume,
-                event_types.as_deref(),
-            )
-            .map_err(|e| {
-                FunctionError::ExecutionError(format!("Failed to get events: {}", e).into())
-            })?;
+        let opts = GetEventsOptions {
+            cursor,
+            limit,
+            session_id,
+            order,
+            channel,
+            resume,
+            event_types: event_types.as_deref(),
+        };
+        let (events, new_cursor) = bus.get_events(&opts).map_err(|e| {
+            FunctionError::ExecutionError(format!("Failed to get events: {}", e).into())
+        })?;
 
         let events_json: Vec<Value> = events
             .iter()
@@ -502,5 +501,98 @@ mod tests {
         let tool = EventBusUnregisterTool::new(None);
         let result = tool.call(json!({})).await.unwrap();
         assert!(result.get("error").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_register_success() {
+        let tool = EventBusRegisterTool::new(None);
+        let result = tool
+            .call(json!({
+                "name": "test-happy-path",
+                "machine": "test-machine",
+                "cwd": "/tmp/test"
+            }))
+            .await
+            .unwrap();
+
+        assert!(result.get("session_id").is_some());
+        assert_eq!(
+            result.get("name").and_then(|v| v.as_str()),
+            Some("test-happy-path")
+        );
+
+        // Cleanup: unregister the session
+        let session_id = result.get("session_id").and_then(|v| v.as_str()).unwrap();
+        let unregister_tool = EventBusUnregisterTool::new(None);
+        let _ = unregister_tool
+            .call(json!({ "session_id": session_id }))
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_list_sessions_success() {
+        let tool = EventBusListSessionsTool::new(None);
+        let result = tool.call(json!({})).await.unwrap();
+
+        // Should return an array of sessions (may be empty or have entries)
+        assert!(result.get("sessions").is_some());
+        assert!(result.get("sessions").unwrap().is_array());
+    }
+
+    #[tokio::test]
+    async fn test_list_channels_success() {
+        let tool = EventBusListChannelsTool::new(None);
+        let result = tool.call(json!({})).await.unwrap();
+
+        // Should return an array of channels
+        assert!(result.get("channels").is_some());
+        assert!(result.get("channels").unwrap().is_array());
+    }
+
+    #[tokio::test]
+    async fn test_publish_and_get_events_success() {
+        // First register a session
+        let register_tool = EventBusRegisterTool::new(None);
+        let session_result = register_tool
+            .call(json!({
+                "name": "test-publish-get",
+                "machine": "test-machine"
+            }))
+            .await
+            .unwrap();
+        let session_id = session_result
+            .get("session_id")
+            .and_then(|v| v.as_str())
+            .unwrap();
+
+        // Publish an event
+        let publish_tool = EventBusPublishTool::new(None);
+        let publish_result = publish_tool
+            .call(json!({
+                "event_type": "test_event",
+                "payload": "test payload from happy path test",
+                "session_id": session_id,
+                "channel": "all"
+            }))
+            .await
+            .unwrap();
+        assert!(publish_result.get("event_id").is_some());
+
+        // Get events
+        let get_tool = EventBusGetEventsTool::new(None);
+        let get_result = get_tool
+            .call(json!({
+                "session_id": session_id,
+                "limit": 10
+            }))
+            .await
+            .unwrap();
+        assert!(get_result.get("events").is_some());
+
+        // Cleanup
+        let unregister_tool = EventBusUnregisterTool::new(None);
+        let _ = unregister_tool
+            .call(json!({ "session_id": session_id }))
+            .await;
     }
 }

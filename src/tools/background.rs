@@ -11,26 +11,29 @@ pub static NEXT_TASK_ID: AtomicUsize = AtomicUsize::new(1);
 /// Represents a running or completed background task.
 pub struct BackgroundTask {
     /// The child process (if still running).
-    /// Optional because we might want to take it out to kill it or wait on it.
-    pub child: Option<Child>,
+    child: Option<Child>,
 
     /// Captured stdout buffer.
-    pub stdout_buffer: Arc<Mutex<String>>,
+    stdout_buffer: Arc<Mutex<String>>,
 
     /// Captured stderr buffer.
-    pub stderr_buffer: Arc<Mutex<String>>,
+    stderr_buffer: Arc<Mutex<String>>,
 
     /// Whether the task has completed.
-    pub completed: Arc<AtomicBool>,
+    completed: Arc<AtomicBool>,
 
     /// Exit code (only valid if completed is true).
-    pub exit_code: Arc<AtomicI32>,
+    exit_code: Arc<AtomicI32>,
 
     /// Handle for the output collection task (stdout).
-    pub stdout_task: Option<JoinHandle<()>>,
+    /// Not read externally, but keeps the task alive until BackgroundTask is dropped.
+    #[allow(dead_code)]
+    stdout_task: Option<JoinHandle<()>>,
 
     /// Handle for the output collection task (stderr).
-    pub stderr_task: Option<JoinHandle<()>>,
+    /// Not read externally, but keeps the task alive until BackgroundTask is dropped.
+    #[allow(dead_code)]
+    stderr_task: Option<JoinHandle<()>>,
 }
 
 /// Global registry of background tasks.
@@ -38,6 +41,48 @@ pub static BACKGROUND_TASKS: LazyLock<Mutex<HashMap<String, BackgroundTask>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 impl BackgroundTask {
+    /// Check if the task has completed.
+    pub fn is_completed(&self) -> bool {
+        self.completed.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Get the exit code (only meaningful if completed).
+    pub fn exit_code(&self) -> i32 {
+        self.exit_code.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Get a copy of the stdout buffer.
+    pub fn stdout(&self) -> String {
+        match self.stdout_buffer.lock() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => {
+                tracing::warn!("stdout_buffer lock was poisoned, recovering");
+                poisoned.into_inner().clone()
+            }
+        }
+    }
+
+    /// Get a copy of the stderr buffer.
+    pub fn stderr(&self) -> String {
+        match self.stderr_buffer.lock() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => {
+                tracing::warn!("stderr_buffer lock was poisoned, recovering");
+                poisoned.into_inner().clone()
+            }
+        }
+    }
+
+    /// Take the child process (for killing).
+    pub fn take_child(&mut self) -> Option<Child> {
+        self.child.take()
+    }
+
+    /// Check if the child process is still available.
+    pub fn has_child(&self) -> bool {
+        self.child.is_some()
+    }
+
     /// Create a new background task from a spawned child process.
     /// Starts background tasks to collect stdout and stderr.
     pub fn new(mut child: Child) -> Self {
@@ -106,16 +151,31 @@ fn spawn_output_collector<R: tokio::io::AsyncRead + Unpin + Send + 'static>(
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut reader = BufReader::new(stream).lines();
-        while let Ok(Some(line)) = reader.next_line().await {
-            let mut buf = buffer.lock().unwrap();
-            buf.push_str(&line);
-            buf.push('\n');
-            // Limit buffer size to prevent memory exhaustion
-            if buf.len() > 1_000_000 {
-                let len = buf.len();
-                buf.truncate(1_000_000);
-                buf.push_str(&format!("\n... [truncated, {} bytes total]", len));
-                break;
+        loop {
+            match reader.next_line().await {
+                Ok(Some(line)) => {
+                    let mut buf = match buffer.lock() {
+                        Ok(guard) => guard,
+                        Err(poisoned) => {
+                            tracing::warn!("buffer lock poisoned during collection, recovering");
+                            poisoned.into_inner()
+                        }
+                    };
+                    buf.push_str(&line);
+                    buf.push('\n');
+                    // Limit buffer size to prevent memory exhaustion
+                    if buf.len() > 1_000_000 {
+                        let len = buf.len();
+                        buf.truncate(1_000_000);
+                        buf.push_str(&format!("\n... [truncated, {} bytes total]", len));
+                        break;
+                    }
+                }
+                Ok(None) => break, // EOF
+                Err(e) => {
+                    tracing::warn!("Error reading stream: {}", e);
+                    break;
+                }
             }
         }
     })
@@ -140,12 +200,10 @@ mod tests {
 
         let task = BackgroundTask::new(child);
 
-        // Initial state: not completed, exit code 0, empty buffers
-        assert!(!task.completed.load(Ordering::SeqCst));
-        assert_eq!(task.exit_code.load(Ordering::SeqCst), 0);
-        assert!(task.child.is_some());
-        assert!(task.stdout_task.is_some());
-        assert!(task.stderr_task.is_some());
+        // Initial state: not completed, exit code 0, has child
+        assert!(!task.is_completed());
+        assert_eq!(task.exit_code(), 0);
+        assert!(task.has_child());
     }
 
     #[tokio::test]
@@ -162,8 +220,7 @@ mod tests {
         // Wait for output collection
         sleep(Duration::from_millis(100)).await;
 
-        let stdout = task.stdout_buffer.lock().unwrap();
-        assert!(stdout.contains("hello_stdout"));
+        assert!(task.stdout().contains("hello_stdout"));
     }
 
     #[tokio::test]
@@ -181,8 +238,7 @@ mod tests {
         // Wait for output collection
         sleep(Duration::from_millis(100)).await;
 
-        let stderr = task.stderr_buffer.lock().unwrap();
-        assert!(stderr.contains("hello_stderr"));
+        assert!(task.stderr().contains("hello_stderr"));
     }
 
     #[tokio::test]
@@ -201,8 +257,8 @@ mod tests {
 
         task.update_status();
 
-        assert!(task.completed.load(Ordering::SeqCst));
-        assert_eq!(task.exit_code.load(Ordering::SeqCst), 0);
+        assert!(task.is_completed());
+        assert_eq!(task.exit_code(), 0);
     }
 
     #[tokio::test]
@@ -222,8 +278,8 @@ mod tests {
 
         task.update_status();
 
-        assert!(task.completed.load(Ordering::SeqCst));
-        assert_eq!(task.exit_code.load(Ordering::SeqCst), 42);
+        assert!(task.is_completed());
+        assert_eq!(task.exit_code(), 42);
     }
 
     #[tokio::test]
@@ -239,10 +295,10 @@ mod tests {
 
         // Check immediately - should still be running
         task.update_status();
-        assert!(!task.completed.load(Ordering::SeqCst));
+        assert!(!task.is_completed());
 
         // Clean up
-        if let Some(mut child) = task.child.take() {
+        if let Some(mut child) = task.take_child() {
             let _ = child.kill().await;
         }
     }
@@ -259,11 +315,11 @@ mod tests {
         let mut task = BackgroundTask::new(child);
 
         // Take the child (simulating kill_shell behavior)
-        let _ = task.child.take();
+        let _ = task.take_child();
 
         // update_status should mark as completed when child is None
         task.update_status();
-        assert!(task.completed.load(Ordering::SeqCst));
+        assert!(task.is_completed());
     }
 
     #[tokio::test]

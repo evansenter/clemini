@@ -102,8 +102,20 @@ impl CleminiToolService {
         }
     }
 
-    /// Set the events sender for the current interaction.
-    /// Call with `Some(tx)` before `run_interaction` and `None` after.
+    /// Set the events sender and return an RAII guard that clears it when dropped.
+    ///
+    /// This ensures cleanup even if the interaction panics or errors.
+    /// Preferred over `set_events_tx` for production use.
+    pub fn with_events_tx(&self, tx: mpsc::Sender<AgentEvent>) -> EventsGuard<'_> {
+        self.set_events_tx(Some(tx));
+        EventsGuard { service: self }
+    }
+
+    /// Set or clear the events sender directly.
+    ///
+    /// For production code, prefer `with_events_tx()` which returns a guard
+    /// that automatically clears the sender when dropped. This method is
+    /// primarily for tests that need to control lifetime manually.
     pub fn set_events_tx(&self, tx: Option<mpsc::Sender<AgentEvent>>) {
         match self.events_tx.write() {
             Ok(mut guard) => *guard = tx,
@@ -132,6 +144,35 @@ impl CleminiToolService {
             .find(|t| t.declaration().name() == name)
             .ok_or_else(|| anyhow::anyhow!("Tool not found: {}", name))?;
         tool.call(args).await.map_err(|e| anyhow::anyhow!(e))
+    }
+}
+
+/// RAII guard that clears events_tx when dropped.
+///
+/// Returned by `CleminiToolService::with_events_tx()`.
+/// Ensures cleanup even if the interaction panics or errors.
+///
+/// # Usage
+///
+/// The guard must be bound to a variable to stay alive for the duration of the interaction:
+///
+/// ```ignore
+/// // Correct: guard lives until end of scope
+/// let _guard = tool_service.with_events_tx(events_tx.clone());
+/// run_interaction(...).await;
+/// // _guard drops here, clearing events_tx
+///
+/// // Wrong: guard drops immediately, events_tx cleared before interaction
+/// tool_service.with_events_tx(events_tx.clone()); // drops here!
+/// run_interaction(...).await; // events_tx already None
+/// ```
+pub struct EventsGuard<'a> {
+    service: &'a CleminiToolService,
+}
+
+impl Drop for EventsGuard<'_> {
+    fn drop(&mut self) {
+        self.service.set_events_tx(None);
     }
 }
 
@@ -307,6 +348,26 @@ pub fn create_http_client() -> Result<reqwest::Client, String> {
         .user_agent(concat!("clemini/", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(|e| format!("Failed to create HTTP client: {}", e))
+}
+
+/// Get the clemini executable path for spawning subagents.
+/// Tries current executable first, falls back to cargo run (development only).
+pub fn get_clemini_command() -> (String, Vec<String>) {
+    // Try current executable first
+    if let Ok(exe) = std::env::current_exe()
+        && exe.exists()
+    {
+        return (exe.to_string_lossy().to_string(), vec![]);
+    }
+    // Fallback to cargo run - only useful during development
+    tracing::warn!(
+        "current_exe() failed or doesn't exist, falling back to 'cargo run'. \
+         This is expected during development but indicates an issue in production."
+    );
+    (
+        "cargo".to_string(),
+        vec!["run".to_string(), "--quiet".to_string(), "--".to_string()],
+    )
 }
 
 /// Standard error codes for tool responses

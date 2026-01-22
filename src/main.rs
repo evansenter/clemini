@@ -468,8 +468,8 @@ async fn main() -> Result<()> {
             }
         });
 
-        // Set events_tx for tools to emit output through the event system
-        tool_service.set_events_tx(Some(events_tx.clone()));
+        // Set events_tx for tools - guard clears it when dropped
+        let _events_guard = tool_service.with_events_tx(events_tx.clone());
 
         run_interaction(
             &client,
@@ -483,9 +483,7 @@ async fn main() -> Result<()> {
             retry_config,
         )
         .await?;
-
-        // Clear events_tx after interaction
-        tool_service.set_events_tx(None);
+        // _events_guard dropped here, clearing events_tx
 
         // Wait for event handler to finish
         let _ = event_handler.await;
@@ -581,8 +579,8 @@ async fn run_plain_repl(
             }
         });
 
-        // Set events_tx for tools to emit output through the event system
-        tool_service.set_events_tx(Some(events_tx.clone()));
+        // Set events_tx for tools - guard clears it when dropped
+        let _events_guard = tool_service.with_events_tx(events_tx.clone());
 
         match run_interaction(
             client,
@@ -604,9 +602,7 @@ async fn run_plain_repl(
                 eprintln!("\n{}", format!("[error: {e}]").bright_red());
             }
         }
-
-        // Clear events_tx after interaction
-        tool_service.set_events_tx(None);
+        // _events_guard dropped here, clearing events_tx
 
         // Wait for event handler to finish
         let _ = event_handler.await;

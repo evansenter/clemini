@@ -39,12 +39,16 @@ The CLI has three modes: single-prompt (`-p "prompt"`), interactive REPL, and MC
 src/
 ├── main.rs          # CLI entry, REPL loop, MCP server startup
 ├── lib.rs           # Library crate exposing core types for integration tests
+├── acp.rs           # ACP server implementation
+├── acp_client.rs    # ACP client for spawning subagents
 ├── agent.rs         # Core interaction logic, AgentEvent enum
 ├── diff.rs          # Diff formatting for edit tool output
+├── event_bus.rs     # Cross-session event bus (SQLite-backed)
 ├── events.rs        # EventHandler trait, TerminalEventHandler
 ├── format.rs        # Pure formatting functions, TextBuffer, markdown rendering
 ├── logging.rs       # OutputSink trait, log_event functions
 ├── mcp.rs           # MCP server implementation
+├── plan.rs          # Plan mode manager
 ├── system_prompt.md # System prompt for Gemini (included at compile time)
 └── tools/           # Tool implementations (bash, read_file, etc.)
 ```
