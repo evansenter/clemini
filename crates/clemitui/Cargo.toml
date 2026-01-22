@@ -10,9 +10,6 @@ keywords = ["cli", "tui", "ai", "llm", "acp"]
 categories = ["command-line-interface", "text-processing"]
 
 [dependencies]
-# ACP (Agent Client Protocol)
-agent-client-protocol = "0.9"
-
 # Terminal formatting
 colored = "2"
 termimad = "0.30"
