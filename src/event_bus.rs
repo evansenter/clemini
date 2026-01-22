@@ -729,7 +729,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn test_heartbeat() {
         let bus = EventBus::open_in_memory().unwrap();
         let session = bus.register_session("test", None, None, None).unwrap();
