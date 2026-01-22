@@ -3,6 +3,7 @@ pub mod background;
 mod bash;
 mod edit;
 mod enter_plan_mode;
+mod event_bus_tools;
 mod exit_plan_mode;
 mod glob;
 mod grep;
@@ -50,6 +51,10 @@ pub use ask_user::AskUserTool;
 pub use bash::BashTool;
 pub use edit::EditTool;
 pub use enter_plan_mode::EnterPlanModeTool;
+pub use event_bus_tools::{
+    EventBusGetEventsTool, EventBusListChannelsTool, EventBusListSessionsTool, EventBusNotifyTool,
+    EventBusPublishTool, EventBusRegisterTool, EventBusUnregisterTool,
+};
 pub use exit_plan_mode::ExitPlanModeTool;
 pub use glob::GlobTool;
 pub use grep::GrepTool;
@@ -190,7 +195,15 @@ impl ToolService for CleminiToolService {
             Arc::new(AskUserTool::new(events_tx.clone())),
             Arc::new(TodoWriteTool::new(events_tx.clone())),
             Arc::new(EnterPlanModeTool::new(events_tx.clone())),
-            Arc::new(ExitPlanModeTool::new(events_tx)),
+            Arc::new(ExitPlanModeTool::new(events_tx.clone())),
+            // Event bus tools
+            Arc::new(EventBusRegisterTool::new(events_tx.clone())),
+            Arc::new(EventBusListSessionsTool::new(events_tx.clone())),
+            Arc::new(EventBusListChannelsTool::new(events_tx.clone())),
+            Arc::new(EventBusPublishTool::new(events_tx.clone())),
+            Arc::new(EventBusGetEventsTool::new(events_tx.clone())),
+            Arc::new(EventBusUnregisterTool::new(events_tx.clone())),
+            Arc::new(EventBusNotifyTool::new(events_tx)),
         ]
     }
 }

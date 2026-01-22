@@ -7,6 +7,7 @@ pub mod acp;
 pub mod acp_client;
 pub mod agent;
 pub mod diff;
+pub mod event_bus;
 pub mod events;
 pub mod format;
 pub mod logging;
