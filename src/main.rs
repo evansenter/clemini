@@ -291,6 +291,71 @@ mod tests {
     }
 
     // Note: Logging tests moved to src/logging.rs since they test lib functionality
+
+    #[test]
+    fn test_process_input_empty() {
+        let cwd = PathBuf::from("/test/cwd");
+        assert_eq!(process_input("", "model", &cwd), InputAction::Continue);
+        assert_eq!(process_input("   ", "model", &cwd), InputAction::Continue);
+        assert_eq!(process_input("\n", "model", &cwd), InputAction::Continue);
+    }
+
+    #[test]
+    fn test_process_input_quit_commands() {
+        let cwd = PathBuf::from("/test/cwd");
+        assert_eq!(process_input("/quit", "model", &cwd), InputAction::Quit);
+        assert_eq!(process_input("/exit", "model", &cwd), InputAction::Quit);
+        assert_eq!(process_input("/q", "model", &cwd), InputAction::Quit);
+        // With whitespace
+        assert_eq!(process_input("  /quit  ", "model", &cwd), InputAction::Quit);
+    }
+
+    #[test]
+    fn test_process_input_builtin_commands() {
+        colored::control::set_override(false);
+        let cwd = PathBuf::from("/test/cwd");
+
+        // /model returns builtin response
+        match process_input("/model", "test-model", &cwd) {
+            InputAction::Builtin(response) => {
+                assert!(response.contains("test-model"));
+            }
+            other => panic!("Expected Builtin, got {:?}", other),
+        }
+
+        // /pwd returns builtin response
+        match process_input("/pwd", "model", &cwd) {
+            InputAction::Builtin(response) => {
+                assert!(response.contains("/test/cwd"));
+            }
+            other => panic!("Expected Builtin, got {:?}", other),
+        }
+
+        colored::control::unset_override();
+    }
+
+    #[test]
+    fn test_process_input_regular_input() {
+        let cwd = PathBuf::from("/test/cwd");
+
+        // Regular input is sent to REPL
+        assert_eq!(
+            process_input("hello world", "model", &cwd),
+            InputAction::SendToRepl("hello world".to_string())
+        );
+
+        // Unknown command is sent to REPL
+        assert_eq!(
+            process_input("/unknown", "model", &cwd),
+            InputAction::SendToRepl("/unknown".to_string())
+        );
+
+        // Whitespace is trimmed
+        assert_eq!(
+            process_input("  hello  ", "model", &cwd),
+            InputAction::SendToRepl("hello".to_string())
+        );
+    }
 }
 
 #[derive(Parser)]
@@ -516,6 +581,36 @@ enum InputEvent {
     Cancel,
 }
 
+/// Action to take after processing user input.
+#[derive(Debug, Clone, PartialEq)]
+enum InputAction {
+    /// Exit the REPL (quit command).
+    Quit,
+    /// Print builtin command response.
+    Builtin(String),
+    /// Send input to the async REPL loop.
+    SendToRepl(String),
+    /// Empty input, skip.
+    Continue,
+}
+
+/// Process raw input and determine the action to take.
+///
+/// This is a pure function that can be easily unit tested.
+fn process_input(input: &str, model: &str, cwd: &std::path::Path) -> InputAction {
+    let input = input.trim();
+    if input.is_empty() {
+        return InputAction::Continue;
+    }
+    if input == "/quit" || input == "/exit" || input == "/q" {
+        return InputAction::Quit;
+    }
+    if let Some(response) = handle_builtin_command(input, model, cwd) {
+        return InputAction::Builtin(response);
+    }
+    InputAction::SendToRepl(input.to_string())
+}
+
 /// Spawn a dedicated thread for reedline input.
 ///
 /// Reedline is synchronous and blocks on input. We run it in a separate thread
@@ -530,13 +625,27 @@ fn spawn_reedline_thread(cwd: PathBuf, model: String) -> mpsc::UnboundedReceiver
             .join(".clemini/history.txt");
 
         // Ensure directory exists
-        if let Some(parent) = history_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+        if let Some(parent) = history_path.parent()
+            && let Err(e) = std::fs::create_dir_all(parent)
+        {
+            tracing::warn!(
+                "Could not create history directory {:?}: {}. History will not be persisted.",
+                parent,
+                e
+            );
         }
 
-        let history = FileBackedHistory::with_file(10_000, history_path.clone())
-            .map(Box::new)
-            .ok();
+        let history = match FileBackedHistory::with_file(10_000, history_path.clone()) {
+            Ok(h) => Some(Box::new(h)),
+            Err(e) => {
+                tracing::warn!(
+                    "Could not create history file {:?}: {}. Command history will not be persisted.",
+                    history_path,
+                    e
+                );
+                None
+            }
+        };
 
         // Create reedline editor
         let mut line_editor = Reedline::create();
@@ -552,35 +661,35 @@ fn spawn_reedline_thread(cwd: PathBuf, model: String) -> mpsc::UnboundedReceiver
 
         loop {
             match line_editor.read_line(&prompt) {
-                Ok(Signal::Success(buffer)) => {
-                    let input = buffer.trim();
-                    if input.is_empty() {
-                        continue;
-                    }
-
-                    // Handle quit commands in the input thread
-                    if input == "/quit" || input == "/exit" || input == "/q" {
-                        break;
-                    }
-
-                    // Handle other builtin commands that don't need async
-                    if let Some(response) = handle_builtin_command(input, &model, &cwd) {
-                        // Print response directly (we're on the input thread)
+                Ok(Signal::Success(buffer)) => match process_input(&buffer, &model, &cwd) {
+                    InputAction::Quit => break,
+                    InputAction::Continue => continue,
+                    InputAction::Builtin(response) => {
                         eprintln!("{response}");
                         continue;
                     }
-
-                    // Send to async REPL loop
-                    if tx.send(InputEvent::Line(input.to_string())).is_err() {
-                        break; // Channel closed
+                    InputAction::SendToRepl(input) => {
+                        if tx.send(InputEvent::Line(input)).is_err() {
+                            tracing::debug!("Input channel closed, terminating input thread");
+                            break;
+                        }
                     }
-                }
+                },
                 Ok(Signal::CtrlC) => {
                     // Ctrl-C during input - send cancel event
-                    let _ = tx.send(InputEvent::Cancel);
+                    if tx.send(InputEvent::Cancel).is_err() {
+                        tracing::debug!("Input channel closed while sending cancel event");
+                    }
                 }
-                Ok(Signal::CtrlD) | Err(_) => {
-                    // EOF or error - exit
+                Ok(Signal::CtrlD) => {
+                    // Normal EOF - user requested exit
+                    tracing::debug!("User pressed Ctrl-D, exiting REPL");
+                    break;
+                }
+                Err(e) => {
+                    // Actual error from reedline
+                    tracing::error!("Reedline error: {}", e);
+                    eprintln!("[input error: {}]", e);
                     break;
                 }
             }
