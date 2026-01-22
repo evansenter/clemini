@@ -2,8 +2,9 @@ use anyhow::Result;
 use clap::Parser;
 use colored::Colorize;
 use genai_rs::Client;
-use reedline::{DefaultPrompt, DefaultPromptSegment, FileBackedHistory, Reedline, Signal};
+use reedline::{FileBackedHistory, Prompt, PromptHistorySearch, Reedline, Signal};
 use serde::Deserialize;
+use std::borrow::Cow;
 use std::env;
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::PathBuf;
@@ -521,11 +522,12 @@ async fn main() -> Result<()> {
         // Non-interactive mode: run single prompt
         let cancellation_token = CancellationToken::new();
         let ct_clone = cancellation_token.clone();
-        ctrlc::set_handler(move || {
+        if let Err(e) = ctrlc::set_handler(move || {
             eprintln!("\n{}", clemini::format::format_ctrl_c().yellow());
             ct_clone.cancel();
-        })
-        .ok();
+        }) {
+            tracing::warn!("Failed to set ctrl-c handler: {}", e);
+        }
 
         // Create channel for agent events
         let (events_tx, mut events_rx) = mpsc::channel::<AgentEvent>(100);
@@ -667,35 +669,74 @@ fn spawn_reedline_thread(
             line_editor = line_editor.with_history(h);
         }
 
-        // Simple prompt: "> "
-        let prompt = DefaultPrompt::new(
-            DefaultPromptSegment::Basic("〉 ".to_string()),
-            DefaultPromptSegment::Empty,
-        );
+        // Simple prompt struct
+        struct SimplePrompt;
+
+        impl Prompt for SimplePrompt {
+            fn render_prompt_left(&self) -> Cow<'_, str> {
+                Cow::Borrowed("〉")
+            }
+
+            fn render_prompt_right(&self) -> Cow<'_, str> {
+                Cow::Borrowed("")
+            }
+
+            fn render_prompt_indicator(
+                &self,
+                _edit_mode: reedline::PromptEditMode,
+            ) -> Cow<'_, str> {
+                Cow::Borrowed("")
+            }
+
+            fn render_prompt_multiline_indicator(&self) -> Cow<'_, str> {
+                Cow::Borrowed("  ")
+            }
+
+            fn render_prompt_history_search_indicator(
+                &self,
+                _history_search: PromptHistorySearch,
+            ) -> Cow<'_, str> {
+                Cow::Borrowed("? ")
+            }
+        }
+
+        let prompt = SimplePrompt;
+        let mut last_ctrl_c = false; // Track if last input was ctrl-c on empty line
 
         loop {
             match line_editor.read_line(&prompt) {
-                Ok(Signal::Success(buffer)) => match process_input(&buffer, &model, &cwd) {
-                    InputAction::Quit => break,
-                    InputAction::Continue => continue,
-                    InputAction::Builtin(response) => {
-                        eprintln!("{response}");
-                        continue;
-                    }
-                    InputAction::SendToRepl(input) => {
-                        if tx.send(InputEvent::Line(input)).is_err() {
-                            tracing::debug!("Input channel closed, terminating input thread");
-                            break;
+                Ok(Signal::Success(buffer)) => {
+                    last_ctrl_c = false; // Reset on any input
+                    match process_input(&buffer, &model, &cwd) {
+                        InputAction::Quit => break,
+                        InputAction::Continue => continue,
+                        InputAction::Builtin(response) => {
+                            eprintln!("{response}");
+                            continue;
                         }
-                        // Wait for main loop to signal it's done processing before showing next prompt.
-                        // This prevents reedline from putting terminal in raw mode while output prints.
-                        if ready_rx.recv().is_err() {
-                            tracing::debug!("Ready channel closed, terminating input thread");
-                            break;
+                        InputAction::SendToRepl(input) => {
+                            if tx.send(InputEvent::Line(input)).is_err() {
+                                tracing::debug!("Input channel closed, terminating input thread");
+                                break;
+                            }
+                            // Wait for main loop to signal it's done processing before showing next prompt.
+                            // This prevents reedline from putting terminal in raw mode while output prints.
+                            if ready_rx.recv().is_err() {
+                                tracing::debug!("Ready channel closed, terminating input thread");
+                                break;
+                            }
                         }
                     }
-                },
+                }
                 Ok(Signal::CtrlC) => {
+                    // Double ctrl-c on empty line exits
+                    if last_ctrl_c {
+                        eprintln!();
+                        break;
+                    }
+                    last_ctrl_c = true;
+                    eprintln!("Press Ctrl-C again to exit, or type a command.");
+
                     // Ctrl-C during input - send cancel event
                     if tx.send(InputEvent::Cancel).is_err() {
                         tracing::debug!("Input channel closed while sending cancel event");
@@ -768,13 +809,17 @@ async fn run_plain_repl(
 
         println!();
 
+        // Use tokio's signal handling - works with async and can be called multiple times
         let cancellation_token = CancellationToken::new();
-        let ct_clone = cancellation_token.clone();
-        ctrlc::set_handler(move || {
-            eprintln!("\n{}", clemini::format::format_ctrl_c().yellow());
-            ct_clone.cancel();
-        })
-        .ok();
+        let ct_for_signal = cancellation_token.clone();
+
+        // Spawn a task to listen for ctrl-c and cancel the token
+        let signal_task = tokio::spawn(async move {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                eprintln!("\n{}", clemini::format::format_ctrl_c().yellow());
+                ct_for_signal.cancel();
+            }
+        });
 
         // Create channel for agent events
         let (events_tx, mut events_rx) = mpsc::channel::<AgentEvent>(100);
@@ -817,6 +862,9 @@ async fn run_plain_repl(
 
         // Wait for event handler to finish
         let _ = event_handler.await;
+
+        // Abort the signal listener task (no longer needed for this interaction)
+        signal_task.abort();
 
         // Signal reedline thread that we're done - safe to show next prompt
         let _ = ready_tx.send(());
