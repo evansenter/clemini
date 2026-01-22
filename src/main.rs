@@ -483,7 +483,9 @@ async fn main() -> Result<()> {
             retry_config,
         )
         .await?;
-        // _events_guard dropped here, clearing events_tx
+
+        // Drop events_guard to close the channel, allowing event handler to exit
+        drop(_events_guard);
 
         // Wait for event handler to finish
         let _ = event_handler.await;
@@ -602,7 +604,9 @@ async fn run_plain_repl(
                 eprintln!("\n{}", format!("[error: {e}]").bright_red());
             }
         }
-        // _events_guard dropped here, clearing events_tx
+
+        // Drop events_guard to close the channel, allowing event handler to exit
+        drop(_events_guard);
 
         // Wait for event handler to finish
         let _ = event_handler.await;
