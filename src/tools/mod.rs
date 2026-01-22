@@ -52,8 +52,8 @@ pub use bash::BashTool;
 pub use edit::EditTool;
 pub use enter_plan_mode::EnterPlanModeTool;
 pub use event_bus_tools::{
-    EventBusGetEventsTool, EventBusListChannelsTool, EventBusListSessionsTool, EventBusNotifyTool,
-    EventBusPublishTool, EventBusRegisterTool, EventBusUnregisterTool,
+    EventBusGetEventsTool, EventBusListChannelsTool, EventBusListSessionsTool, EventBusPublishTool,
+    EventBusRegisterTool, EventBusUnregisterTool,
 };
 pub use exit_plan_mode::ExitPlanModeTool;
 pub use glob::GlobTool;
@@ -202,8 +202,7 @@ impl ToolService for CleminiToolService {
             Arc::new(EventBusListChannelsTool::new(events_tx.clone())),
             Arc::new(EventBusPublishTool::new(events_tx.clone())),
             Arc::new(EventBusGetEventsTool::new(events_tx.clone())),
-            Arc::new(EventBusUnregisterTool::new(events_tx.clone())),
-            Arc::new(EventBusNotifyTool::new(events_tx)),
+            Arc::new(EventBusUnregisterTool::new(events_tx)),
         ]
     }
 }

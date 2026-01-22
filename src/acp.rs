@@ -317,12 +317,6 @@ impl acp::Agent for CleminiAgent {
             ));
         }
 
-        crate::logging::log_event(&format!(
-            "ACP: prompt text extracted ({} chars): {}...",
-            prompt_text.len(),
-            &prompt_text.chars().take(50).collect::<String>()
-        ));
-
         // Create channel for agent events
         let (events_tx, mut events_rx) = mpsc::channel::<AgentEvent>(100);
         let cancellation_token = CancellationToken::new();
@@ -347,7 +341,6 @@ impl acp::Agent for CleminiAgent {
         self.tool_service.set_events_tx(Some(events_tx.clone()));
 
         // Run the interaction
-        crate::logging::log_event("ACP: calling run_interaction...");
         let result = run_interaction(
             &self.client,
             &self.tool_service,
@@ -360,8 +353,6 @@ impl acp::Agent for CleminiAgent {
             self.retry_config,
         )
         .await;
-
-        crate::logging::log_event(&format!("ACP: run_interaction completed: {:?}", result.is_ok()));
 
         match result {
             Ok(_) => Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)),
