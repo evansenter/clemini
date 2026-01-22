@@ -418,10 +418,10 @@ pub fn get_clemini_command() -> (String, Vec<String>) {
         // Avoid using test runner binary as the command
         // Nextest binaries often have a hash suffix, e.g. clemini-f3b1e56b5b5b5b5b
         // They are also usually in a 'deps' directory.
-        let is_test_runner = exe.to_string_lossy().contains("/deps/") || 
-                            exe.to_string_lossy().contains("\\deps\\") ||
-                            exe_name.contains("-") && !exe_name.ends_with(".exe");
-        
+        let is_test_runner = exe.to_string_lossy().contains("/deps/")
+            || exe.to_string_lossy().contains("\\deps\\")
+            || exe_name.contains("-") && !exe_name.ends_with(".exe");
+
         if !is_test_runner {
             return (exe.to_string_lossy().to_string(), vec![]);
         }
