@@ -151,6 +151,21 @@ impl CleminiToolService {
 ///
 /// Returned by `CleminiToolService::with_events_tx()`.
 /// Ensures cleanup even if the interaction panics or errors.
+///
+/// # Usage
+///
+/// The guard must be bound to a variable to stay alive for the duration of the interaction:
+///
+/// ```ignore
+/// // Correct: guard lives until end of scope
+/// let _guard = tool_service.with_events_tx(events_tx.clone());
+/// run_interaction(...).await;
+/// // _guard drops here, clearing events_tx
+///
+/// // Wrong: guard drops immediately, events_tx cleared before interaction
+/// tool_service.with_events_tx(events_tx.clone()); // drops here!
+/// run_interaction(...).await; // events_tx already None
+/// ```
 pub struct EventsGuard<'a> {
     service: &'a CleminiToolService,
 }
