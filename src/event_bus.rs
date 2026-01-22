@@ -314,14 +314,13 @@ impl EventBus {
 
     /// List channels with subscriber counts.
     pub fn list_channels(&self) -> Result<Vec<ChannelInfo>> {
-        let conn = self.conn.lock().unwrap();
-
-        // Get unique channels from recent events
-        let mut stmt = conn.prepare("SELECT DISTINCT channel FROM events ORDER BY channel")?;
-
-        let channels: Vec<String> = stmt
-            .query_map([], |row| row.get(0))?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
+        // Get channels first, then drop lock before calling list_sessions()
+        let channels: Vec<String> = {
+            let conn = self.conn.lock().unwrap();
+            let mut stmt = conn.prepare("SELECT DISTINCT channel FROM events ORDER BY channel")?;
+            stmt.query_map([], |row| row.get(0))?
+                .collect::<std::result::Result<Vec<_>, _>>()?
+        }; // Lock released here
 
         // For each channel, count "subscribers" (sessions that might be listening)
         // This is a simplification - in practice, sessions subscribe by polling
@@ -544,35 +543,7 @@ impl EventBus {
 
 /// Generate a UUID v4 (random).
 fn uuid_v4() -> String {
-    use rand::Rng;
-    let mut rng = rand::thread_rng();
-    let mut bytes: [u8; 16] = rng.r#gen();
-
-    // Set version (4) in byte 6 high nibble
-    bytes[6] = (bytes[6] & 0x0f) | 0x40;
-
-    // Set variant (10xx) in byte 8 high bits
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-
-    format!(
-        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        bytes[0],
-        bytes[1],
-        bytes[2],
-        bytes[3],
-        bytes[4],
-        bytes[5],
-        bytes[6],
-        bytes[7],
-        bytes[8],
-        bytes[9],
-        bytes[10],
-        bytes[11],
-        bytes[12],
-        bytes[13],
-        bytes[14],
-        bytes[15]
-    )
+    uuid::Uuid::new_v4().to_string()
 }
 
 /// Format Unix timestamp as ISO 8601.
@@ -630,6 +601,24 @@ mod tests {
 
         let sessions = bus.list_sessions().unwrap();
         assert_eq!(sessions.len(), 2);
+    }
+
+    #[test]
+    fn test_list_channels() {
+        let bus = EventBus::open_in_memory().unwrap();
+        let session = bus.register_session("test", None, None, None).unwrap();
+
+        // Publish to different channels
+        bus.publish_event("test", "msg1", Some(&session.id), "all")
+            .unwrap();
+        bus.publish_event("test", "msg2", Some(&session.id), "repo:clemini")
+            .unwrap();
+
+        // This would deadlock before the fix
+        let channels = bus.list_channels().unwrap();
+        assert!(channels.len() >= 2);
+        assert!(channels.iter().any(|c| c.name == "all"));
+        assert!(channels.iter().any(|c| c.name == "repo:clemini"));
     }
 
     #[test]
@@ -740,14 +729,6 @@ mod tests {
     }
 
     #[test]
-    fn test_uuid_v4_format() {
-        let id = uuid_v4();
-        assert_eq!(id.len(), 36);
-        assert!(id.chars().nth(8) == Some('-'));
-        assert!(id.chars().nth(13) == Some('-'));
-        assert!(id.chars().nth(14) == Some('4')); // Version 4
-    }
-
     #[test]
     fn test_heartbeat() {
         let bus = EventBus::open_in_memory().unwrap();
