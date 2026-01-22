@@ -22,13 +22,18 @@ use clemini::tools::{self, CleminiToolService};
 
 const DEFAULT_MODEL: &str = "gemini-3-flash-preview";
 
+/// Returns the clemini configuration directory (~/.clemini/).
+/// Falls back to current directory if home directory is unavailable.
+fn clemini_dir() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".clemini")
+}
+
 /// Initialize logging by ensuring the log directory exists.
 /// Human-readable logs go through log_event().
 pub fn init_logging() {
-    let log_dir = dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".clemini/logs");
-
+    let log_dir = clemini_dir().join("logs");
     let _ = std::fs::create_dir_all(&log_dir);
 }
 
@@ -620,9 +625,7 @@ fn spawn_reedline_thread(cwd: PathBuf, model: String) -> mpsc::UnboundedReceiver
 
     std::thread::spawn(move || {
         // Set up history file
-        let history_path = dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(".clemini/history.txt");
+        let history_path = clemini_dir().join("history.txt");
 
         // Ensure directory exists
         if let Some(parent) = history_path.parent()

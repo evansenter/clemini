@@ -315,9 +315,11 @@ where
     let mut accumulated_function_calls: Vec<(Option<String>, String, Value)> = Vec::new();
 
     loop {
-        // Race stream.next() against cancellation for immediate response to ctrl-c
+        // Race stream.next() against cancellation for immediate response to ctrl-c.
+        // biased; ensures cancellation is always checked first, preventing the stream
+        // from being polled when the user has already pressed ctrl-c.
         let event = tokio::select! {
-            biased; // Check cancellation first
+            biased;
             _ = cancellation_token.cancelled() => {
                 let _ = events_tx.try_send(AgentEvent::Cancelled);
                 return Ok(StreamProcessingResult {
