@@ -3,14 +3,14 @@ use genai_rs::{CallableFunction, FunctionDeclaration, FunctionError, FunctionPar
 use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::atomic::Ordering;
 use tokio::process::Command;
 use tokio::sync::mpsc;
 use tracing::instrument;
 
 use super::ToolEmitter;
 use crate::agent::AgentEvent;
-use crate::tools::background::{BACKGROUND_TASKS, BackgroundTask, NEXT_TASK_ID};
+use crate::tools::background::BackgroundTask;
+use crate::tools::tasks::register_background_task;
 
 pub struct TaskTool {
     cwd: PathBuf,
@@ -75,8 +75,6 @@ impl CallableFunction for TaskTool {
 
         if background {
             // Background mode: spawn detached, store in registry
-            let task_id = NEXT_TASK_ID.fetch_add(1, Ordering::SeqCst).to_string();
-
             // Note: subprocess inherits environment including GEMINI_API_KEY (required for subagent)
             let child = Command::new(&cmd)
                 .args(&cmd_args)
@@ -88,10 +86,8 @@ impl CallableFunction for TaskTool {
                     FunctionError::ExecutionError(format!("Failed to spawn task: {}", e).into())
                 })?;
 
-            BACKGROUND_TASKS
-                .lock()
-                .unwrap()
-                .insert(task_id.clone(), BackgroundTask::new(child));
+            // Register in unified task registry with namespaced ID (bg-1, bg-2, etc.)
+            let task_id = register_background_task(BackgroundTask::new(child));
 
             self.emit(&format!("  task {} running in background", task_id));
 

@@ -232,24 +232,19 @@ pub static PLAN_MANAGER: std::sync::LazyLock<Arc<RwLock<PlanManager>>> =
 
 /// Check if the given tool is allowed in plan mode.
 ///
-/// In plan mode, only read-only tools are allowed:
-/// - read, glob, grep, web_fetch, web_search
+/// In plan mode, only read-only tools are allowed. This delegates to
+/// `tool_is_read_only()` which is the source of truth for tool categorization.
 ///
-/// Write tools are blocked:
+/// # Read-only tools (allowed)
+/// - read, glob, grep, web_fetch, web_search, ask_user, todo_write
+/// - enter_plan_mode, exit_plan_mode
+/// - event_bus_list_*, event_bus_get_events, task_output
+///
+/// # Write tools (blocked)
 /// - edit, write, bash, kill_shell, task
+/// - event_bus_register, event_bus_publish, event_bus_unregister
 pub fn is_tool_allowed_in_plan_mode(tool_name: &str) -> bool {
-    matches!(
-        tool_name,
-        "read"
-            | "glob"
-            | "grep"
-            | "web_fetch"
-            | "web_search"
-            | "ask_user"
-            | "todo_write"
-            | "enter_plan_mode"
-            | "exit_plan_mode"
-    )
+    crate::tools::tool_is_read_only(tool_name)
 }
 
 #[cfg(test)]
@@ -322,19 +317,27 @@ mod tests {
 
     #[test]
     fn test_is_tool_allowed_in_plan_mode() {
-        // Allowed tools
+        // Allowed tools (read-only)
         assert!(is_tool_allowed_in_plan_mode("read"));
         assert!(is_tool_allowed_in_plan_mode("glob"));
         assert!(is_tool_allowed_in_plan_mode("grep"));
         assert!(is_tool_allowed_in_plan_mode("web_fetch"));
         assert!(is_tool_allowed_in_plan_mode("web_search"));
         assert!(is_tool_allowed_in_plan_mode("ask_user"));
+        assert!(is_tool_allowed_in_plan_mode("todo_write"));
+        assert!(is_tool_allowed_in_plan_mode("task_output"));
+        assert!(is_tool_allowed_in_plan_mode("event_bus_list_sessions"));
+        assert!(is_tool_allowed_in_plan_mode("event_bus_list_channels"));
+        assert!(is_tool_allowed_in_plan_mode("event_bus_get_events"));
 
-        // Blocked tools
+        // Blocked tools (write/side effects)
         assert!(!is_tool_allowed_in_plan_mode("edit"));
         assert!(!is_tool_allowed_in_plan_mode("write"));
         assert!(!is_tool_allowed_in_plan_mode("bash"));
         assert!(!is_tool_allowed_in_plan_mode("kill_shell"));
         assert!(!is_tool_allowed_in_plan_mode("task"));
+        assert!(!is_tool_allowed_in_plan_mode("event_bus_register"));
+        assert!(!is_tool_allowed_in_plan_mode("event_bus_publish"));
+        assert!(!is_tool_allowed_in_plan_mode("event_bus_unregister"));
     }
 }

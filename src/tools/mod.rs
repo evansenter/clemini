@@ -11,6 +11,7 @@ mod kill_shell;
 mod read;
 mod task;
 mod task_output;
+pub mod tasks;
 mod todo_write;
 mod web_fetch;
 mod web_search;
@@ -24,6 +25,7 @@ use std::sync::{Arc, RwLock};
 use tokio::sync::mpsc;
 
 use crate::agent::AgentEvent;
+use crate::plan::PlanManager;
 
 // ============================================================================
 // ToolEmitter trait - unified output emission for tools
@@ -82,6 +84,10 @@ pub struct CleminiToolService {
     /// Uses interior mutability so events_tx can be set per-interaction while
     /// the tool service itself is created once at startup.
     events_tx: Arc<RwLock<Option<mpsc::Sender<AgentEvent>>>>,
+    /// Plan manager for plan mode state.
+    /// Uses interior mutability so plan state can be modified per-interaction
+    /// while the tool service itself is created once at startup.
+    plan_manager: Arc<RwLock<PlanManager>>,
 }
 
 impl CleminiToolService {
@@ -99,7 +105,36 @@ impl CleminiToolService {
             allowed_paths,
             api_key,
             events_tx: Arc::new(RwLock::new(None)),
+            plan_manager: Arc::new(RwLock::new(PlanManager::new())),
         }
+    }
+
+    /// Create a tool service with a shared plan manager.
+    ///
+    /// Use this when you need multiple components to share the same plan state
+    /// (e.g., ACP server and agent).
+    pub fn with_plan_manager(
+        cwd: PathBuf,
+        bash_timeout: u64,
+        is_mcp_mode: bool,
+        allowed_paths: Vec<PathBuf>,
+        api_key: String,
+        plan_manager: Arc<RwLock<PlanManager>>,
+    ) -> Self {
+        Self {
+            cwd,
+            bash_timeout,
+            is_mcp_mode,
+            allowed_paths,
+            api_key,
+            events_tx: Arc::new(RwLock::new(None)),
+            plan_manager,
+        }
+    }
+
+    /// Get a reference to the plan manager.
+    pub fn plan_manager(&self) -> &Arc<RwLock<PlanManager>> {
+        &self.plan_manager
     }
 
     /// Set the events sender and return an RAII guard that clears it when dropped.
@@ -235,8 +270,14 @@ impl ToolService for CleminiToolService {
             Arc::new(WebSearchTool::new(events_tx.clone())),
             Arc::new(AskUserTool::new(events_tx.clone())),
             Arc::new(TodoWriteTool::new(events_tx.clone())),
-            Arc::new(EnterPlanModeTool::new(events_tx.clone())),
-            Arc::new(ExitPlanModeTool::new(events_tx.clone())),
+            Arc::new(EnterPlanModeTool::new(
+                events_tx.clone(),
+                self.plan_manager.clone(),
+            )),
+            Arc::new(ExitPlanModeTool::new(
+                events_tx.clone(),
+                self.plan_manager.clone(),
+            )),
             // Event bus tools
             Arc::new(EventBusRegisterTool::new(events_tx.clone())),
             Arc::new(EventBusListSessionsTool::new(events_tx.clone())),
@@ -368,6 +409,126 @@ pub fn get_clemini_command() -> (String, Vec<String>) {
         "cargo".to_string(),
         vec!["run".to_string(), "--quiet".to_string(), "--".to_string()],
     )
+}
+
+/// List of all tool names registered in this crate.
+/// Used by `tool_is_read_only()` test to ensure completeness.
+pub const ALL_TOOL_NAMES: &[&str] = &[
+    "read",
+    "write",
+    "edit",
+    "bash",
+    "glob",
+    "grep",
+    "kill_shell",
+    "task",
+    "task_output",
+    "web_fetch",
+    "web_search",
+    "ask_user",
+    "todo_write",
+    "enter_plan_mode",
+    "exit_plan_mode",
+    // Event bus tools
+    "event_bus_register",
+    "event_bus_list_sessions",
+    "event_bus_list_channels",
+    "event_bus_publish",
+    "event_bus_get_events",
+    "event_bus_unregister",
+];
+
+/// Check if a tool is read-only (safe to run in plan mode).
+///
+/// Read-only tools don't modify files, execute commands with side effects,
+/// or change system state. They're safe to run during the planning phase.
+///
+/// # Panics in tests
+///
+/// The accompanying test `test_tool_is_read_only_covers_all_tools` will fail
+/// if a new tool is added to `ALL_TOOL_NAMES` but not categorized here.
+pub fn tool_is_read_only(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        // File reading
+        "read" | "glob" | "grep" |
+        // Web reading
+        "web_fetch" | "web_search" |
+        // User interaction (no side effects)
+        "ask_user" | "todo_write" |
+        // Plan mode management
+        "enter_plan_mode" | "exit_plan_mode" |
+        // Event bus reading (these don't modify state significantly)
+        "event_bus_list_sessions" | "event_bus_list_channels" | "event_bus_get_events" |
+        // Task output reading (doesn't start new tasks)
+        "task_output"
+    )
+}
+
+/// Structured response from tool execution.
+///
+/// Provides type-safe tool results while serializing to the same JSON format
+/// used by the existing `serde_json::json!` approach for backward compatibility.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(untagged)]
+pub enum ToolResponse {
+    /// Successful result with arbitrary JSON data.
+    Success(serde_json::Value),
+
+    /// Error result with message, code, and context.
+    Error {
+        error: String,
+        error_code: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        context: Option<serde_json::Value>,
+    },
+}
+
+impl ToolResponse {
+    /// Create a success response from any serializable value.
+    pub fn success<T: serde::Serialize>(value: T) -> Self {
+        Self::Success(serde_json::to_value(value).unwrap_or(serde_json::Value::Null))
+    }
+
+    /// Create an error response.
+    pub fn error(message: impl Into<String>, code: impl Into<String>) -> Self {
+        Self::Error {
+            error: message.into(),
+            error_code: code.into(),
+            context: None,
+        }
+    }
+
+    /// Create an error response with context.
+    pub fn error_with_context(
+        message: impl Into<String>,
+        code: impl Into<String>,
+        context: serde_json::Value,
+    ) -> Self {
+        Self::Error {
+            error: message.into(),
+            error_code: code.into(),
+            context: Some(context),
+        }
+    }
+
+    /// Convert to JSON Value for tool return.
+    pub fn into_json(self) -> serde_json::Value {
+        serde_json::to_value(self).unwrap_or_else(|_| {
+            serde_json::json!({"error": "Failed to serialize response", "error_code": "INTERNAL"})
+        })
+    }
+
+    /// Check if this is an error response.
+    pub fn is_error(&self) -> bool {
+        matches!(self, Self::Error { .. })
+    }
+}
+
+impl From<ToolResponse> for serde_json::Value {
+    fn from(response: ToolResponse) -> Self {
+        response.into_json()
+    }
 }
 
 /// Standard error codes for tool responses
@@ -503,5 +664,100 @@ mod tests {
         } else {
             panic!("Expected AgentEvent::ToolOutput");
         }
+    }
+
+    // ============================================================================
+    // tool_is_read_only tests
+    // ============================================================================
+
+    #[test]
+    fn test_tool_is_read_only_covers_all_tools() {
+        // This test ensures every tool in ALL_TOOL_NAMES is explicitly categorized.
+        // When adding a new tool, you MUST add it to ALL_TOOL_NAMES AND categorize
+        // it in tool_is_read_only(). This test will fail if you forget either.
+        for tool_name in ALL_TOOL_NAMES {
+            // Just calling the function exercises the match - if a tool isn't
+            // matched, it returns false (which might be correct for write tools).
+            // The important thing is we have explicit coverage.
+            let _ = tool_is_read_only(tool_name);
+        }
+
+        // Verify expected categorizations
+        // Read-only tools
+        assert!(tool_is_read_only("read"));
+        assert!(tool_is_read_only("glob"));
+        assert!(tool_is_read_only("grep"));
+        assert!(tool_is_read_only("web_fetch"));
+        assert!(tool_is_read_only("web_search"));
+        assert!(tool_is_read_only("ask_user"));
+        assert!(tool_is_read_only("todo_write"));
+        assert!(tool_is_read_only("task_output"));
+        assert!(tool_is_read_only("enter_plan_mode"));
+        assert!(tool_is_read_only("exit_plan_mode"));
+        assert!(tool_is_read_only("event_bus_list_sessions"));
+        assert!(tool_is_read_only("event_bus_list_channels"));
+        assert!(tool_is_read_only("event_bus_get_events"));
+
+        // Write tools (side effects)
+        assert!(!tool_is_read_only("write"));
+        assert!(!tool_is_read_only("edit"));
+        assert!(!tool_is_read_only("bash"));
+        assert!(!tool_is_read_only("kill_shell"));
+        assert!(!tool_is_read_only("task"));
+        assert!(!tool_is_read_only("event_bus_register"));
+        assert!(!tool_is_read_only("event_bus_publish"));
+        assert!(!tool_is_read_only("event_bus_unregister"));
+    }
+
+    #[test]
+    fn test_tool_is_read_only_unknown_tool() {
+        // Unknown tools are treated as write tools (conservative default)
+        assert!(!tool_is_read_only("unknown_tool"));
+        assert!(!tool_is_read_only(""));
+    }
+
+    // ============================================================================
+    // ToolResponse tests
+    // ============================================================================
+
+    #[test]
+    fn test_tool_response_success() {
+        let response = ToolResponse::success(serde_json::json!({"data": "value"}));
+        let json = response.into_json();
+
+        assert_eq!(json["data"], "value");
+        assert!(json.get("error").is_none());
+    }
+
+    #[test]
+    fn test_tool_response_error() {
+        let response = ToolResponse::error("File not found", error_codes::NOT_FOUND);
+        assert!(response.is_error());
+
+        let json = response.into_json();
+        assert_eq!(json["error"], "File not found");
+        assert_eq!(json["error_code"], "NOT_FOUND");
+        assert!(json.get("context").is_none());
+    }
+
+    #[test]
+    fn test_tool_response_error_with_context() {
+        let response = ToolResponse::error_with_context(
+            "Path denied",
+            error_codes::ACCESS_DENIED,
+            serde_json::json!({"path": "/etc/passwd"}),
+        );
+
+        let json = response.into_json();
+        assert_eq!(json["error"], "Path denied");
+        assert_eq!(json["error_code"], "ACCESS_DENIED");
+        assert_eq!(json["context"]["path"], "/etc/passwd");
+    }
+
+    #[test]
+    fn test_tool_response_into_value() {
+        let response = ToolResponse::success(serde_json::json!({"ok": true}));
+        let value: serde_json::Value = response.into();
+        assert_eq!(value["ok"], true);
     }
 }

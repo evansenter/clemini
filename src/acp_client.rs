@@ -18,43 +18,37 @@ use anyhow::Result;
 use async_trait::async_trait;
 use std::path::Path;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use crate::tools::get_clemini_command;
 
-/// Global counter for generating unique ACP task IDs.
-pub static NEXT_ACP_TASK_ID: AtomicUsize = AtomicUsize::new(1);
-
-/// Registry of active ACP subagent tasks.
-pub static ACP_TASKS: LazyLock<Mutex<std::collections::HashMap<String, AcpTask>>> =
-    LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+use crate::tools::tasks::{TASKS, Task, register_acp_task};
 
 /// Represents an active ACP subagent task.
 pub struct AcpTask {
     /// Whether the task has completed.
-    pub completed: Arc<AtomicBool>,
+    completed: Arc<AtomicBool>,
 
     /// Accumulated output from the subagent.
-    pub output_buffer: Arc<Mutex<String>>,
+    output_buffer: Arc<Mutex<String>>,
 
     /// Error message if the task failed.
-    pub error: Arc<Mutex<Option<String>>>,
+    error: Arc<Mutex<Option<String>>>,
 
     /// The child process handle.
-    pub child: Option<Child>,
+    child: Option<Child>,
 
     /// Channel to signal cancellation.
-    /// TODO: Cancellation not yet implemented - will be wired up in future PR.
-    #[allow(dead_code)]
-    pub cancel_tx: Option<mpsc::Sender<()>>,
+    cancel_tx: Option<mpsc::Sender<()>>,
 }
 
 impl AcpTask {
-    fn new(child: Child, cancel_tx: mpsc::Sender<()>) -> Self {
+    /// Create a new ACP task from a spawned child process.
+    pub fn new(child: Child, cancel_tx: mpsc::Sender<()>) -> Self {
         Self {
             completed: Arc::new(AtomicBool::new(false)),
             output_buffer: Arc::new(Mutex::new(String::new())),
@@ -62,6 +56,81 @@ impl AcpTask {
             child: Some(child),
             cancel_tx: Some(cancel_tx),
         }
+    }
+
+    /// Check if the task has completed.
+    pub fn is_completed(&self) -> bool {
+        self.completed.load(Ordering::SeqCst)
+    }
+
+    /// Mark the task as completed.
+    pub fn mark_completed(&self) {
+        self.completed.store(true, Ordering::SeqCst);
+    }
+
+    /// Get the accumulated output.
+    pub fn output(&self) -> String {
+        match self.output_buffer.lock() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => {
+                tracing::warn!("output_buffer lock was poisoned, recovering");
+                poisoned.into_inner().clone()
+            }
+        }
+    }
+
+    /// Get the error message if any.
+    pub fn error(&self) -> Option<String> {
+        match self.error.lock() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => {
+                tracing::warn!("error lock was poisoned, recovering");
+                poisoned.into_inner().clone()
+            }
+        }
+    }
+
+    /// Set the error message.
+    pub fn set_error(&self, error: String) {
+        match self.error.lock() {
+            Ok(mut guard) => *guard = Some(error),
+            Err(poisoned) => {
+                tracing::warn!("error lock was poisoned, recovering");
+                *poisoned.into_inner() = Some(error);
+            }
+        }
+    }
+
+    /// Take the child process (for killing).
+    pub fn take_child(&mut self) -> Option<Child> {
+        self.child.take()
+    }
+
+    /// Check if the child process is still available.
+    pub fn has_child(&self) -> bool {
+        self.child.is_some()
+    }
+
+    /// Get the cancellation sender.
+    pub fn cancel_tx(&self) -> Option<&mpsc::Sender<()>> {
+        self.cancel_tx.as_ref()
+    }
+
+    /// Get clones of the internal buffers for spawning background work.
+    /// Returns (completed_flag, output_buffer, error_buffer).
+    #[allow(clippy::type_complexity)]
+    pub fn internal_buffers(
+        &self,
+    ) -> (
+        Arc<AtomicBool>,
+        Arc<Mutex<String>>,
+        Arc<Mutex<Option<String>>>,
+    ) {
+        (
+            self.completed.clone(),
+            self.output_buffer.clone(),
+            self.error.clone(),
+        )
     }
 }
 
@@ -183,8 +252,6 @@ impl acp::Client for SubagentClient {
 ///
 /// Returns the task output for foreground mode, or task_id for background mode.
 pub async fn spawn_subagent(prompt: &str, cwd: &Path, background: bool) -> Result<SubagentResult> {
-    let task_id = NEXT_ACP_TASK_ID.fetch_add(1, Ordering::SeqCst).to_string();
-
     // Get clemini executable path
     let (cmd, mut cmd_args) = get_clemini_command();
     cmd_args.extend([
@@ -215,9 +282,14 @@ pub async fn spawn_subagent(prompt: &str, cwd: &Path, background: bool) -> Resul
         .take()
         .ok_or_else(|| anyhow::anyhow!("No stderr"))?;
 
-    let output_buffer = Arc::new(Mutex::new(String::new()));
-    let error_buffer = Arc::new(Mutex::new(None::<String>));
-    let completed = Arc::new(AtomicBool::new(false));
+    // Create cancel channel - tx stored in task for kill_shell, rx used by background runner
+    let (cancel_tx, cancel_rx) = mpsc::channel::<()>(1);
+
+    // Create the ACP task (owns the internal buffers)
+    let task = AcpTask::new(child, cancel_tx);
+
+    // Get clones of the internal buffers for the client and background work
+    let (completed, output_buffer, error_buffer) = task.internal_buffers();
 
     // Spawn task to capture stderr
     let error_buffer_clone = error_buffer.clone();
@@ -226,7 +298,10 @@ pub async fn spawn_subagent(prompt: &str, cwd: &Path, background: bool) -> Resul
         let mut stderr = stderr;
         let mut buf = String::new();
         if stderr.read_to_string(&mut buf).await.is_ok() && !buf.is_empty() {
-            *error_buffer_clone.lock().unwrap() = Some(buf);
+            match error_buffer_clone.lock() {
+                Ok(mut guard) => *guard = Some(buf),
+                Err(poisoned) => *poisoned.into_inner() = Some(buf),
+            }
         }
     });
 
@@ -235,42 +310,49 @@ pub async fn spawn_subagent(prompt: &str, cwd: &Path, background: bool) -> Resul
         completed: completed.clone(),
     };
 
-    // TODO: Wire up cancellation when cancel support is implemented in run_acp_session
-    let (cancel_tx, _cancel_rx) = mpsc::channel::<()>(1);
-
     if background {
-        // Background mode: register task and return immediately
-        let mut task = AcpTask::new(child, cancel_tx);
-        task.error = error_buffer.clone();
-        let task_completed = task.completed.clone();
-        let task_error = task.error.clone();
+        // Background mode: register task in unified registry and return immediately
+        let task_id = register_acp_task(task);
 
-        ACP_TASKS.lock().unwrap().insert(task_id.clone(), task);
+        // Get references to track completion
+        let task_completed = completed;
+        let task_error = error_buffer;
 
         // Spawn the ACP communication in the background
         let prompt = prompt.to_string();
         let task_id_clone = task_id.clone();
         let cwd_owned = cwd.to_path_buf();
+        let mut cancel_rx = cancel_rx;
         tokio::task::spawn_local(async move {
-            let result = run_acp_session(
-                client,
-                stdin.compat_write(),
-                stdout.compat(),
-                &prompt,
-                &cwd_owned,
-            )
-            .await;
+            // Race between ACP session completion and cancellation signal
+            let result = tokio::select! {
+                result = run_acp_session(
+                    client,
+                    stdin.compat_write(),
+                    stdout.compat(),
+                    &prompt,
+                    &cwd_owned,
+                ) => result,
+                _ = cancel_rx.recv() => {
+                    Err(anyhow::anyhow!("Task cancelled"))
+                }
+            };
 
             task_completed.store(true, Ordering::SeqCst);
 
             if let Err(e) = result {
                 // Store error in dedicated field
-                *task_error.lock().unwrap() = Some(e.to_string());
+                match task_error.lock() {
+                    Ok(mut guard) => *guard = Some(e.to_string()),
+                    Err(poisoned) => *poisoned.into_inner() = Some(e.to_string()),
+                }
             }
 
             // Clean up child from registry
-            if let Some(task) = ACP_TASKS.lock().unwrap().get_mut(&task_id_clone) {
-                task.child = None;
+            if let Ok(mut tasks) = TASKS.lock()
+                && let Some(Task::Acp(task)) = tasks.get_mut(&task_id_clone)
+            {
+                task.take_child();
             }
         });
 
@@ -282,8 +364,14 @@ pub async fn spawn_subagent(prompt: &str, cwd: &Path, background: bool) -> Resul
 
         completed.store(true, Ordering::SeqCst);
 
-        let output = output_buffer.lock().unwrap().clone();
-        let stderr_output = error_buffer.lock().unwrap().clone();
+        let output = match output_buffer.lock() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        };
+        let stderr_output = match error_buffer.lock() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        };
 
         match result {
             Ok(_) => Ok(SubagentResult::Completed { output }),
@@ -315,7 +403,9 @@ pub enum SubagentResult {
 
 /// Run the ACP session with the subagent.
 ///
-/// TODO: Add cancellation support by selecting on a cancel channel.
+/// Cancellation is handled at the caller level via tokio::select! racing this
+/// function against a cancel channel. When cancelled, the caller kills the
+/// child process.
 async fn run_acp_session<W, R>(
     client: SubagentClient,
     outgoing: W,
@@ -369,13 +459,6 @@ where
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_acp_task_id_increments() {
-        let id1 = NEXT_ACP_TASK_ID.fetch_add(1, Ordering::SeqCst);
-        let id2 = NEXT_ACP_TASK_ID.fetch_add(1, Ordering::SeqCst);
-        assert_eq!(id2, id1 + 1);
-    }
-
     #[cfg(unix)]
     #[tokio::test]
     async fn test_acp_task_initial_state() {
@@ -388,10 +471,10 @@ mod tests {
 
         let task = AcpTask::new(child, tx);
 
-        assert!(!task.completed.load(Ordering::SeqCst));
-        assert!(task.output_buffer.lock().unwrap().is_empty());
-        assert!(task.error.lock().unwrap().is_none());
-        assert!(task.child.is_some());
+        assert!(!task.is_completed());
+        assert!(task.output().is_empty());
+        assert!(task.error().is_none());
+        assert!(task.has_child());
     }
 
     #[test]
@@ -403,5 +486,22 @@ mod tests {
             assert!(args.contains(&"run".to_string()));
             assert!(args.contains(&"--".to_string()));
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_acp_task_set_error() {
+        let (tx, _rx) = mpsc::channel(1);
+        let child = Command::new("echo")
+            .arg("test")
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+
+        let task = AcpTask::new(child, tx);
+
+        assert!(task.error().is_none());
+        task.set_error("test error".to_string());
+        assert_eq!(task.error(), Some("test error".to_string()));
     }
 }

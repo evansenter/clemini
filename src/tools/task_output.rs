@@ -1,5 +1,5 @@
 use crate::agent::AgentEvent;
-use crate::tools::background::BACKGROUND_TASKS;
+use crate::tools::tasks::TASKS;
 use crate::tools::{ToolEmitter, error_codes, error_response};
 use async_trait::async_trait;
 use genai_rs::{CallableFunction, FunctionDeclaration, FunctionError, FunctionParameters};
@@ -62,9 +62,9 @@ impl CallableFunction for TaskOutputTool {
 
         let timeout_secs = args.get("timeout").and_then(|v| v.as_u64()).unwrap_or(30);
 
-        // First check
+        // First check - update status and verify task exists
         {
-            let mut tasks = BACKGROUND_TASKS.lock().unwrap();
+            let mut tasks = TASKS.lock().unwrap();
             if let Some(task) = tasks.get_mut(task_id) {
                 task.update_status();
             } else {
@@ -82,7 +82,7 @@ impl CallableFunction for TaskOutputTool {
 
             loop {
                 let completed = {
-                    let mut tasks = BACKGROUND_TASKS.lock().unwrap();
+                    let mut tasks = TASKS.lock().unwrap();
                     if let Some(task) = tasks.get_mut(task_id) {
                         task.update_status();
                         task.is_completed()
@@ -109,24 +109,29 @@ impl CallableFunction for TaskOutputTool {
         }
 
         // Fetch final result
-        let tasks = BACKGROUND_TASKS.lock().unwrap();
+        let tasks = TASKS.lock().unwrap();
         if let Some(task) = tasks.get(task_id) {
             let completed = task.is_completed();
             let status = if completed { "completed" } else { "running" };
 
-            let exit_code = task.exit_code();
-            let stdout = task.stdout();
-            let stderr = task.stderr();
+            let output = task.output();
+            let error = task.error();
 
             let mut resp = json!({
                 "task_id": task_id,
+                "task_type": task.task_type(),
                 "status": status,
-                "stdout": stdout,
-                "stderr": stderr,
+                "stdout": output,
             });
 
-            if completed {
-                resp["exit_code"] = json!(exit_code);
+            // Add stderr/error if present
+            if let Some(err) = error {
+                resp["stderr"] = json!(err);
+            }
+
+            // Add exit_code for completed background tasks
+            if completed && let Some(code) = task.exit_code() {
+                resp["exit_code"] = json!(code);
             }
 
             Ok(resp)
@@ -144,6 +149,7 @@ impl CallableFunction for TaskOutputTool {
 mod tests {
     use super::*;
     use crate::tools::bash::BashTool;
+    use crate::tools::tasks::Task;
     use tempfile::tempdir;
 
     #[tokio::test]
@@ -222,8 +228,14 @@ mod tests {
 
         // Clean up - extract child before dropping lock to avoid holding across await
         let child = {
-            let mut tasks = BACKGROUND_TASKS.lock().unwrap();
-            tasks.remove(task_id).and_then(|mut task| task.take_child())
+            let mut tasks = TASKS.lock().unwrap();
+            tasks.remove(task_id).and_then(|mut task| {
+                if let Task::Background(ref mut bg) = task {
+                    bg.take_child()
+                } else {
+                    None
+                }
+            })
         };
         if let Some(mut child) = child {
             let _ = child.kill().await;
@@ -282,8 +294,14 @@ mod tests {
 
         // Clean up
         let child = {
-            let mut tasks = BACKGROUND_TASKS.lock().unwrap();
-            tasks.remove(task_id).and_then(|mut task| task.take_child())
+            let mut tasks = TASKS.lock().unwrap();
+            tasks.remove(task_id).and_then(|mut task| {
+                if let Task::Background(ref mut bg) = task {
+                    bg.take_child()
+                } else {
+                    None
+                }
+            })
         };
         if let Some(mut child) = child {
             let _ = child.kill().await;
