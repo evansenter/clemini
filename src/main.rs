@@ -619,9 +619,20 @@ fn process_input(input: &str, model: &str, cwd: &std::path::Path) -> InputAction
 /// Spawn a dedicated thread for reedline input.
 ///
 /// Reedline is synchronous and blocks on input. We run it in a separate thread
-/// and communicate with the async REPL loop via a channel.
-fn spawn_reedline_thread(cwd: PathBuf, model: String) -> mpsc::UnboundedReceiver<InputEvent> {
+/// and communicate with the async REPL loop via channels.
+///
+/// Returns (input_receiver, ready_sender). The main loop must call `ready_tx.send(())`
+/// after processing each input to signal that reedline can show the next prompt.
+/// This prevents reedline from putting the terminal in raw mode while output is printing.
+fn spawn_reedline_thread(
+    cwd: PathBuf,
+    model: String,
+) -> (
+    mpsc::UnboundedReceiver<InputEvent>,
+    std::sync::mpsc::Sender<()>,
+) {
     let (tx, rx) = mpsc::unbounded_channel();
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel::<()>();
 
     std::thread::spawn(move || {
         // Set up history file
@@ -676,6 +687,12 @@ fn spawn_reedline_thread(cwd: PathBuf, model: String) -> mpsc::UnboundedReceiver
                             tracing::debug!("Input channel closed, terminating input thread");
                             break;
                         }
+                        // Wait for main loop to signal it's done processing before showing next prompt.
+                        // This prevents reedline from putting terminal in raw mode while output prints.
+                        if ready_rx.recv().is_err() {
+                            tracing::debug!("Ready channel closed, terminating input thread");
+                            break;
+                        }
                     }
                 },
                 Ok(Signal::CtrlC) => {
@@ -683,6 +700,8 @@ fn spawn_reedline_thread(cwd: PathBuf, model: String) -> mpsc::UnboundedReceiver
                     if tx.send(InputEvent::Cancel).is_err() {
                         tracing::debug!("Input channel closed while sending cancel event");
                     }
+                    // Still wait for ready signal
+                    let _ = ready_rx.recv();
                 }
                 Ok(Signal::CtrlD) => {
                     // Normal EOF - user requested exit
@@ -699,7 +718,7 @@ fn spawn_reedline_thread(cwd: PathBuf, model: String) -> mpsc::UnboundedReceiver
         }
     });
 
-    rx
+    (rx, ready_tx)
 }
 
 /// Plain text REPL
@@ -715,7 +734,7 @@ async fn run_plain_repl(
     let mut last_interaction_id: Option<String> = initial_interaction_id;
 
     // Spawn reedline input thread
-    let mut input_rx = spawn_reedline_thread(cwd.clone(), model.to_string());
+    let (mut input_rx, ready_tx) = spawn_reedline_thread(cwd.clone(), model.to_string());
 
     loop {
         // Receive input from reedline thread
@@ -726,8 +745,8 @@ async fn run_plain_repl(
 
         let input = match event {
             InputEvent::Cancel => {
-                // Ctrl-C during input - just continue to next prompt
-                // (reedline already cleared the line)
+                // Ctrl-C during input - signal ready for next prompt
+                let _ = ready_tx.send(());
                 continue;
             }
             InputEvent::Line(line) => line,
@@ -737,11 +756,13 @@ async fn run_plain_repl(
         if input == "/clear" || input == "/c" {
             last_interaction_id = None;
             eprint!("{}", clemini::format::format_builtin_cleared());
+            let _ = ready_tx.send(());
             continue;
         }
 
         if input == "/help" || input == "/h" {
             print_help();
+            let _ = ready_tx.send(());
             continue;
         }
 
@@ -796,6 +817,9 @@ async fn run_plain_repl(
 
         // Wait for event handler to finish
         let _ = event_handler.await;
+
+        // Signal reedline thread that we're done - safe to show next prompt
+        let _ = ready_tx.send(());
     }
 
     Ok(())
