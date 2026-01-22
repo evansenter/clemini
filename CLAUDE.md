@@ -33,7 +33,19 @@ Logs are stored in `~/.clemini/logs/` with daily rotation.
 
 The CLI has three modes: single-prompt (`-p "prompt"`), interactive REPL, and MCP server (`--mcp-server`).
 
-### Module Structure
+### Workspace Structure
+
+This project is a Cargo workspace with two crates:
+
+```
+.
+├── Cargo.toml       # Workspace root
+├── src/             # clemini crate (AI agent)
+└── crates/
+    └── clemitui/    # TUI library crate (reusable by any ACP agent)
+```
+
+#### clemini (AI Agent)
 
 ```
 src/
@@ -45,13 +57,33 @@ src/
 ├── diff.rs          # Diff formatting for edit tool output
 ├── event_bus.rs     # Cross-session event bus (SQLite-backed)
 ├── events.rs        # EventHandler trait, TerminalEventHandler
-├── format.rs        # Pure formatting functions, TextBuffer, markdown rendering
-├── logging.rs       # OutputSink trait, log_event functions
+├── format.rs        # Re-exports clemitui + genai-rs-specific formatters
+├── logging.rs       # Re-exports clemitui::logging
 ├── mcp.rs           # MCP server implementation
 ├── plan.rs          # Plan mode manager
 ├── system_prompt.md # System prompt for Gemini (included at compile time)
-└── tools/           # Tool implementations (bash, read_file, etc.)
+└── tools/           # Tool implementations
+    ├── mod.rs       # CleminiToolService, ToolEmitter trait, EventsGuard
+    ├── tasks.rs     # Unified task registry (Task enum, namespaced IDs)
+    ├── bash/        # BashTool (mod.rs) + safety patterns (safety.rs)
+    └── ...          # Individual tool modules (edit, read, grep, etc.)
 ```
+
+#### clemitui (TUI Library)
+
+Standalone crate for terminal UI, usable by any ACP-compatible agent:
+
+```
+crates/clemitui/
+├── Cargo.toml
+└── src/
+    ├── lib.rs       # Re-exports
+    ├── format.rs    # Primitive formatting functions (tool output, warnings)
+    ├── logging.rs   # OutputSink trait, log_event functions
+    └── text_buffer.rs # TextBuffer for streaming markdown
+```
+
+**Design**: clemitui takes primitive types (strings, durations, token counts), not genai-rs types. This allows it to work with any ACP agent. clemini's format.rs re-exports these and adds genai-rs-specific wrappers.
 
 ### Event-Driven Architecture
 
@@ -162,6 +194,8 @@ If you're unsure whether coverage is sufficient, add more tests. Undertesting ca
 - `confirmation_tests.rs` - Confirmation flow for destructive commands
 - `tool_output_tests.rs` - Tool output events and model interpretation
 - `semantic_integration_tests.rs` - Multi-turn state, error recovery, code analysis
+- `acp_integration_tests.rs` - ACP subagent spawning and communication
+- `background_tasks_tests.rs` - Background task execution and output retrieval
 - `event_ordering_tests.rs` - Tool output event ordering (no API key required)
 
 Run locally with: `cargo test --test <name> -- --include-ignored --nocapture`

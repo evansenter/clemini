@@ -1,143 +1,36 @@
 //! Pure formatting functions for UI output.
 //!
-//! All colored/styled output uses `format_*` helper functions defined here.
-//! This keeps formatting testable, centralized, and out of business logic.
+//! This module re-exports primitive formatting functions from `clemitui` and
+//! provides genai-rs-specific wrappers for use within clemini.
 //!
 //! # Categories
 //!
-//! ## Tool Output Formatters
+//! ## Primitive Formatters (from clemitui)
 //! - `format_tool_executing()` - Tool start line (`┌─ name args`)
 //! - `format_tool_result()` - Tool completion line (`└─ name duration ~tokens tok`)
 //! - `format_tool_args()` - Format tool arguments as key=value pairs
 //! - `format_error_detail()` - Error detail line (indented)
-//! - `format_result_block()` - Complete result block (result + optional error)
+//! - `format_context_warning()` - Context window warnings
+//! - `format_retry()` - API retry messages
 //!
-//! ## Type-Aligned Formatters
+//! ## Type-Aligned Formatters (clemini-specific)
 //! These take genai-rs types directly for cleaner consumer API:
 //! - `format_call()` - OwnedFunctionCallInfo → String
 //! - `format_result()` - FunctionExecutionResult → String
-//!
-//! ## Other Formatters
-//! - `format_context_warning()` - Context window warnings
-//! - `format_retry()` - API retry messages
-//! - `format_interaction_complete()` - Session interaction ID
-
-use std::sync::LazyLock;
-use std::time::Duration;
+//! - `format_result_block()` - Complete result block (result + optional error)
 
 use colored::Colorize;
 use genai_rs::{FunctionExecutionResult, OwnedFunctionCallInfo};
-use serde_json::Value;
-use termimad::MadSkin;
 
-// ============================================================================
-// Constants
-// ============================================================================
+// Re-export primitive formatters from clemitui
+pub use clemitui::format::{
+    estimate_tokens, format_cancelled, format_context_warning, format_ctrl_c, format_error_detail,
+    format_error_message, format_retry, format_tool_args, format_tool_executing,
+    format_tool_result,
+};
 
-/// Maximum argument display length before truncation.
-const MAX_ARG_DISPLAY_LEN: usize = 80;
-
-/// Approximate characters per token for estimation.
-const CHARS_PER_TOKEN: usize = 4;
-
-// ============================================================================
-// Tool Argument Formatting
-// ============================================================================
-
-/// Format function call arguments for display.
-pub fn format_tool_args(tool_name: &str, args: &Value) -> String {
-    let Some(obj) = args.as_object() else {
-        return String::new();
-    };
-
-    let mut parts = Vec::new();
-    for (k, v) in obj {
-        // Skip large strings for the edit tool as they are shown in the diff
-        if tool_name == "edit" && (k == "old_string" || k == "new_string") {
-            continue;
-        }
-        // Skip todos for todo_write as they are rendered below
-        if tool_name == "todo_write" && k == "todos" {
-            continue;
-        }
-        // Skip question/options for ask_user as they are rendered below
-        if tool_name == "ask_user" && (k == "question" || k == "options") {
-            continue;
-        }
-
-        let val_str = match v {
-            Value::String(s) => {
-                let trimmed = s.replace('\n', " ");
-                if trimmed.len() > MAX_ARG_DISPLAY_LEN {
-                    format!("\"{}...\"", &trimmed[..MAX_ARG_DISPLAY_LEN - 3])
-                } else {
-                    format!("\"{trimmed}\"")
-                }
-            }
-            Value::Number(n) => n.to_string(),
-            Value::Bool(b) => b.to_string(),
-            Value::Null => "null".to_string(),
-            _ => "...".to_string(),
-        };
-        parts.push(format!("{k}={val_str}"));
-    }
-
-    if parts.is_empty() {
-        String::new()
-    } else {
-        format!("{} ", parts.join(" "))
-    }
-}
-
-// ============================================================================
-// Tool Execution Formatting
-// ============================================================================
-
-/// Format tool executing line for display.
-/// Includes trailing newline for use with emit_line.
-pub fn format_tool_executing(name: &str, args: &Value) -> String {
-    let args_str = format_tool_args(name, args);
-    format!("┌─ {} {}\n", name.cyan(), args_str)
-}
-
-/// Rough token estimate based on `CHARS_PER_TOKEN`.
-pub fn estimate_tokens(value: &Value) -> u32 {
-    (value.to_string().len() / CHARS_PER_TOKEN) as u32
-}
-
-/// Format tool result for display.
-pub fn format_tool_result(
-    name: &str,
-    duration: Duration,
-    estimated_tokens: u32,
-    has_error: bool,
-) -> String {
-    let error_suffix = if has_error {
-        " ERROR".bright_red().bold().to_string()
-    } else {
-        String::new()
-    };
-    let elapsed_secs = duration.as_secs_f32();
-
-    let duration_str = if elapsed_secs < 0.001 {
-        format!("{:.3}s", elapsed_secs)
-    } else {
-        format!("{:.2}s", elapsed_secs)
-    };
-
-    format!(
-        "└─ {} {} ~{} tok{}",
-        name.cyan(),
-        duration_str.yellow(),
-        estimated_tokens,
-        error_suffix
-    )
-}
-
-/// Format error detail line for display (shown below tool result on error).
-pub fn format_error_detail(error_message: &str) -> String {
-    format!("  └─ error: {}", error_message.dimmed())
-}
+// Re-export TextBuffer from clemitui
+pub use clemitui::TextBuffer;
 
 // ============================================================================
 // Type-Aligned Formatters (take genai-rs types directly)
@@ -163,7 +56,7 @@ pub fn format_result(result: &FunctionExecutionResult) -> String {
 }
 
 /// Pure: Format tool result block (result line + optional error).
-/// Spacing between blocks is handled by write_to_log_file.
+/// Spacing between blocks is handled by the OutputSink's emit method.
 pub fn format_result_block(result: &FunctionExecutionResult) -> String {
     let mut output = format_result(result);
     if let Some(err_msg) = result.error_message() {
@@ -174,31 +67,8 @@ pub fn format_result_block(result: &FunctionExecutionResult) -> String {
 }
 
 // ============================================================================
-// Other Formatters
+// Clemini-Specific Formatters
 // ============================================================================
-
-/// Format context warning message.
-pub fn format_context_warning(percentage: f64) -> String {
-    if percentage > 95.0 {
-        format!(
-            "WARNING: Context window at {:.1}%. Use /clear to reset.",
-            percentage
-        )
-    } else {
-        format!("WARNING: Context window at {:.1}%.", percentage)
-    }
-}
-
-/// Format API retry message.
-pub fn format_retry(attempt: u32, max_attempts: u32, delay: Duration, error: &str) -> String {
-    format!(
-        "[{}: retrying in {}s (attempt {}/{})]",
-        error.bright_yellow(),
-        delay.as_secs(),
-        attempt,
-        max_attempts
-    )
-}
 
 /// Format interaction complete message with ID and model for session continuity.
 pub fn format_interaction_complete(id: &str, model: &str) -> String {
@@ -210,10 +80,6 @@ pub fn format_interaction_complete(id: &str, model: &str) -> String {
         model.cyan()
     )
 }
-
-// ============================================================================
-// Startup and Status Messages
-// ============================================================================
 
 /// Format the CLI startup banner.
 pub fn format_startup_banner(version: &str, model: &str, cwd: &str) -> String {
@@ -232,21 +98,6 @@ pub fn format_startup_tip() -> String {
         "{} Remember to take breaks during development!",
         "💡".yellow()
     )
-}
-
-/// Format ctrl-c received message.
-pub fn format_ctrl_c() -> &'static str {
-    "[ctrl-c received]"
-}
-
-/// Format task cancelled/aborted message.
-pub fn format_cancelled() -> String {
-    format!("{} task cancelled by client", "ABORTED".red())
-}
-
-/// Format an error message (red).
-pub fn format_error_message(msg: &str) -> String {
-    format!("{}", msg.red())
 }
 
 /// Format MCP server startup message.
@@ -287,301 +138,16 @@ pub fn format_builtin_shell(output: &str) -> String {
 }
 
 // ============================================================================
-// Markdown Rendering
-// ============================================================================
-
-/// Termimad skin for markdown rendering. Left-aligns headers.
-pub static SKIN: LazyLock<MadSkin> = LazyLock::new(|| {
-    let mut skin = MadSkin::default();
-    for h in &mut skin.headers {
-        h.align = termimad::Alignment::Left;
-    }
-    skin
-});
-
-/// Render text with markdown formatting but without line wrapping.
-/// Uses a very large width to effectively disable termimad's wrapping.
-pub fn render_markdown_nowrap(text: &str) -> String {
-    use termimad::FmtText;
-    FmtText::from(&SKIN, text, Some(10000)).to_string()
-}
-
-// ============================================================================
-// Text Buffer
-// ============================================================================
-
-/// Buffer for accumulating streaming text until event boundaries.
-///
-/// Text is buffered via `push()` at each TextDelta event, then flushed with
-/// markdown rendering at event boundaries (tool executing, complete).
-/// The `flush()` method normalizes trailing newlines to exactly `\n\n`.
-#[derive(Debug, Default)]
-pub struct TextBuffer(String);
-
-impl TextBuffer {
-    /// Create a new empty text buffer.
-    pub fn new() -> Self {
-        Self(String::new())
-    }
-
-    /// Append text to the buffer.
-    pub fn push(&mut self, text: &str) {
-        self.0.push_str(text);
-    }
-
-    /// Flush buffered text with markdown rendering, normalized to `\n\n`.
-    /// Returns rendered text, or None if buffer was empty or whitespace-only.
-    pub fn flush(&mut self) -> Option<String> {
-        if self.0.is_empty() {
-            return None;
-        }
-
-        let text = std::mem::take(&mut self.0);
-        let rendered = render_markdown_nowrap(&text);
-
-        // Normalize trailing newlines to exactly \n\n
-        let trimmed = rendered.trim_end_matches('\n');
-        if trimmed.is_empty() {
-            None
-        } else {
-            Some(format!("{}\n\n", trimmed))
-        }
-    }
-
-    /// Check if the buffer is empty.
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-}
-
-// ============================================================================
 // Tests
 // ============================================================================
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     // =========================================
-    // Tool args formatting tests
-    // =========================================
-
-    #[test]
-    fn test_format_tool_args_empty() {
-        assert_eq!(format_tool_args("test", &serde_json::json!({})), "");
-        assert_eq!(format_tool_args("test", &serde_json::json!(null)), "");
-        assert_eq!(
-            format_tool_args("test", &serde_json::json!("not an object")),
-            ""
-        );
-    }
-
-    #[test]
-    fn test_format_tool_args_types() {
-        let args = serde_json::json!({
-            "bool": true,
-            "num": 42,
-            "null": null,
-            "str": "hello"
-        });
-        let formatted = format_tool_args("test", &args);
-        // serde_json::Map is sorted by key
-        assert_eq!(formatted, "bool=true null=null num=42 str=\"hello\" ");
-    }
-
-    #[test]
-    fn test_format_tool_args_complex_types() {
-        let args = serde_json::json!({
-            "arr": [1, 2],
-            "obj": {"a": 1}
-        });
-        let formatted = format_tool_args("test", &args);
-        assert_eq!(formatted, "arr=... obj=... ");
-    }
-
-    #[test]
-    fn test_format_tool_args_truncation() {
-        let long_str = "a".repeat(100);
-        let args = serde_json::json!({"long": long_str});
-        let formatted = format_tool_args("test", &args);
-        let expected_val = format!("\"{}...\"", "a".repeat(77));
-        assert_eq!(formatted, format!("long={} ", expected_val));
-    }
-
-    #[test]
-    fn test_format_tool_args_newlines() {
-        let args = serde_json::json!({"text": "hello\nworld"});
-        let formatted = format_tool_args("test", &args);
-        assert_eq!(formatted, "text=\"hello world\" ");
-    }
-
-    #[test]
-    fn test_format_tool_args_edit_filtering() {
-        let args = serde_json::json!({
-            "file_path": "test.rs",
-            "old_string": "old content",
-            "new_string": "new content"
-        });
-        let formatted = format_tool_args("edit", &args);
-        assert_eq!(formatted, "file_path=\"test.rs\" ");
-    }
-
-    #[test]
-    fn test_format_tool_args_todo_write_filtering() {
-        let args = serde_json::json!({
-            "todos": [
-                {"content": "Task 1", "status": "pending"},
-                {"content": "Task 2", "status": "completed"}
-            ]
-        });
-        let formatted = format_tool_args("todo_write", &args);
-        assert_eq!(formatted, "");
-    }
-
-    #[test]
-    fn test_format_tool_args_ask_user_filtering() {
-        let args = serde_json::json!({
-            "question": "What is your favorite color?",
-            "options": ["red", "blue", "green"]
-        });
-        let formatted = format_tool_args("ask_user", &args);
-        assert_eq!(formatted, "");
-    }
-
-    #[test]
-    fn test_format_tool_args_truncation_indicator() {
-        colored::control::set_override(false);
-
-        let long_value = "x".repeat(100);
-        let args = serde_json::json!({"content": long_value});
-        let formatted = format_tool_args("test", &args);
-        assert!(
-            formatted.contains("...\""),
-            "Truncated string should end with ...\", got: {}",
-            formatted
-        );
-        assert!(
-            formatted.len() < 100,
-            "Should be truncated to reasonable length"
-        );
-
-        colored::control::unset_override();
-    }
-
-    // =========================================
-    // Tool executing format tests
-    // =========================================
-
-    #[test]
-    fn test_format_tool_executing_basic() {
-        colored::control::set_override(false);
-        let args = serde_json::json!({"file_path": "test.rs"});
-        let formatted = format_tool_executing("read_file", &args);
-        assert!(formatted.contains("┌─"));
-        assert!(formatted.contains("read_file"));
-        assert!(formatted.contains("file_path=\"test.rs\""));
-        assert!(formatted.ends_with('\n'), "must end with newline");
-        colored::control::unset_override();
-    }
-
-    #[test]
-    fn test_format_tool_executing_empty_args() {
-        colored::control::set_override(false);
-        let formatted = format_tool_executing("list_files", &serde_json::json!({}));
-        assert!(formatted.contains("┌─"));
-        assert!(formatted.contains("list_files"));
-        assert!(formatted.ends_with('\n'), "must end with newline");
-        colored::control::unset_override();
-    }
-
-    #[test]
-    fn test_format_tool_executing_ends_with_newline() {
-        colored::control::set_override(false);
-        let formatted = format_tool_executing("test_tool", &serde_json::json!({"arg": "val"}));
-        assert!(
-            formatted.ends_with('\n'),
-            "format_tool_executing must end with \\n for emit_line, got: {:?}",
-            formatted
-        );
-        assert!(
-            !formatted.ends_with("\n\n"),
-            "Should not have double newline"
-        );
-        colored::control::unset_override();
-    }
-
-    // =========================================
-    // Tool result format tests
-    // =========================================
-
-    #[test]
-    fn test_estimate_tokens() {
-        assert_eq!(estimate_tokens(&serde_json::json!("hello")), 1);
-        assert_eq!(estimate_tokens(&serde_json::json!({"key": "value"})), 3);
-    }
-
-    #[test]
-    fn test_format_tool_result_duration() {
-        colored::control::set_override(false);
-
-        // < 1ms -> 3 decimals
-        assert_eq!(
-            format_tool_result("test", Duration::from_micros(100), 10, false),
-            "└─ test 0.000s ~10 tok"
-        );
-
-        // >= 1ms -> 2 decimals
-        assert_eq!(
-            format_tool_result("test", Duration::from_millis(20), 10, false),
-            "└─ test 0.02s ~10 tok"
-        );
-
-        assert_eq!(
-            format_tool_result("test", Duration::from_millis(1450), 10, false),
-            "└─ test 1.45s ~10 tok"
-        );
-
-        colored::control::unset_override();
-    }
-
-    #[test]
-    fn test_format_tool_result_error() {
-        colored::control::set_override(false);
-
-        let res = format_tool_result("test", Duration::from_millis(10), 25, true);
-        assert_eq!(res, "└─ test 0.01s ~25 tok ERROR");
-
-        let res = format_tool_result("test", Duration::from_millis(10), 25, false);
-        assert_eq!(res, "└─ test 0.01s ~25 tok");
-
-        colored::control::unset_override();
-    }
-
-    #[test]
-    fn test_format_error_detail() {
-        colored::control::set_override(false);
-        let detail = format_error_detail("permission denied");
-        assert_eq!(detail, "  └─ error: permission denied");
-        colored::control::unset_override();
-    }
-
-    #[test]
-    fn test_format_error_detail_structure() {
-        colored::control::set_override(false);
-        let formatted = format_error_detail("test error message");
-
-        assert!(
-            formatted.starts_with("  └─ error:"),
-            "Error detail must start with '  └─ error:', got: {:?}",
-            formatted
-        );
-        assert!(formatted.contains("test error message"));
-
-        colored::control::unset_override();
-    }
-
-    // =========================================
-    // Call and result format tests
+    // Type-aligned formatter tests (genai-rs types)
     // =========================================
 
     #[test]
@@ -619,10 +185,6 @@ mod tests {
 
         colored::control::unset_override();
     }
-
-    // =========================================
-    // Result block format tests
-    // =========================================
 
     #[test]
     fn test_format_result_block_structure() {
@@ -676,68 +238,7 @@ mod tests {
     }
 
     // =========================================
-    // Context warning format tests
-    // =========================================
-
-    #[test]
-    fn test_format_context_warning_normal() {
-        let msg = format_context_warning(85.0);
-        assert!(msg.contains("85.0%"));
-        assert!(!msg.contains("/clear"));
-    }
-
-    #[test]
-    fn test_format_context_warning_critical() {
-        let msg = format_context_warning(96.0);
-        assert!(msg.contains("96.0%"));
-        assert!(msg.contains("/clear"));
-    }
-
-    #[test]
-    fn test_format_context_warning_boundary() {
-        let msg = format_context_warning(95.0);
-        assert!(!msg.contains("/clear"));
-
-        let msg = format_context_warning(95.1);
-        assert!(msg.contains("/clear"));
-    }
-
-    #[test]
-    fn test_format_context_warning_structure() {
-        let warning_80 = format_context_warning(80.5);
-        assert!(warning_80.starts_with("WARNING:"));
-        assert!(warning_80.contains("80.5%"));
-        assert!(!warning_80.contains("/clear"));
-
-        let warning_96 = format_context_warning(96.0);
-        assert!(warning_96.starts_with("WARNING:"));
-        assert!(warning_96.contains("96.0%"));
-        assert!(warning_96.contains("/clear"));
-    }
-
-    // =========================================
-    // Retry format tests
-    // =========================================
-
-    #[test]
-    fn test_format_retry() {
-        colored::control::set_override(false);
-
-        let msg = format_retry(1, 3, Duration::from_secs(2), "rate limit exceeded");
-        assert!(msg.contains("rate limit exceeded"));
-        assert!(msg.contains("2s"));
-        assert!(msg.contains("1/3"));
-
-        let msg = format_retry(2, 5, Duration::from_secs(10), "connection reset");
-        assert!(msg.contains("connection reset"));
-        assert!(msg.contains("10s"));
-        assert!(msg.contains("2/5"));
-
-        colored::control::unset_override();
-    }
-
-    // =========================================
-    // Interaction complete format tests
+    // Clemini-specific formatter tests
     // =========================================
 
     #[test]
@@ -747,18 +248,8 @@ mod tests {
         let msg = format_interaction_complete("v1_abc123", "gemini-2.5-flash");
         assert_eq!(msg, "--interaction v1_abc123 --model gemini-2.5-flash");
 
-        let long_id = "v1_ChdTQjl3YWFIRk9lN3Ruc0VQaU1HRm9RNBIXVVI5d2FhbXlCN3ZkbnNFUDVfT09xQXc";
-        let msg = format_interaction_complete(long_id, "gemini-2.5-pro");
-        assert!(msg.starts_with("--interaction "));
-        assert!(msg.contains(long_id));
-        assert!(msg.contains("--model gemini-2.5-pro"));
-
         colored::control::unset_override();
     }
-
-    // =========================================
-    // Startup and status message tests
-    // =========================================
 
     #[test]
     fn test_format_startup_banner() {
@@ -777,33 +268,6 @@ mod tests {
     fn test_format_startup_tip() {
         let tip = format_startup_tip();
         assert!(tip.contains("Remember to take breaks"));
-    }
-
-    #[test]
-    fn test_format_ctrl_c() {
-        let msg = format_ctrl_c();
-        assert_eq!(msg, "[ctrl-c received]");
-    }
-
-    #[test]
-    fn test_format_cancelled() {
-        colored::control::set_override(false);
-
-        let msg = format_cancelled();
-        assert!(msg.contains("ABORTED"));
-        assert!(msg.contains("cancelled"));
-
-        colored::control::unset_override();
-    }
-
-    #[test]
-    fn test_format_error_message() {
-        colored::control::set_override(false);
-
-        let msg = format_error_message("Something went wrong");
-        assert_eq!(msg, "Something went wrong");
-
-        colored::control::unset_override();
     }
 
     #[test]
@@ -895,89 +359,5 @@ mod tests {
         assert_eq!(output, "\n\n", "empty output still gets newline padding");
 
         colored::control::unset_override();
-    }
-
-    // =========================================
-    // TextBuffer tests
-    // =========================================
-
-    #[test]
-    fn test_text_buffer_accumulates() {
-        let mut buffer = TextBuffer::new();
-
-        // Buffer text chunks
-        buffer.push("Hello ");
-        buffer.push("world!");
-
-        // Flush returns rendered content
-        let out = buffer.flush();
-        assert!(out.is_some());
-        assert!(out.unwrap().contains("Hello world!"));
-
-        // Buffer is now empty
-        assert!(buffer.flush().is_none());
-        assert!(buffer.is_empty());
-    }
-
-    #[test]
-    fn test_text_buffer_flush_empty() {
-        let mut buffer = TextBuffer::new();
-        assert!(buffer.is_empty());
-        let out = buffer.flush();
-        assert!(out.is_none());
-    }
-
-    #[test]
-    fn test_text_buffer_flush_normalizes_to_double_newline() {
-        // flush() should normalize output to end with exactly \n\n
-        // This is critical for consistent spacing before tool calls
-
-        // Case 1: Text with no trailing newline -> normalized to \n\n
-        let mut buffer = TextBuffer::new();
-        buffer.push("Hello world");
-        let out = buffer.flush().unwrap();
-        assert!(
-            out.ends_with("\n\n"),
-            "Should end with \\n\\n, got: {:?}",
-            out
-        );
-        assert!(!out.ends_with("\n\n\n"), "Should not have triple newline");
-
-        // Case 2: Text with single trailing newline -> normalized to \n\n
-        let mut buffer = TextBuffer::new();
-        buffer.push("Hello world\n");
-        let out = buffer.flush().unwrap();
-        assert!(
-            out.ends_with("\n\n"),
-            "Should end with \\n\\n, got: {:?}",
-            out
-        );
-
-        // Case 3: Text with double trailing newline -> stays \n\n
-        let mut buffer = TextBuffer::new();
-        buffer.push("Hello world\n\n");
-        let out = buffer.flush().unwrap();
-        assert!(
-            out.ends_with("\n\n"),
-            "Should end with \\n\\n, got: {:?}",
-            out
-        );
-        assert!(!out.ends_with("\n\n\n"), "Should not have triple newline");
-    }
-
-    #[test]
-    fn test_text_buffer_flush_returns_none_for_whitespace_only() {
-        // If buffer only contains whitespace/newlines, flush should return None
-        let mut buffer = TextBuffer::new();
-        buffer.push("\n\n");
-        let out = buffer.flush();
-        assert!(out.is_none(), "Whitespace-only buffer should return None");
-    }
-
-    #[test]
-    fn test_text_buffer_default() {
-        // TextBuffer implements Default
-        let buffer = TextBuffer::default();
-        assert!(buffer.is_empty());
     }
 }
