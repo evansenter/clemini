@@ -610,6 +610,181 @@ Fetch and optionally process a web page.
 
 ---
 
+### Event Bus (Cross-Session Coordination)
+
+#### event_bus_register
+Register a session with the event bus for cross-session coordination.
+
+**Parameters:**
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| name | string | yes | Session name (e.g., branch name, task description) |
+| machine | string | no | Machine identifier. (default: hostname) |
+| cwd | string | no | Working directory. (default: $PWD) |
+| client_id | string | no | Enables session resumption via (machine, client_id) |
+
+**Returns:** `{session_id, name, machine, cwd, cursor}`
+
+**Examples:**
+
+```json
+// Register a session
+{"name": "feat/add-auth", "cwd": "/home/user/project"}
+// → {"session_id": "abc123-...", "name": "feat/add-auth", "machine": "laptop", "cwd": "/home/user/project", "cursor": "0"}
+
+// Register with client_id for resumption
+{"name": "my-task", "client_id": "terminal-1"}
+// → {"session_id": "xyz789-...", "name": "my-task", "machine": "laptop", "cwd": "/home/user", "cursor": "0"}
+```
+
+---
+
+#### event_bus_list_sessions
+List active sessions on the event bus.
+
+**Parameters:** None
+
+**Returns:** `{sessions[]}`
+
+Each session: `{id, name, machine, cwd, cursor, last_heartbeat, created_at}`
+
+**Examples:**
+
+```json
+// List all active sessions
+{}
+// → {"sessions": [{"id": "abc123", "name": "feat/auth", "machine": "laptop", "cwd": "/project", ...}]}
+```
+
+---
+
+#### event_bus_list_channels
+List channels with subscriber counts.
+
+**Parameters:** None
+
+**Returns:** `{channels[]}`
+
+Each channel: `{name, subscriber_count}`
+
+**Examples:**
+
+```json
+// List all channels
+{}
+// → {"channels": [{"name": "all", "subscriber_count": 3}, {"name": "repo:clemini", "subscriber_count": 2}]}
+```
+
+---
+
+#### event_bus_publish
+Publish an event to a channel.
+
+**Parameters:**
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| event_type | string | yes | Event type (e.g., `task_completed`, `help_needed`) |
+| payload | string | yes | Event message/data |
+| session_id | string | no | Your session ID (auto-refreshes heartbeat) |
+| channel | string | no | Target channel. (default: `all`) |
+
+**Channel types:**
+- `all` - Broadcast to everyone
+- `session:<id>` - Direct message to specific session
+- `repo:<name>` - Sessions working on that repo
+- `machine:<host>` - Sessions on that machine
+
+**Returns:** `{event_id, event_type, payload, channel, created_at}`
+
+**Examples:**
+
+```json
+// Broadcast task completion
+{"event_type": "task_completed", "payload": "PR #42 merged", "session_id": "abc123"}
+// → {"event_id": 1, "event_type": "task_completed", "payload": "PR #42 merged", "channel": "all", ...}
+
+// Direct message to another session
+{"event_type": "help_needed", "payload": "Need review on auth changes", "channel": "session:xyz789"}
+// → {"event_id": 2, ...}
+
+// Repo-specific event
+{"event_type": "ci_failed", "payload": "Tests failing on main", "channel": "repo:clemini"}
+// → {"event_id": 3, ...}
+```
+
+---
+
+#### event_bus_get_events
+Get events from the bus with optional filtering.
+
+**Parameters:**
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| cursor | string | no | Start from this event ID (exclusive) |
+| limit | integer | no | Max events to return. (default: 50) |
+| session_id | string | no | Session ID for cursor tracking |
+| order | string | no | `asc` or `desc`. (default: desc) |
+| channel | string | no | Filter to specific channel |
+| resume | boolean | no | Use session's saved cursor. (default: false) |
+| event_types | array | no | Filter by event types |
+
+**Returns:** `{events[], cursor}`
+
+Each event: `{id, event_type, payload, channel, session_id, created_at}`
+
+**Examples:**
+
+```json
+// Get recent events
+{"limit": 10}
+// → {"events": [{"id": 5, "event_type": "task_completed", "payload": "...", ...}], "cursor": "5"}
+
+// Resume from last position
+{"session_id": "abc123", "resume": true}
+// → {"events": [...], "cursor": "10"}
+
+// Filter by event type
+{"event_types": ["help_needed", "ci_failed"]}
+// → {"events": [...], "cursor": "8"}
+
+// Get events from specific channel
+{"channel": "repo:clemini", "order": "asc"}
+// → {"events": [...], "cursor": "12"}
+```
+
+---
+
+#### event_bus_unregister
+Unregister a session from the event bus.
+
+**Parameters:**
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| session_id | string | no* | Session ID to unregister |
+| client_id | string | no* | Alternative: look up by (machine, client_id) |
+
+*One of `session_id` or `client_id` is required. `session_id` takes precedence.
+
+**Returns:** `{success, session_id}`
+
+**Examples:**
+
+```json
+// Unregister by session ID
+{"session_id": "abc123-..."}
+// → {"success": true, "session_id": "abc123-..."}
+
+// Unregister by client_id
+{"client_id": "terminal-1"}
+// → {"success": true, "session_id": "xyz789-..."}
+
+// Session not found
+{"session_id": "nonexistent"}
+// → {"error": "Session not found", "success": false}
+```
+
+---
+
 ## When to Use Which Tool
 
 | Task | Preferred Tool | Why |
