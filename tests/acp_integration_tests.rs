@@ -186,41 +186,50 @@ async fn test_acp_initialize() {
     }
 
     // Create ACP connection
-    let (conn, handle_io) =
-        acp::ClientSideConnection::new(TestClient, stdin.compat_write(), stdout.compat(), |fut| {
-            tokio::task::spawn_local(fut);
-        });
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (conn, handle_io) = acp::ClientSideConnection::new(
+                TestClient,
+                stdin.compat_write(),
+                stdout.compat(),
+                |fut| {
+                    tokio::task::spawn_local(fut);
+                },
+            );
 
-    // Spawn IO handler
-    tokio::task::spawn_local(handle_io);
+            // Spawn IO handler
+            tokio::task::spawn_local(handle_io);
 
-    // Initialize with timeout
-    let init_result = timeout(
-        Duration::from_secs(5),
-        conn.initialize(
-            acp::InitializeRequest::new(acp::ProtocolVersion::LATEST).client_info(
-                acp::Implementation::new("test-client".to_string(), "0.1.0".to_string()),
-            ),
-        ),
-    )
-    .await;
+            // Initialize with timeout
+            let init_result = timeout(
+                Duration::from_secs(5),
+                conn.initialize(
+                    acp::InitializeRequest::new(acp::ProtocolVersion::LATEST).client_info(
+                        acp::Implementation::new("test-client".to_string(), "0.1.0".to_string()),
+                    ),
+                ),
+            )
+            .await;
 
-    match init_result {
-        Ok(Ok(response)) => {
-            println!("ACP initialize successful!");
-            if let Some(info) = response.agent_info {
-                println!("Agent: {} v{}", info.name, info.version);
-            } else {
-                println!("Agent info not provided");
+            match init_result {
+                Ok(Ok(response)) => {
+                    println!("ACP initialize successful!");
+                    if let Some(info) = response.agent_info {
+                        println!("Agent: {} v{}", info.name, info.version);
+                    } else {
+                        println!("Agent info not provided");
+                    }
+                }
+                Ok(Err(e)) => {
+                    panic!("ACP initialize failed: {:?}", e);
+                }
+                Err(_) => {
+                    panic!("ACP initialize timed out");
+                }
             }
-        }
-        Ok(Err(e)) => {
-            panic!("ACP initialize failed: {:?}", e);
-        }
-        Err(_) => {
-            panic!("ACP initialize timed out");
-        }
-    }
+        })
+        .await;
 
     // Clean up
     let _ = child.kill().await;

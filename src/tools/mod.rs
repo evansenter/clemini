@@ -394,15 +394,42 @@ pub fn create_http_client() -> Result<reqwest::Client, String> {
 /// Get the clemini executable path for spawning subagents.
 /// Tries current executable first, falls back to cargo run (development only).
 pub fn get_clemini_command() -> (String, Vec<String>) {
+    // During tests, we want to find the actual clemini binary in target/debug or target/release
+    // current_exe() during tests is the test runner binary (e.g. deps/clemini-hash)
+    #[cfg(test)]
+    {
+        if let Ok(cwd) = std::env::current_dir() {
+            let debug_path = cwd.join("target/debug/clemini");
+            if debug_path.exists() {
+                return (debug_path.to_string_lossy().to_string(), vec![]);
+            }
+            let release_path = cwd.join("target/release/clemini");
+            if release_path.exists() {
+                return (release_path.to_string_lossy().to_string(), vec![]);
+            }
+        }
+    }
+
     // Try current executable first
     if let Ok(exe) = std::env::current_exe()
         && exe.exists()
     {
-        return (exe.to_string_lossy().to_string(), vec![]);
+        let exe_name = exe.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        // Avoid using test runner binary as the command
+        // Nextest binaries often have a hash suffix, e.g. clemini-f3b1e56b5b5b5b5b
+        // They are also usually in a 'deps' directory.
+        let is_test_runner = exe.to_string_lossy().contains("/deps/") || 
+                            exe.to_string_lossy().contains("\\deps\\") ||
+                            exe_name.contains("-") && !exe_name.ends_with(".exe");
+        
+        if !is_test_runner {
+            return (exe.to_string_lossy().to_string(), vec![]);
+        }
     }
+
     // Fallback to cargo run - only useful during development
     tracing::warn!(
-        "current_exe() failed or doesn't exist, falling back to 'cargo run'. \
+        "current_exe() failed, is a test runner, or doesn't exist, falling back to 'cargo run'. \
          This is expected during development but indicates an issue in production."
     );
     (
