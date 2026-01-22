@@ -158,7 +158,7 @@ fn send_command(
     session: &mut Session<OsProcess>,
     cmd: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    session.send(&format!("{}\r", cmd))?;
+    session.send(format!("{}\r", cmd))?;
     Ok(())
 }
 
