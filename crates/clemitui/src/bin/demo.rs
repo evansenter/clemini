@@ -4,9 +4,9 @@
 //! Each subcommand demonstrates a specific feature.
 
 use clemitui::{
-    TextBuffer, format_cancelled, format_context_warning, format_ctrl_c, format_error_detail,
-    format_error_message, format_retry, format_tool_args, format_tool_executing,
-    format_tool_result, log_event, log_event_line, set_output_sink, OutputSink,
+    OutputSink, TextBuffer, format_cancelled, format_context_warning, format_ctrl_c,
+    format_error_detail, format_error_message, format_retry, format_tool_args,
+    format_tool_executing, format_tool_result, log_event, log_event_line, set_output_sink,
 };
 use serde_json::json;
 use std::env;
@@ -68,7 +68,10 @@ fn main() {
         }
 
         "text-buffer" => {
-            let markdown = args.get(2).map(|s| s.as_str()).unwrap_or("**Hello** world!");
+            let markdown = args
+                .get(2)
+                .map(|s| s.as_str())
+                .unwrap_or("**Hello** world!");
             let mut buffer = TextBuffer::new();
             buffer.push(markdown);
             if let Some(rendered) = buffer.flush() {
@@ -85,7 +88,10 @@ fn main() {
         }
 
         "error-detail" => {
-            let message = args.get(2).map(|s| s.as_str()).unwrap_or("Something went wrong");
+            let message = args
+                .get(2)
+                .map(|s| s.as_str())
+                .unwrap_or("Something went wrong");
             let output = format_error_detail(message);
             println!("{}", output);
         }

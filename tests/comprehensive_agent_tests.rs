@@ -274,10 +274,7 @@ async fn test_background_bash_and_task_output() {
         run_test_interaction(
             &client,
             &tool_service,
-            &format!(
-                "Run {} in the background",
-                script_path.display()
-            ),
+            &format!("Run {} in the background", script_path.display()),
             None,
         ),
     )
@@ -462,7 +459,11 @@ async fn test_error_recovery_multiple_attempts() {
     let tool_service = create_test_tool_service(&temp_dir, &api_key);
 
     // Create a file with specific content
-    fs::write(temp_dir.path().join("data.txt"), "line one\nline two\nline three").unwrap();
+    fs::write(
+        temp_dir.path().join("data.txt"),
+        "line one\nline two\nline three",
+    )
+    .unwrap();
 
     // Ask to edit with slightly wrong text (should recover)
     let (result, _) = with_timeout(

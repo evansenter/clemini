@@ -11,8 +11,7 @@ use std::time::Duration;
 
 /// Get the clemitui-demo binary path
 fn demo_binary() -> String {
-    let debug_path =
-        env!("CARGO_MANIFEST_DIR").to_string() + "/../../target/debug/clemitui-demo";
+    let debug_path = env!("CARGO_MANIFEST_DIR").to_string() + "/../../target/debug/clemitui-demo";
     if std::path::Path::new(&debug_path).exists() {
         return debug_path;
     }
@@ -102,8 +101,8 @@ fn test_tool_executing_basic() {
         return;
     }
 
-    let mut session = spawn_demo(&["tool-executing", "bash", r#"{"command":"ls"}"#])
-        .expect("Failed to spawn");
+    let mut session =
+        spawn_demo(&["tool-executing", "bash", r#"{"command":"ls"}"#]).expect("Failed to spawn");
 
     let output = read_until_eof(&mut session);
     let stripped = strip_ansi(&output);
@@ -133,8 +132,7 @@ fn test_tool_executing_empty_args() {
         return;
     }
 
-    let mut session =
-        spawn_demo(&["tool-executing", "glob", "{}"]).expect("Failed to spawn");
+    let mut session = spawn_demo(&["tool-executing", "glob", "{}"]).expect("Failed to spawn");
 
     let output = read_until_eof(&mut session);
     let stripped = strip_ansi(&output);
@@ -162,8 +160,7 @@ fn test_tool_result_success() {
         return;
     }
 
-    let mut session =
-        spawn_demo(&["tool-result", "bash", "150", "100"]).expect("Failed to spawn");
+    let mut session = spawn_demo(&["tool-result", "bash", "150", "100"]).expect("Failed to spawn");
 
     let output = read_until_eof(&mut session);
     let stripped = strip_ansi(&output);
@@ -227,8 +224,7 @@ fn test_text_buffer_simple() {
         return;
     }
 
-    let mut session =
-        spawn_demo(&["text-buffer", "**Hello** world!"]).expect("Failed to spawn");
+    let mut session = spawn_demo(&["text-buffer", "**Hello** world!"]).expect("Failed to spawn");
 
     let output = read_until_eof(&mut session);
     let stripped = strip_ansi(&output);
@@ -365,8 +361,7 @@ fn test_error_detail() {
         return;
     }
 
-    let mut session =
-        spawn_demo(&["error-detail", "Connection refused"]).expect("Failed to spawn");
+    let mut session = spawn_demo(&["error-detail", "Connection refused"]).expect("Failed to spawn");
 
     let output = read_until_eof(&mut session);
     let stripped = strip_ansi(&output);
@@ -589,8 +584,7 @@ fn test_output_has_ansi_colors() {
     }
 
     let mut session =
-        spawn_demo(&["tool-executing", "bash", r#"{"command":"ls"}"#])
-            .expect("Failed to spawn");
+        spawn_demo(&["tool-executing", "bash", r#"{"command":"ls"}"#]).expect("Failed to spawn");
 
     let output = read_until_eof(&mut session);
 
