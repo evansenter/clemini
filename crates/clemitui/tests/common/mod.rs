@@ -3,6 +3,9 @@
 //! This module provides common utilities used across test files to reduce
 //! duplication and ensure consistent test behavior.
 
+// Allow dead code since not all test files use all helpers
+#![allow(dead_code)]
+
 use clemitui::{OutputSink, TextBuffer, format_tool_executing, format_tool_result};
 use serde_json::Value;
 use std::sync::{Arc, Mutex};
