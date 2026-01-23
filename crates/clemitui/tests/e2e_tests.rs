@@ -5,6 +5,9 @@
 //!
 //! Run with: `cargo test -p clemitui --test e2e_tests`
 
+mod common;
+
+use common::strip_ansi;
 use expectrl::{Session, session::OsProcess};
 use std::process::Command;
 use std::time::Duration;
@@ -64,31 +67,7 @@ fn read_until_eof(session: &mut Session<OsProcess>) -> String {
     String::from_utf8_lossy(&output).to_string()
 }
 
-/// Strip ANSI escape codes for content verification
-fn strip_ansi(s: &str) -> String {
-    let mut result = String::new();
-    let mut chars = s.chars().peekable();
-
-    while let Some(c) = chars.next() {
-        if c == '\x1b' {
-            // Skip the escape sequence
-            if chars.peek() == Some(&'[') {
-                chars.next(); // consume '['
-                // Skip until we hit a letter (the terminator)
-                while let Some(&next) = chars.peek() {
-                    chars.next();
-                    if next.is_ascii_alphabetic() {
-                        break;
-                    }
-                }
-            }
-        } else {
-            result.push(c);
-        }
-    }
-
-    result
-}
+// strip_ansi is imported from common module
 
 // =============================================================================
 // Tool Executing Tests

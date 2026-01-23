@@ -6,37 +6,19 @@
 //!
 //! Run with: `cargo test -p clemitui --test acp_simulation_tests`
 
+mod common;
+
 use clemitui::{
-    OutputSink, TextBuffer, disable_logging, enable_logging, format_cancelled,
-    format_context_warning, format_ctrl_c, format_error_detail, format_retry, format_tool_args,
-    format_tool_executing, format_tool_result, log_event, log_event_line, set_output_sink,
+    TextBuffer, enable_logging, format_cancelled, format_context_warning, format_ctrl_c,
+    format_error_detail, format_retry, format_tool_args, format_tool_executing, format_tool_result,
+    log_event, log_event_line, set_output_sink,
+};
+use common::{
+    CaptureSink, DisableColors, LoggingGuard, flush_to_output, format_tool_block, strip_ansi,
 };
 use serde_json::json;
+use std::sync::Arc;
 use std::time::Duration;
-
-/// Strip ANSI escape codes for content verification
-fn strip_ansi(s: &str) -> String {
-    let mut result = String::new();
-    let mut chars = s.chars().peekable();
-
-    while let Some(c) = chars.next() {
-        if c == '\x1b' {
-            if chars.peek() == Some(&'[') {
-                chars.next();
-                while let Some(&next) = chars.peek() {
-                    chars.next();
-                    if next.is_ascii_alphabetic() {
-                        break;
-                    }
-                }
-            }
-        } else {
-            result.push(c);
-        }
-    }
-
-    result
-}
 
 // =============================================================================
 // Rapid Tool Execution Sequences
@@ -46,7 +28,7 @@ fn strip_ansi(s: &str) -> String {
 /// (e.g., exploring a codebase).
 #[test]
 fn test_rapid_glob_sequence() {
-    colored::control::set_override(false);
+    let _guard = DisableColors::new();
 
     let patterns = [
         "**/*.rs",
@@ -60,25 +42,23 @@ fn test_rapid_glob_sequence() {
 
     for (i, pattern) in patterns.iter().enumerate() {
         let args = json!({"pattern": pattern});
-        let executing = format_tool_executing("glob", &args);
-        let result =
-            format_tool_result("glob", Duration::from_millis(15 + i as u64 * 5), 50, false);
-
-        all_output.push_str(&executing);
-        all_output.push_str(&result);
-        all_output.push('\n');
+        all_output.push_str(&format_tool_block(
+            "glob",
+            &args,
+            15 + i as u64 * 5,
+            50,
+            false,
+        ));
     }
-
-    let stripped = strip_ansi(&all_output);
 
     // Should have 5 tool execution blocks
     assert_eq!(
-        stripped.matches("┌─").count(),
+        all_output.matches("┌─").count(),
         5,
         "Should have 5 opening brackets"
     );
     assert_eq!(
-        stripped.matches("└─").count(),
+        all_output.matches("└─").count(),
         5,
         "Should have 5 closing brackets"
     );
@@ -86,88 +66,76 @@ fn test_rapid_glob_sequence() {
     // Each pattern should appear
     for pattern in patterns {
         assert!(
-            stripped.contains(pattern),
+            all_output.contains(pattern),
             "Should contain pattern: {}",
             pattern
         );
     }
-
-    colored::control::unset_override();
 }
 
 /// Simulates an agent chaining grep -> read -> edit tools
 /// (typical find-and-fix workflow).
 #[test]
 fn test_grep_read_edit_chain() {
-    colored::control::set_override(false);
+    let _guard = DisableColors::new();
 
     let mut output = String::new();
 
     // Step 1: grep to find occurrences
-    let grep_args = json!({"pattern": "TODO", "path": "src/"});
-    output.push_str(&format_tool_executing("grep", &grep_args));
-    output.push_str(&format_tool_result(
+    output.push_str(&format_tool_block(
         "grep",
-        Duration::from_millis(45),
+        &json!({"pattern": "TODO", "path": "src/"}),
+        45,
         120,
         false,
     ));
-    output.push('\n');
 
     // Step 2: read the file
-    let read_args = json!({"file_path": "/project/src/main.rs", "offset": 100, "limit": 50});
-    output.push_str(&format_tool_executing("read", &read_args));
-    output.push_str(&format_tool_result(
+    output.push_str(&format_tool_block(
         "read",
-        Duration::from_millis(12),
+        &json!({"file_path": "/project/src/main.rs", "offset": 100, "limit": 50}),
+        12,
         250,
         false,
     ));
-    output.push('\n');
 
     // Step 3: edit the file
-    let edit_args = json!({
-        "file_path": "/project/src/main.rs",
-        "old_string": "TODO: implement",
-        "new_string": "DONE: implemented"
-    });
-    output.push_str(&format_tool_executing("edit", &edit_args));
-    output.push_str(&format_tool_result(
+    output.push_str(&format_tool_block(
         "edit",
-        Duration::from_millis(8),
+        &json!({
+            "file_path": "/project/src/main.rs",
+            "old_string": "TODO: implement",
+            "new_string": "DONE: implemented"
+        }),
+        8,
         30,
         false,
     ));
-    output.push('\n');
-
-    let stripped = strip_ansi(&output);
 
     // Verify tool chain structure
-    assert!(stripped.contains("grep"), "Should contain grep");
-    assert!(stripped.contains("read"), "Should contain read");
-    assert!(stripped.contains("edit"), "Should contain edit");
+    assert!(output.contains("grep"), "Should contain grep");
+    assert!(output.contains("read"), "Should contain read");
+    assert!(output.contains("edit"), "Should contain edit");
 
     // Edit tool should filter old_string/new_string
     assert!(
-        !stripped.contains("TODO: implement"),
+        !output.contains("TODO: implement"),
         "Should NOT show old_string content"
     );
     assert!(
-        !stripped.contains("DONE: implemented"),
+        !output.contains("DONE: implemented"),
         "Should NOT show new_string content"
     );
     assert!(
-        stripped.contains("file_path="),
+        output.contains("file_path="),
         "Should show file_path for edit"
     );
-
-    colored::control::unset_override();
 }
 
 /// Simulates rapid bash commands (e.g., running tests, build steps).
 #[test]
 fn test_rapid_bash_sequence() {
-    colored::control::set_override(false);
+    let _guard = DisableColors::new();
 
     let commands = [
         ("cargo check", 1200, 80, false),
@@ -179,31 +147,25 @@ fn test_rapid_bash_sequence() {
     let mut output = String::new();
 
     for (cmd, duration_ms, tokens, has_error) in commands {
-        let args = json!({"command": cmd});
-        output.push_str(&format_tool_executing("bash", &args));
-        output.push_str(&format_tool_result(
+        output.push_str(&format_tool_block(
             "bash",
-            Duration::from_millis(duration_ms),
+            &json!({"command": cmd}),
+            duration_ms,
             tokens,
             has_error,
         ));
-        output.push('\n');
     }
-
-    let stripped = strip_ansi(&output);
 
     // All commands should appear
     for (cmd, _, _, _) in commands {
-        assert!(stripped.contains(cmd), "Should contain command: {}", cmd);
+        assert!(output.contains(cmd), "Should contain command: {}", cmd);
     }
 
     // Duration formatting should be correct
-    assert!(stripped.contains("1.20s"), "Should show 1.20s");
-    assert!(stripped.contains("2.50s"), "Should show 2.50s");
-    assert!(stripped.contains("3.00s"), "Should show 3.00s");
-    assert!(stripped.contains("8.00s"), "Should show 8.00s");
-
-    colored::control::unset_override();
+    assert!(output.contains("1.20s"), "Should show 1.20s");
+    assert!(output.contains("2.50s"), "Should show 2.50s");
+    assert!(output.contains("3.00s"), "Should show 3.00s");
+    assert!(output.contains("8.00s"), "Should show 8.00s");
 }
 
 // =============================================================================
@@ -325,7 +287,7 @@ fn test_streaming_multiple_code_blocks() {
 /// Simulates an agent explaining what it's doing while executing tools.
 #[test]
 fn test_interleaved_explanation_and_tools() {
-    colored::control::set_override(false);
+    let _guard = DisableColors::new();
 
     let mut buffer = TextBuffer::new();
     let mut output = String::new();
@@ -368,9 +330,7 @@ fn test_interleaved_explanation_and_tools() {
 
     // Final explanation
     buffer.push("Here's what I found:\n\n- Line 42: TODO: add error handling\n");
-    if let Some(text) = buffer.flush() {
-        output.push_str(&strip_ansi(&text));
-    }
+    flush_to_output(&mut buffer, &mut output);
 
     // Verify interleaving
     assert!(
@@ -383,14 +343,12 @@ fn test_interleaved_explanation_and_tools() {
         "Should have middle explanation"
     );
     assert!(output.contains("Line 42"), "Should have final explanation");
-
-    colored::control::unset_override();
 }
 
 /// Simulates an agent providing step-by-step progress updates.
 #[test]
 fn test_step_by_step_progress() {
-    colored::control::set_override(false);
+    let _guard = DisableColors::new();
 
     let mut buffer = TextBuffer::new();
     let mut output = String::new();
@@ -426,9 +384,7 @@ fn test_step_by_step_progress() {
         // Add explanation
         buffer.push(explanation);
         buffer.push("\n\n");
-        if let Some(text) = buffer.flush() {
-            output.push_str(&strip_ansi(&text));
-        }
+        flush_to_output(&mut buffer, &mut output);
 
         // Execute tool
         output.push_str(&strip_ansi(&format_tool_executing(tool, &args)));
@@ -452,8 +408,6 @@ fn test_step_by_step_progress() {
     assert!(output.contains("config.toml"), "Should have config.toml");
     assert!(output.contains("cargo test"), "Should have cargo test");
     assert!(output.contains("cargo build"), "Should have cargo build");
-
-    colored::control::unset_override();
 }
 
 // =============================================================================
@@ -463,7 +417,7 @@ fn test_step_by_step_progress() {
 /// Simulates a tool failing and agent recovering.
 #[test]
 fn test_tool_error_and_recovery() {
-    colored::control::set_override(false);
+    let _guard = DisableColors::new();
 
     let mut buffer = TextBuffer::new();
     let mut output = String::new();
@@ -484,9 +438,7 @@ fn test_tool_error_and_recovery() {
 
     // Agent explains the error
     buffer.push("\nThe file doesn't exist. Let me search for similar files.\n\n");
-    if let Some(text) = buffer.flush() {
-        output.push_str(&strip_ansi(&text));
-    }
+    flush_to_output(&mut buffer, &mut output);
 
     // Recovery attempt - glob search
     let glob_args = json!({"pattern": "**/*.rs"});
@@ -501,9 +453,7 @@ fn test_tool_error_and_recovery() {
 
     // Found the right file
     buffer.push("Found it! The file is `src/main.rs`.\n\n");
-    if let Some(text) = buffer.flush() {
-        output.push_str(&strip_ansi(&text));
-    }
+    flush_to_output(&mut buffer, &mut output);
 
     // Successful read
     let correct_args = json!({"file_path": "src/main.rs"});
@@ -525,14 +475,12 @@ fn test_tool_error_and_recovery() {
     // Verify recovery narrative
     assert!(output.contains("doesn't exist"), "Should explain the error");
     assert!(output.contains("Found it"), "Should show recovery");
-
-    colored::control::unset_override();
 }
 
 /// Simulates API retry scenario with backoff.
 #[test]
 fn test_api_retry_sequence() {
-    colored::control::set_override(false);
+    let _guard = DisableColors::new();
 
     let mut output = String::new();
 
@@ -563,14 +511,12 @@ fn test_api_retry_sequence() {
         output.contains("rate limit"),
         "Should show rate limit reason"
     );
-
-    colored::control::unset_override();
 }
 
 /// Simulates multiple consecutive errors (agent struggling).
 #[test]
 fn test_multiple_consecutive_errors() {
-    colored::control::set_override(false);
+    let _guard = DisableColors::new();
 
     let mut output = String::new();
 
@@ -616,8 +562,6 @@ fn test_multiple_consecutive_errors() {
         2,
         "Should have 2 error details"
     );
-
-    colored::control::unset_override();
 }
 
 // =============================================================================
@@ -669,7 +613,7 @@ fn test_context_warning_progression() {
 /// Simulates formatting very large tool arguments (should be truncated).
 #[test]
 fn test_large_argument_truncation() {
-    colored::control::set_override(false);
+    let _guard = DisableColors::new();
 
     // Create a very long string argument
     let long_content = "x".repeat(500);
@@ -694,14 +638,12 @@ fn test_large_argument_truncation() {
         formatted.contains("file_path="),
         "Should still show file_path"
     );
-
-    colored::control::unset_override();
 }
 
 /// Simulates a complex multi-tool operation with mixed output sizes.
 #[test]
 fn test_mixed_output_sizes() {
-    colored::control::set_override(false);
+    let _guard = DisableColors::new();
 
     let operations = [
         ("glob", json!({"pattern": "*.rs"}), 10, 25), // Small output
@@ -734,8 +676,6 @@ fn test_mixed_output_sizes() {
     assert!(stripped.contains("~2000 tok"), "Should show 2000 tokens");
     assert!(stripped.contains("~500 tok"), "Should show 500 tokens");
     assert!(stripped.contains("~50 tok"), "Should show 50 tokens");
-
-    colored::control::unset_override();
 }
 
 // =============================================================================
@@ -749,16 +689,14 @@ fn test_mixed_output_sizes() {
 /// Simulates spawning a background task and later checking its output.
 #[test]
 fn test_background_task_lifecycle() {
-    colored::control::set_override(false);
+    let _guard = DisableColors::new();
 
     let mut buffer = TextBuffer::new();
     let mut output = String::new();
 
     // Agent explains
     buffer.push("I'll run the test suite in the background while we continue working.\n\n");
-    if let Some(text) = buffer.flush() {
-        output.push_str(&strip_ansi(&text));
-    }
+    flush_to_output(&mut buffer, &mut output);
 
     // Spawn background task
     let bash_args = json!({"command": "cargo test", "background": true});
@@ -776,9 +714,7 @@ fn test_background_task_lifecycle() {
 
     // Agent continues with other work
     buffer.push("Tests are running. Meanwhile, let me check the code coverage setup.\n\n");
-    if let Some(text) = buffer.flush() {
-        output.push_str(&strip_ansi(&text));
-    }
+    flush_to_output(&mut buffer, &mut output);
 
     // Do other work
     output.push_str(&strip_ansi(&format_tool_executing(
@@ -795,9 +731,7 @@ fn test_background_task_lifecycle() {
 
     // Later: check task output
     buffer.push("Let me check if the tests completed.\n\n");
-    if let Some(text) = buffer.flush() {
-        output.push_str(&strip_ansi(&text));
-    }
+    flush_to_output(&mut buffer, &mut output);
 
     output.push_str(&strip_ansi(&format_tool_executing(
         "task_output",
@@ -813,32 +747,26 @@ fn test_background_task_lifecycle() {
 
     // Agent reports results
     buffer.push("Tests completed successfully: 223 passed, 0 failed.\n");
-    if let Some(text) = buffer.flush() {
-        output.push_str(&strip_ansi(&text));
-    }
+    flush_to_output(&mut buffer, &mut output);
 
     // Verify background task flow
     assert!(output.contains("background"), "Should mention background");
     assert!(output.contains("bg-1"), "Should show task ID");
     assert!(output.contains("task_output"), "Should check task output");
     assert!(output.contains("223 passed"), "Should report results");
-
-    colored::control::unset_override();
 }
 
 /// Simulates multiple concurrent background tasks.
 #[test]
 fn test_multiple_background_tasks() {
-    colored::control::set_override(false);
+    let _guard = DisableColors::new();
 
     let mut buffer = TextBuffer::new();
     let mut output = String::new();
 
     // Spawn multiple background tasks
     buffer.push("Running build and tests in parallel.\n\n");
-    if let Some(text) = buffer.flush() {
-        output.push_str(&strip_ansi(&text));
-    }
+    flush_to_output(&mut buffer, &mut output);
 
     // Task 1: Build
     output.push_str(&strip_ansi(&format_tool_executing(
@@ -904,14 +832,12 @@ fn test_multiple_background_tasks() {
         6, // 3 tasks × 2 (executing + result)
         "Should check all 3 tasks (6 total: 3 executing + 3 result lines)"
     );
-
-    colored::control::unset_override();
 }
 
 /// Simulates a background task that fails.
 #[test]
 fn test_background_task_failure() {
-    colored::control::set_override(false);
+    let _guard = DisableColors::new();
 
     let mut buffer = TextBuffer::new();
     let mut output = String::new();
@@ -945,16 +871,12 @@ fn test_background_task_failure() {
 
     // Agent handles the failure
     buffer.push("The tests failed. Let me investigate the error.\n\n");
-    if let Some(text) = buffer.flush() {
-        output.push_str(&strip_ansi(&text));
-    }
+    flush_to_output(&mut buffer, &mut output);
 
     // Verify error handling
     assert!(output.contains("ERROR"), "Should show error marker");
     assert!(output.contains("exited with code"), "Should show exit code");
     assert!(output.contains("investigate"), "Should explain recovery");
-
-    colored::control::unset_override();
 }
 
 // =============================================================================
@@ -964,7 +886,7 @@ fn test_background_task_failure() {
 /// Simulates spawning a subagent for a delegated task.
 #[test]
 fn test_subagent_delegation() {
-    colored::control::set_override(false);
+    let _guard = DisableColors::new();
 
     let mut buffer = TextBuffer::new();
     let mut output = String::new();
@@ -973,9 +895,7 @@ fn test_subagent_delegation() {
     buffer.push(
         "This is a complex refactoring task. I'll delegate the test updates to a subagent.\n\n",
     );
-    if let Some(text) = buffer.flush() {
-        output.push_str(&strip_ansi(&text));
-    }
+    flush_to_output(&mut buffer, &mut output);
 
     // Spawn subagent task
     let task_args = json!({
@@ -993,9 +913,7 @@ fn test_subagent_delegation() {
 
     // Main agent continues
     buffer.push("Subagent is working on tests. I'll update the main source files.\n\n");
-    if let Some(text) = buffer.flush() {
-        output.push_str(&strip_ansi(&text));
-    }
+    flush_to_output(&mut buffer, &mut output);
 
     // Main agent does its work
     output.push_str(&strip_ansi(&format_tool_executing(
@@ -1016,9 +934,7 @@ fn test_subagent_delegation() {
 
     // Check subagent result
     buffer.push("Let me check if the subagent finished.\n\n");
-    if let Some(text) = buffer.flush() {
-        output.push_str(&strip_ansi(&text));
-    }
+    flush_to_output(&mut buffer, &mut output);
 
     output.push_str(&strip_ansi(&format_tool_executing(
         "task_output",
@@ -1034,23 +950,19 @@ fn test_subagent_delegation() {
 
     // Final summary
     buffer.push("Subagent completed: updated 8 test files. All changes are ready for review.\n");
-    if let Some(text) = buffer.flush() {
-        output.push_str(&strip_ansi(&text));
-    }
+    flush_to_output(&mut buffer, &mut output);
 
     // Verify subagent flow
     assert!(output.contains("task"), "Should use task tool");
     assert!(output.contains("acp-1"), "Should show ACP task ID");
     assert!(output.contains("Subagent"), "Should mention subagent");
     assert!(output.contains("8 test files"), "Should report results");
-
-    colored::control::unset_override();
 }
 
 /// Simulates multiple subagents working in parallel.
 #[test]
 fn test_parallel_subagents() {
-    colored::control::set_override(false);
+    let _guard = DisableColors::new();
 
     let mut buffer = TextBuffer::new();
     let mut output = String::new();
@@ -1060,9 +972,7 @@ fn test_parallel_subagents() {
     buffer.push("1. Frontend updates\n");
     buffer.push("2. Backend updates\n");
     buffer.push("3. Documentation updates\n\n");
-    if let Some(text) = buffer.flush() {
-        output.push_str(&strip_ansi(&text));
-    }
+    flush_to_output(&mut buffer, &mut output);
 
     // Spawn subagents
     let tasks = [
@@ -1088,9 +998,7 @@ fn test_parallel_subagents() {
 
     // Wait and collect results
     buffer.push("All subagents dispatched. Waiting for completion...\n\n");
-    if let Some(text) = buffer.flush() {
-        output.push_str(&strip_ansi(&text));
-    }
+    flush_to_output(&mut buffer, &mut output);
 
     // Check each result
     for (_, task_id) in tasks {
@@ -1117,8 +1025,6 @@ fn test_parallel_subagents() {
         9,
         "Should have 9 task references (3 spawns × 2 lines + 3 status messages)"
     );
-
-    colored::control::unset_override();
 }
 
 // =============================================================================
@@ -1128,7 +1034,7 @@ fn test_parallel_subagents() {
 /// Simulates killing a long-running background task.
 #[test]
 fn test_kill_background_task() {
-    colored::control::set_override(false);
+    let _guard = DisableColors::new();
 
     let mut buffer = TextBuffer::new();
     let mut output = String::new();
@@ -1148,9 +1054,7 @@ fn test_kill_background_task() {
 
     // Decide to kill it
     buffer.push("Actually, I need to stop the build. The configuration is wrong.\n\n");
-    if let Some(text) = buffer.flush() {
-        output.push_str(&strip_ansi(&text));
-    }
+    flush_to_output(&mut buffer, &mut output);
 
     // Kill the task
     output.push_str(&strip_ansi(&format_tool_executing(
@@ -1167,16 +1071,12 @@ fn test_kill_background_task() {
 
     // Confirm
     buffer.push("Task killed. Let me fix the configuration first.\n");
-    if let Some(text) = buffer.flush() {
-        output.push_str(&strip_ansi(&text));
-    }
+    flush_to_output(&mut buffer, &mut output);
 
     // Verify kill flow
     assert!(output.contains("bg-1"), "Should reference task ID");
     assert!(output.contains("kill_shell"), "Should use kill_shell tool");
     assert!(output.contains("Task killed"), "Should confirm kill");
-
-    colored::control::unset_override();
 }
 
 // =============================================================================
@@ -1186,7 +1086,7 @@ fn test_kill_background_task() {
 /// Simulates a complete multi-turn agent interaction for a refactoring task.
 #[test]
 fn test_complete_refactoring_session() {
-    colored::control::set_override(false);
+    let _guard = DisableColors::new();
 
     let mut buffer = TextBuffer::new();
     let mut session_output = String::new();
@@ -1194,9 +1094,7 @@ fn test_complete_refactoring_session() {
     // Turn 1: Agent explores the codebase
     buffer
         .push("I'll help you refactor the error handling. First, let me explore the codebase.\n\n");
-    if let Some(text) = buffer.flush() {
-        session_output.push_str(&strip_ansi(&text));
-    }
+    flush_to_output(&mut buffer, &mut session_output);
 
     // Glob search
     session_output.push_str(&strip_ansi(&format_tool_executing(
@@ -1231,15 +1129,11 @@ fn test_complete_refactoring_session() {
     buffer.push("- `src/main.rs`: 4 occurrences\n");
     buffer.push("- `src/lib.rs`: 3 occurrences\n");
     buffer.push("- `src/utils.rs`: 5 occurrences\n\n");
-    if let Some(text) = buffer.flush() {
-        session_output.push_str(&strip_ansi(&text));
-    }
+    flush_to_output(&mut buffer, &mut session_output);
 
     // Turn 2: Agent starts fixing
     buffer.push("Let me start with `src/main.rs`.\n\n");
-    if let Some(text) = buffer.flush() {
-        session_output.push_str(&strip_ansi(&text));
-    }
+    flush_to_output(&mut buffer, &mut session_output);
 
     // Read file
     session_output.push_str(&strip_ansi(&format_tool_executing(
@@ -1277,9 +1171,7 @@ fn test_complete_refactoring_session() {
     buffer.push("Fixed all 4 occurrences in `src/main.rs`. ");
     buffer.push("The function now returns `Result<(), Error>` instead of panicking.\n\n");
     buffer.push("Would you like me to continue with the other files?");
-    if let Some(text) = buffer.flush() {
-        session_output.push_str(&strip_ansi(&text));
-    }
+    flush_to_output(&mut buffer, &mut session_output);
 
     // Verify the complete session
     assert!(
@@ -1306,8 +1198,6 @@ fn test_complete_refactoring_session() {
         session_output.contains("continue with"),
         "Should offer next steps"
     );
-
-    colored::control::unset_override();
 }
 
 // =============================================================================
@@ -1317,7 +1207,7 @@ fn test_complete_refactoring_session() {
 /// Simulates user pressing ctrl-c during a long operation.
 #[test]
 fn test_ctrl_c_during_tool_execution() {
-    colored::control::set_override(false);
+    let _guard = DisableColors::new();
 
     let mut buffer = TextBuffer::new();
     let mut output = String::new();
@@ -1334,9 +1224,7 @@ fn test_ctrl_c_during_tool_execution() {
 
     // Agent acknowledges
     buffer.push("Build interrupted. Would you like me to continue or try something else?\n");
-    if let Some(text) = buffer.flush() {
-        output.push_str(&strip_ansi(&text));
-    }
+    flush_to_output(&mut buffer, &mut output);
 
     // Verify
     assert!(output.contains("bash"), "Should show tool that was running");
@@ -1344,14 +1232,12 @@ fn test_ctrl_c_during_tool_execution() {
         output.to_lowercase().contains("ctrl") || output.contains("interrupted"),
         "Should indicate interruption"
     );
-
-    colored::control::unset_override();
 }
 
 /// Simulates operation being cancelled by user.
 #[test]
 fn test_operation_cancelled() {
-    colored::control::set_override(false);
+    let _guard = DisableColors::new();
 
     let mut output = String::new();
 
@@ -1371,8 +1257,6 @@ fn test_operation_cancelled() {
         output.to_lowercase().contains("cancel"),
         "Should indicate cancellation"
     );
-
-    colored::control::unset_override();
 }
 
 // =============================================================================
@@ -1382,16 +1266,14 @@ fn test_operation_cancelled() {
 /// Simulates a multi-turn debugging session with context accumulation.
 #[test]
 fn test_multi_turn_debugging_session() {
-    colored::control::set_override(false);
+    let _guard = DisableColors::new();
 
     let mut buffer = TextBuffer::new();
     let mut output = String::new();
 
     // Turn 1: User reports bug
     buffer.push("I see there's a panic in `parse_config`. Let me investigate.\n\n");
-    if let Some(text) = buffer.flush() {
-        output.push_str(&strip_ansi(&text));
-    }
+    flush_to_output(&mut buffer, &mut output);
 
     // Read the file
     output.push_str(&strip_ansi(&format_tool_executing(
@@ -1410,9 +1292,7 @@ fn test_multi_turn_debugging_session() {
     buffer.push(
         "I found the issue. The `unwrap()` on line 42 panics when the config file is missing.\n\n",
     );
-    if let Some(text) = buffer.flush() {
-        output.push_str(&strip_ansi(&text));
-    }
+    flush_to_output(&mut buffer, &mut output);
 
     // Turn 2: User asks for fix
     // Agent proposes fix
@@ -1434,9 +1314,7 @@ fn test_multi_turn_debugging_session() {
 
     // Turn 3: Verify fix
     buffer.push("Applied the fix. Let me verify it compiles.\n\n");
-    if let Some(text) = buffer.flush() {
-        output.push_str(&strip_ansi(&text));
-    }
+    flush_to_output(&mut buffer, &mut output);
 
     output.push_str(&strip_ansi(&format_tool_executing(
         "bash",
@@ -1451,9 +1329,7 @@ fn test_multi_turn_debugging_session() {
     output.push('\n');
 
     buffer.push("Compiles successfully. The panic should now be fixed.\n");
-    if let Some(text) = buffer.flush() {
-        output.push_str(&strip_ansi(&text));
-    }
+    flush_to_output(&mut buffer, &mut output);
 
     // Verify multi-turn flow
     assert!(
@@ -1470,14 +1346,12 @@ fn test_multi_turn_debugging_session() {
         output.contains("successfully"),
         "Should confirm successful fix"
     );
-
-    colored::control::unset_override();
 }
 
 /// Simulates a planning session before implementation.
 #[test]
 fn test_planning_before_implementation() {
-    colored::control::set_override(false);
+    let _guard = DisableColors::new();
 
     let mut buffer = TextBuffer::new();
     let mut output = String::new();
@@ -1489,9 +1363,7 @@ fn test_planning_before_implementation() {
     buffer.push("2. Add JWT validation\n");
     buffer.push("3. Implement login/logout routes\n");
     buffer.push("4. Add session management\n\n");
-    if let Some(text) = buffer.flush() {
-        output.push_str(&strip_ansi(&text));
-    }
+    flush_to_output(&mut buffer, &mut output);
 
     // Research existing patterns
     output.push_str(&strip_ansi(&format_tool_executing(
@@ -1521,9 +1393,7 @@ fn test_planning_before_implementation() {
     // Refine plan
     buffer.push("Based on existing patterns, I'll use the same middleware structure.\n\n");
     buffer.push("Ready to implement. Should I proceed?\n");
-    if let Some(text) = buffer.flush() {
-        output.push_str(&strip_ansi(&text));
-    }
+    flush_to_output(&mut buffer, &mut output);
 
     // Verify planning flow (markdown header rendered, so check for text without ##)
     assert!(
@@ -1533,8 +1403,6 @@ fn test_planning_before_implementation() {
     assert!(output.contains("grep"), "Should research patterns");
     assert!(output.contains("read"), "Should read existing code");
     assert!(output.contains("proceed"), "Should ask for confirmation");
-
-    colored::control::unset_override();
 }
 
 // =============================================================================
@@ -1544,7 +1412,7 @@ fn test_planning_before_implementation() {
 /// Simulates coordinating multiple long-running tasks with status checks.
 #[test]
 fn test_task_coordination_with_polling() {
-    colored::control::set_override(false);
+    let _guard = DisableColors::new();
 
     let mut buffer = TextBuffer::new();
     let mut output = String::new();
@@ -1557,9 +1425,7 @@ fn test_task_coordination_with_polling() {
     ];
 
     buffer.push("Running quality checks in parallel...\n\n");
-    if let Some(text) = buffer.flush() {
-        output.push_str(&strip_ansi(&text));
-    }
+    flush_to_output(&mut buffer, &mut output);
 
     for (cmd, task_id) in tasks {
         output.push_str(&strip_ansi(&format_tool_executing(
@@ -1578,9 +1444,7 @@ fn test_task_coordination_with_polling() {
 
     // First poll - some still running
     buffer.push("Checking status...\n\n");
-    if let Some(text) = buffer.flush() {
-        output.push_str(&strip_ansi(&text));
-    }
+    flush_to_output(&mut buffer, &mut output);
 
     // bg-1 completed
     output.push_str(&strip_ansi(&format_tool_executing(
@@ -1623,9 +1487,7 @@ fn test_task_coordination_with_polling() {
     output.push('\n');
 
     buffer.push("1 passed, 1 still running, 1 has warnings. Investigating clippy issues...\n");
-    if let Some(text) = buffer.flush() {
-        output.push_str(&strip_ansi(&text));
-    }
+    flush_to_output(&mut buffer, &mut output);
 
     // Verify coordination
     assert!(
@@ -1645,8 +1507,6 @@ fn test_task_coordination_with_polling() {
         output.contains("ERROR"),
         "Should show error from failed task"
     );
-
-    colored::control::unset_override();
 }
 
 // =============================================================================
@@ -1656,16 +1516,14 @@ fn test_task_coordination_with_polling() {
 /// Simulates a complex nested workflow: spawn subagent that spawns more tasks.
 #[test]
 fn test_nested_subagent_workflow() {
-    colored::control::set_override(false);
+    let _guard = DisableColors::new();
 
     let mut buffer = TextBuffer::new();
     let mut output = String::new();
 
     // Main agent delegates to subagent
     buffer.push("This is a large refactoring task. I'll delegate to specialized subagents.\n\n");
-    if let Some(text) = buffer.flush() {
-        output.push_str(&strip_ansi(&text));
-    }
+    flush_to_output(&mut buffer, &mut output);
 
     // Spawn architecture subagent
     output.push_str(&strip_ansi(&format_tool_executing(
@@ -1688,9 +1546,7 @@ fn test_nested_subagent_workflow() {
     buffer.push("- Found 3 circular dependencies\n");
     buffer.push("- Recommends extracting `TokenValidator` trait\n");
     buffer.push("- Suggests moving session logic to separate module\n\n");
-    if let Some(text) = buffer.flush() {
-        output.push_str(&strip_ansi(&text));
-    }
+    flush_to_output(&mut buffer, &mut output);
 
     // Main agent spawns implementation subagents based on analysis
     let implementation_tasks = [
@@ -1703,9 +1559,7 @@ fn test_nested_subagent_workflow() {
     ];
 
     buffer.push("Spawning implementation subagents based on analysis:\n\n");
-    if let Some(text) = buffer.flush() {
-        output.push_str(&strip_ansi(&text));
-    }
+    flush_to_output(&mut buffer, &mut output);
 
     for (prompt, task_id) in implementation_tasks {
         output.push_str(&strip_ansi(&format_tool_executing(
@@ -1724,9 +1578,7 @@ fn test_nested_subagent_workflow() {
 
     // Final summary
     buffer.push("Refactoring in progress. 1 analysis + 3 implementation subagents spawned.\n");
-    if let Some(text) = buffer.flush() {
-        output.push_str(&strip_ansi(&text));
-    }
+    flush_to_output(&mut buffer, &mut output);
 
     // Verify nested workflow
     assert!(
@@ -1745,8 +1597,6 @@ fn test_nested_subagent_workflow() {
         output.contains("Refactoring in progress"),
         "Should summarize overall status"
     );
-
-    colored::control::unset_override();
 }
 
 // =============================================================================
@@ -1756,29 +1606,12 @@ fn test_nested_subagent_workflow() {
 /// Simulates logging multiple events through the OutputSink.
 #[test]
 fn test_output_sink_logging() {
-    use std::sync::{Arc, Mutex};
+    let _logging_guard = LoggingGuard; // Ensures cleanup on panic
 
-    // Create a custom sink that captures output
-    struct CaptureSink {
-        captured: Arc<Mutex<Vec<String>>>,
-    }
-
-    impl OutputSink for CaptureSink {
-        fn emit(&self, message: &str) {
-            self.captured.lock().unwrap().push(message.to_string());
-        }
-        fn emit_line(&self, message: &str) {
-            self.captured.lock().unwrap().push(message.to_string());
-        }
-    }
-
-    let captured = Arc::new(Mutex::new(Vec::new()));
-    let sink = Arc::new(CaptureSink {
-        captured: captured.clone(),
-    });
+    let (sink, captured) = CaptureSink::new();
 
     // Install sink and enable logging
-    set_output_sink(sink);
+    set_output_sink(Arc::new(sink));
     enable_logging();
 
     // Log some events
@@ -1801,36 +1634,17 @@ fn test_output_sink_logging() {
         logs.iter().any(|l| l.contains("finished")),
         "Should contain end event"
     );
-
-    // Cleanup
-    disable_logging();
 }
 
 /// Test that logging can be disabled.
 #[test]
 fn test_logging_disabled() {
-    use std::sync::{Arc, Mutex};
+    let _logging_guard = LoggingGuard; // Ensures cleanup on panic
 
-    struct CaptureSink {
-        captured: Arc<Mutex<Vec<String>>>,
-    }
+    let (sink, captured) = CaptureSink::new();
 
-    impl OutputSink for CaptureSink {
-        fn emit(&self, message: &str) {
-            self.captured.lock().unwrap().push(message.to_string());
-        }
-        fn emit_line(&self, message: &str) {
-            self.captured.lock().unwrap().push(message.to_string());
-        }
-    }
-
-    let captured = Arc::new(Mutex::new(Vec::new()));
-    let sink = Arc::new(CaptureSink {
-        captured: captured.clone(),
-    });
-
-    set_output_sink(sink);
-    disable_logging();
+    set_output_sink(Arc::new(sink));
+    clemitui::disable_logging();
 
     // These should not be captured
     log_event("Should not appear");
