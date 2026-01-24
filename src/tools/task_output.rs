@@ -155,7 +155,7 @@ mod tests {
     #[tokio::test]
     async fn test_task_output_tool_basic() {
         let dir = tempdir().unwrap();
-        let bash = BashTool::new(
+        let bash = BashTool::new_without_confirmation_tracking(
             dir.path().to_path_buf(),
             vec![dir.path().to_path_buf()],
             5,
@@ -199,7 +199,7 @@ mod tests {
     #[tokio::test]
     async fn test_task_output_tool_running() {
         let dir = tempdir().unwrap();
-        let bash = BashTool::new(
+        let bash = BashTool::new_without_confirmation_tracking(
             dir.path().to_path_buf(),
             vec![dir.path().to_path_buf()],
             5,
@@ -261,7 +261,7 @@ mod tests {
     #[tokio::test]
     async fn test_task_output_tool_timeout_returns_running() {
         let dir = tempdir().unwrap();
-        let bash = BashTool::new(
+        let bash = BashTool::new_without_confirmation_tracking(
             dir.path().to_path_buf(),
             vec![dir.path().to_path_buf()],
             30,
@@ -311,7 +311,7 @@ mod tests {
     #[tokio::test]
     async fn test_task_output_tool_nonzero_exit_code() {
         let dir = tempdir().unwrap();
-        let bash = BashTool::new(
+        let bash = BashTool::new_without_confirmation_tracking(
             dir.path().to_path_buf(),
             vec![dir.path().to_path_buf()],
             5,

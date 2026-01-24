@@ -19,9 +19,11 @@ use async_trait::async_trait;
 use colored::Colorize;
 use genai_rs::{CallableFunction, FunctionDeclaration, FunctionError, FunctionParameters};
 use serde_json::{Value, json};
+use std::collections::HashSet;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::{Arc, RwLock};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::mpsc;
@@ -33,10 +35,34 @@ pub struct BashTool {
     timeout_secs: u64,
     is_mcp_mode: bool,
     events_tx: Option<mpsc::Sender<AgentEvent>>,
+    /// Commands awaiting user confirmation.
+    /// Shared with CleminiToolService to track confirmation state across tool invocations.
+    /// When None, confirmation tracking is disabled (used in tests).
+    pending_confirmations: Option<Arc<RwLock<HashSet<String>>>>,
 }
 
 impl BashTool {
     pub fn new(
+        cwd: PathBuf,
+        allowed_paths: Vec<PathBuf>,
+        timeout_secs: u64,
+        is_mcp_mode: bool,
+        events_tx: Option<mpsc::Sender<AgentEvent>>,
+        pending_confirmations: Arc<RwLock<HashSet<String>>>,
+    ) -> Self {
+        Self {
+            cwd,
+            allowed_paths,
+            timeout_secs,
+            is_mcp_mode,
+            events_tx,
+            pending_confirmations: Some(pending_confirmations),
+        }
+    }
+
+    /// Create a BashTool without confirmation tracking (for tests).
+    #[cfg(test)]
+    pub fn new_without_confirmation_tracking(
         cwd: PathBuf,
         allowed_paths: Vec<PathBuf>,
         timeout_secs: u64,
@@ -49,6 +75,7 @@ impl BashTool {
             timeout_secs,
             is_mcp_mode,
             events_tx,
+            pending_confirmations: None,
         }
     }
 
@@ -198,6 +225,12 @@ impl CallableFunction for BashTool {
         if needs_caution(command) {
             if self.is_mcp_mode {
                 if !confirmed {
+                    // Add to pending confirmations so we can verify later
+                    if let Some(ref pending) = self.pending_confirmations
+                        && let Ok(mut set) = pending.write()
+                    {
+                        set.insert(command.to_string());
+                    }
                     let msg = format!(
                         "  {} {}",
                         "CAUTION (requesting MCP confirmation):".yellow(),
@@ -213,6 +246,37 @@ impl CallableFunction for BashTool {
                         resp["description"] = json!(desc);
                     }
                     return Ok(resp);
+                } else {
+                    // Verify confirmation was actually requested for this command
+                    let was_pending = if let Some(ref pending) = self.pending_confirmations {
+                        if let Ok(mut set) = pending.write() {
+                            set.remove(command)
+                        } else {
+                            false
+                        }
+                    } else {
+                        // No confirmation tracking (tests) - allow
+                        true
+                    };
+
+                    if !was_pending {
+                        let msg = format!(
+                            "  {} {}",
+                            "REJECTED (confirmation not requested):".red(),
+                            command.dimmed()
+                        );
+                        self.emit(&msg);
+                        return Ok(error_response(
+                            "Cannot confirm command that was not previously flagged for confirmation. \
+                             First call bash without confirmed=true, then retry with confirmed=true \
+                             after user approval.",
+                            error_codes::BLOCKED,
+                            json!({
+                                "command": command,
+                                "description": description
+                            }),
+                        ));
+                    }
                 }
             } else if !confirmed && !self.confirm_execution(command) {
                 let msg = format!("  {} {}", "CANCELLED:".red(), command.dimmed());
@@ -400,7 +464,7 @@ mod tests {
     #[tokio::test]
     async fn test_bash_tool_success() {
         let dir = tempdir().unwrap();
-        let tool = BashTool::new(
+        let tool = BashTool::new_without_confirmation_tracking(
             dir.path().to_path_buf(),
             vec![dir.path().to_path_buf()],
             5,
@@ -417,7 +481,7 @@ mod tests {
     #[tokio::test]
     async fn test_bash_tool_description() {
         let dir = tempdir().unwrap();
-        let tool = BashTool::new(
+        let tool = BashTool::new_without_confirmation_tracking(
             dir.path().to_path_buf(),
             vec![dir.path().to_path_buf()],
             5,
@@ -440,7 +504,7 @@ mod tests {
     #[tokio::test]
     async fn test_bash_tool_failure() {
         let dir = tempdir().unwrap();
-        let tool = BashTool::new(
+        let tool = BashTool::new_without_confirmation_tracking(
             dir.path().to_path_buf(),
             vec![dir.path().to_path_buf()],
             5,
@@ -457,7 +521,7 @@ mod tests {
     #[tokio::test]
     async fn test_bash_tool_timeout() {
         let dir = tempdir().unwrap();
-        let tool = BashTool::new(
+        let tool = BashTool::new_without_confirmation_tracking(
             dir.path().to_path_buf(),
             vec![dir.path().to_path_buf()],
             1,
@@ -474,7 +538,7 @@ mod tests {
     #[tokio::test]
     async fn test_bash_tool_stderr() {
         let dir = tempdir().unwrap();
-        let tool = BashTool::new(
+        let tool = BashTool::new_without_confirmation_tracking(
             dir.path().to_path_buf(),
             vec![dir.path().to_path_buf()],
             5,
@@ -491,7 +555,7 @@ mod tests {
     #[tokio::test]
     async fn test_bash_tool_cwd() {
         let dir = tempdir().unwrap();
-        let tool = BashTool::new(
+        let tool = BashTool::new_without_confirmation_tracking(
             dir.path().to_path_buf(),
             vec![dir.path().to_path_buf()],
             5,
@@ -515,7 +579,7 @@ mod tests {
         let subdir = dir.path().join("subdir");
         std::fs::create_dir(&subdir).unwrap();
 
-        let tool = BashTool::new(
+        let tool = BashTool::new_without_confirmation_tracking(
             dir.path().to_path_buf(),
             vec![dir.path().to_path_buf()],
             5,
@@ -540,7 +604,7 @@ mod tests {
     #[tokio::test]
     async fn test_bash_tool_invalid_working_directory() {
         let dir = tempdir().unwrap();
-        let tool = BashTool::new(
+        let tool = BashTool::new_without_confirmation_tracking(
             dir.path().to_path_buf(),
             vec![dir.path().to_path_buf()],
             5,
@@ -567,7 +631,7 @@ mod tests {
     #[tokio::test]
     async fn test_bash_tool_background() {
         let dir = tempdir().unwrap();
-        let tool = BashTool::new(
+        let tool = BashTool::new_without_confirmation_tracking(
             dir.path().to_path_buf(),
             vec![dir.path().to_path_buf()],
             5,
@@ -609,7 +673,7 @@ mod tests {
     #[tokio::test]
     async fn test_bash_tool_background_unique_ids() {
         let dir = tempdir().unwrap();
-        let tool = BashTool::new(
+        let tool = BashTool::new_without_confirmation_tracking(
             dir.path().to_path_buf(),
             vec![dir.path().to_path_buf()],
             5,
@@ -667,5 +731,128 @@ mod tests {
         let truncated = BashTool::truncate_output(input, 7);
         // Should truncate at index 7 (after 🦀)
         assert!(truncated.starts_with("abc🦀..."));
+    }
+
+    // =========================================================================
+    // Confirmation tracking tests
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_confirmation_tracking_rejects_unprompted_confirmed() {
+        // Test that passing confirmed=true without first getting needs_confirmation is rejected
+        let dir = tempdir().unwrap();
+        let pending = Arc::new(RwLock::new(HashSet::new()));
+        let tool = BashTool::new(
+            dir.path().to_path_buf(),
+            vec![dir.path().to_path_buf()],
+            5,
+            true, // mcp_mode = true
+            None,
+            pending,
+        );
+
+        // Try to run rm with confirmed=true without first triggering confirmation
+        let args = json!({
+            "command": "rm test.txt",
+            "confirmed": true
+        });
+
+        let result = tool.call(args).await.unwrap();
+
+        // Should be rejected because the command wasn't in pending_confirmations
+        assert!(
+            result["error"].is_string(),
+            "Expected error, got: {:?}",
+            result
+        );
+        assert!(
+            result["error"]
+                .as_str()
+                .unwrap()
+                .contains("not previously flagged for confirmation"),
+            "Expected 'not previously flagged for confirmation' in error, got: {:?}",
+            result["error"]
+        );
+        assert_eq!(result["error_code"], error_codes::BLOCKED);
+    }
+
+    #[tokio::test]
+    async fn test_confirmation_tracking_allows_proper_flow() {
+        // Test the proper confirmation flow: request → confirm → execute
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("test.txt"), "data").unwrap();
+
+        let pending = Arc::new(RwLock::new(HashSet::new()));
+        let tool = BashTool::new(
+            dir.path().to_path_buf(),
+            vec![dir.path().to_path_buf()],
+            5,
+            true, // mcp_mode = true
+            None,
+            pending.clone(),
+        );
+
+        // First call: should return needs_confirmation and add to pending
+        let args1 = json!({ "command": "rm test.txt" });
+        let result1 = tool.call(args1).await.unwrap();
+
+        assert!(result1["needs_confirmation"].as_bool().unwrap());
+        assert_eq!(result1["command"], "rm test.txt");
+
+        // Verify the command is in pending_confirmations
+        {
+            let set = pending.read().unwrap();
+            assert!(set.contains("rm test.txt"));
+        }
+
+        // Second call with confirmed=true: should succeed
+        let args2 = json!({
+            "command": "rm test.txt",
+            "confirmed": true
+        });
+        let result2 = tool.call(args2).await.unwrap();
+
+        // Should have executed successfully (file was deleted)
+        assert!(result2["success"].as_bool().unwrap());
+
+        // Verify the command was removed from pending_confirmations
+        {
+            let set = pending.read().unwrap();
+            assert!(!set.contains("rm test.txt"));
+        }
+
+        // File should be deleted
+        assert!(!dir.path().join("test.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn test_confirmation_tracking_command_must_match_exactly() {
+        // Test that the command must match exactly (no sneaky modifications)
+        let dir = tempdir().unwrap();
+        let pending = Arc::new(RwLock::new(HashSet::new()));
+        let tool = BashTool::new(
+            dir.path().to_path_buf(),
+            vec![dir.path().to_path_buf()],
+            5,
+            true, // mcp_mode = true
+            None,
+            pending.clone(),
+        );
+
+        // Request confirmation for "rm test.txt"
+        let args1 = json!({ "command": "rm test.txt" });
+        let result1 = tool.call(args1).await.unwrap();
+        assert!(result1["needs_confirmation"].as_bool().unwrap());
+
+        // Try to confirm with a different command
+        let args2 = json!({
+            "command": "rm -rf /",  // Different command!
+            "confirmed": true
+        });
+        let result2 = tool.call(args2).await.unwrap();
+
+        // Should be rejected (blocked pattern matches first in this case)
+        // But even if it wasn't blocked, it would fail confirmation tracking
+        assert!(result2["error"].is_string());
     }
 }

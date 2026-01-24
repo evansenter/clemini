@@ -20,6 +20,7 @@ mod write;
 use anyhow::Result;
 use genai_rs::{CallableFunction, ToolService};
 use serde_json::Value;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use tokio::sync::mpsc;
@@ -96,6 +97,11 @@ pub struct CleminiToolService {
     /// Uses interior mutability so plan state can be modified per-interaction
     /// while the tool service itself is created once at startup.
     plan_manager: Arc<RwLock<PlanManager>>,
+    /// Commands awaiting user confirmation.
+    /// When a bash command requires confirmation (e.g., rm, sudo), it's added here.
+    /// Only commands in this set can be executed with `confirmed: true`.
+    /// This prevents the LLM from bypassing confirmation by simply claiming confirmed=true.
+    pending_confirmations: Arc<RwLock<HashSet<String>>>,
 }
 
 impl CleminiToolService {
@@ -114,6 +120,7 @@ impl CleminiToolService {
             api_key,
             events_tx: Arc::new(RwLock::new(None)),
             plan_manager: Arc::new(RwLock::new(PlanManager::new())),
+            pending_confirmations: Arc::new(RwLock::new(HashSet::new())),
         }
     }
 
@@ -137,12 +144,18 @@ impl CleminiToolService {
             api_key,
             events_tx: Arc::new(RwLock::new(None)),
             plan_manager,
+            pending_confirmations: Arc::new(RwLock::new(HashSet::new())),
         }
     }
 
     /// Get a reference to the plan manager.
     pub fn plan_manager(&self) -> &Arc<RwLock<PlanManager>> {
         &self.plan_manager
+    }
+
+    /// Get a reference to the pending confirmations set.
+    pub fn pending_confirmations(&self) -> Arc<RwLock<HashSet<String>>> {
+        self.pending_confirmations.clone()
     }
 
     /// Set the events sender and return an RAII guard that clears it when dropped.
@@ -260,6 +273,7 @@ impl ToolService for CleminiToolService {
                 self.bash_timeout,
                 self.is_mcp_mode,
                 events_tx.clone(),
+                self.pending_confirmations.clone(),
             )),
             Arc::new(GlobTool::new(
                 self.cwd.clone(),

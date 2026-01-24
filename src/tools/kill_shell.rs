@@ -116,7 +116,7 @@ mod tests {
     #[tokio::test]
     async fn test_kill_shell_success() {
         let dir = tempdir().unwrap();
-        let bash = BashTool::new(
+        let bash = BashTool::new_without_confirmation_tracking(
             dir.path().to_path_buf(),
             vec![dir.path().to_path_buf()],
             5,
