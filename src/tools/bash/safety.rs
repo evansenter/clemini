@@ -38,11 +38,11 @@ pub static CAUTION_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     vec![
         // Dangerous binaries (word boundary safe)
         // Matches start of line or after command separator (; | &)
-        Regex::new(r"(?m)(^|[;&|]\s*)(sudo|su|rm|mv|chmod|chown|kill|pkill|killall)(\s+|$)").unwrap(),
-        
+        Regex::new(r"(?m)(^|[;&|]\s*)(sudo|su|rm|mv|chmod|chown|kill|pkill|killall)(\s+|$)")
+            .unwrap(),
         // Dangerous subcommands
-        Regex::new(r"(?m)(^|[;&|]\s*)(docker\s+(rm|rmi)|cargo\s+publish|npm\s+publish)(\s+|$)").unwrap(),
-
+        Regex::new(r"(?m)(^|[;&|]\s*)(docker\s+(rm|rmi)|cargo\s+publish|npm\s+publish)(\s+|$)")
+            .unwrap(),
         // Dangerous flags
         Regex::new(r"git\s+push\s+.*(-f|--force)").unwrap(),
         Regex::new(r"git\s+reset\s+.*--hard").unwrap(),
@@ -88,8 +88,14 @@ mod tests {
 
     #[test]
     fn test_blocked_false_positives() {
-        assert!(is_blocked("echo harm -rf /").is_none(), "Should not block 'harm'");
-        assert!(is_blocked("echo farm -rf /*").is_none(), "Should not block 'farm'");
+        assert!(
+            is_blocked("echo harm -rf /").is_none(),
+            "Should not block 'harm'"
+        );
+        assert!(
+            is_blocked("echo farm -rf /*").is_none(),
+            "Should not block 'farm'"
+        );
     }
 
     #[test]
@@ -104,17 +110,35 @@ mod tests {
     #[test]
     fn test_caution_patterns_edge_cases() {
         assert!(needs_caution("rm\tfile.txt"), "Should catch tab separator");
-        assert!(needs_caution("rm\nfile.txt"), "Should catch newline separator");
-        assert!(needs_caution("echo hi; rm file"), "Should catch rm after semicolon");
-        assert!(needs_caution("echo hi | rm file"), "Should catch rm after pipe");
+        assert!(
+            needs_caution("rm\nfile.txt"),
+            "Should catch newline separator"
+        );
+        assert!(
+            needs_caution("echo hi; rm file"),
+            "Should catch rm after semicolon"
+        );
+        assert!(
+            needs_caution("echo hi | rm file"),
+            "Should catch rm after pipe"
+        );
         assert!(needs_caution("rm"), "Should catch bare rm");
     }
 
     #[test]
     fn test_caution_false_positives() {
-        assert!(!needs_caution("echo farm animal"), "Should not flag 'farm' as dangerous");
-        assert!(!needs_caution("echo supper"), "Should not flag 'supper' (contains 'su')");
-        assert!(!needs_caution("mkdir form"), "Should not flag 'form' (matches 'rm' substring)");
+        assert!(
+            !needs_caution("echo farm animal"),
+            "Should not flag 'farm' as dangerous"
+        );
+        assert!(
+            !needs_caution("echo supper"),
+            "Should not flag 'supper' (contains 'su')"
+        );
+        assert!(
+            !needs_caution("mkdir form"),
+            "Should not flag 'form' (matches 'rm' substring)"
+        );
         assert!(!needs_caution("echo remove"), "Should not flag 'remove'");
     }
 }
