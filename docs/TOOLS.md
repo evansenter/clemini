@@ -105,7 +105,7 @@ Every tool needs tests covering:
 
 5. **Register in `CleminiToolService`** in `src/tools/mod.rs`
 
-6. **Update the System Instruction** in `src/main.rs` SYSTEM_PROMPT
+6. **Update the System Instruction** in `src/system_prompt.md`
 
 7. **Run quality gates**: `make clippy && make fmt && make test`
 

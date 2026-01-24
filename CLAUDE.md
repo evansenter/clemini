@@ -76,14 +76,20 @@ Standalone crate for terminal UI, usable by any ACP-compatible agent:
 ```
 crates/clemitui/
 ├── Cargo.toml
-└── src/
-    ├── lib.rs       # Re-exports
-    ├── format.rs    # Primitive formatting functions (tool output, warnings)
-    ├── logging.rs   # OutputSink trait, log_event functions
-    └── text_buffer.rs # TextBuffer for streaming markdown
+├── src/
+│   ├── lib.rs       # Re-exports
+│   ├── format.rs    # Primitive formatting functions (tool output, warnings)
+│   ├── logging.rs   # OutputSink trait, log_event functions
+│   └── text_buffer.rs # TextBuffer for streaming markdown
+└── tests/
+    ├── common/mod.rs        # Shared test helpers (strip_ansi, RAII guards, CaptureSink)
+    ├── acp_simulation_tests.rs  # 29 tests simulating ACP agent patterns
+    └── e2e_tests.rs         # 19 PTY-based tests for actual terminal output
 ```
 
 **Design**: clemitui takes primitive types (strings, durations, token counts), not genai-rs types. This allows it to work with any ACP agent. clemini's format.rs re-exports these and adds genai-rs-specific wrappers.
+
+Run clemitui tests: `cargo test -p clemitui`
 
 ### Event-Driven Architecture
 
@@ -105,8 +111,9 @@ run_interaction()                    UI Layer
 - `ToolResult(FunctionExecutionResult)` - Tool completed (uses genai-rs type)
 - `ToolOutput(String)` - Tool output to display (emitted by tools via `ToolEmitter` trait)
 - `Complete { interaction_id, response }` - Interaction finished
-- `ContextWarning { used, limit, percentage }` - Context window >80%
+- `ContextWarning(ContextWarning)` - Context window >80%
 - `Cancelled` - User cancelled
+- `Retry { attempt, max_attempts, delay, error }` - API retry in progress
 
 **`EventHandler` trait** (`src/events.rs`): All UI modes implement this trait:
 - `TerminalEventHandler` (`events.rs`) - REPL and non-interactive modes
@@ -154,8 +161,11 @@ Debugging: `LOUD_WIRE=1` logs all HTTP requests/responses.
 
 ## Documentation
 
+- [CHANGELOG.md](CHANGELOG.md) - Version history and notable changes
 - [docs/TOOLS.md](docs/TOOLS.md) - Tool reference, design philosophy, implementation guide
 - [docs/TEXT_RENDERING.md](docs/TEXT_RENDERING.md) - Output formatting guidelines (colors, truncation, spacing)
+
+**Changelog updates required**: Any user-facing changes (new features, behavior changes, bug fixes) must be documented in CHANGELOG.md before merging.
 
 ## Conventions
 
@@ -196,6 +206,9 @@ If you're unsure whether coverage is sufficient, add more tests. Undertesting ca
 - `semantic_integration_tests.rs` - Multi-turn state, error recovery, code analysis
 - `acp_integration_tests.rs` - ACP subagent spawning and communication
 - `background_tasks_tests.rs` - Background task execution and output retrieval
+- `comprehensive_agent_tests.rs` - Agent interaction patterns, tool chaining, error recovery
+- `plan_mode_tests.rs` - Plan mode entry/exit, tool restrictions, state management
+- `terminal_tests.rs` - PTY-based REPL tests (history, ctrl-c, shell escape, builtins)
 - `event_ordering_tests.rs` - Tool output event ordering (no API key required)
 
 Run locally with: `cargo test --test <name> -- --include-ignored --nocapture`
