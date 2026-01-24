@@ -2,7 +2,10 @@ use anyhow::Result;
 use clap::Parser;
 use colored::Colorize;
 use genai_rs::Client;
-use reedline::{FileBackedHistory, Prompt, PromptHistorySearch, Reedline, Signal};
+use reedline::{
+    default_emacs_keybindings, EditCommand, Emacs, FileBackedHistory, KeyCode, KeyModifiers,
+    Prompt, PromptHistorySearch, Reedline, ReedlineEvent, Signal, kitty_protocol_available,
+};
 use serde::Deserialize;
 use std::borrow::Cow;
 use std::env;
@@ -663,8 +666,35 @@ fn spawn_reedline_thread(
             }
         };
 
-        // Create reedline editor
-        let mut line_editor = Reedline::create();
+        // Create reedline editor with custom keybindings
+        let mut keybindings = default_emacs_keybindings();
+        // Shift+Enter inserts a newline for multiline input
+        // Requires kitty keyboard protocol for Shift modifier detection
+        keybindings.add_binding(
+            KeyModifiers::SHIFT,
+            KeyCode::Enter,
+            ReedlineEvent::Edit(vec![EditCommand::InsertNewline]),
+        );
+        // Also bind Alt+Enter as fallback for terminals without kitty protocol
+        keybindings.add_binding(
+            KeyModifiers::ALT,
+            KeyCode::Enter,
+            ReedlineEvent::Edit(vec![EditCommand::InsertNewline]),
+        );
+        let edit_mode = Box::new(Emacs::new(keybindings));
+
+        // Enable kitty keyboard protocol for better modifier key detection
+        // (Shift+Enter, etc.) in supported terminals (iTerm2, kitty, WezTerm, alacritty)
+        let use_kitty = kitty_protocol_available();
+        if use_kitty {
+            tracing::debug!("Kitty keyboard protocol available, enabling enhanced key detection");
+        }
+
+        let mut line_editor = Reedline::create()
+            .with_edit_mode(edit_mode)
+            .use_kitty_keyboard_enhancement(use_kitty)
+            // Enable bracketed paste so multiline pastes don't auto-submit on each newline
+            .use_bracketed_paste(true);
         if let Some(h) = history {
             line_editor = line_editor.with_history(h);
         }

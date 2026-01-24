@@ -764,3 +764,58 @@ fn test_ctrl_d_exits() {
     // Process should exit
     wait_for_exit(&mut session).expect("Process should have exited");
 }
+
+// ============================================================================
+// Multiline Input Tests
+// ============================================================================
+
+/// Multiline input via Shift+Enter or Alt+Enter.
+///
+/// **Manual testing required** - PTY environments don't support the kitty keyboard
+/// protocol needed for Shift+Enter, and Alt+Enter escape sequences are interpreted
+/// differently across terminal emulators.
+///
+/// To test manually:
+/// 1. Run `cargo run` or the release binary
+/// 2. Type some text
+/// 3. Press Shift+Enter (in iTerm2, kitty, WezTerm, alacritty) or Alt+Enter
+/// 4. Should insert a newline and show the multiline indicator ("  ")
+/// 5. Type more text and press Enter to submit the full multiline input
+#[test]
+#[ignore = "Manual testing only - PTY doesn't support kitty keyboard protocol"]
+fn test_multiline_input_manual() {
+    // This test exists as documentation for manual testing.
+    // Automated PTY testing of keyboard shortcuts with modifiers is unreliable
+    // because PTYs don't support the kitty keyboard protocol.
+    eprintln!("This test requires manual verification:");
+    eprintln!("1. Run clemini");
+    eprintln!("2. Type text, press Shift+Enter or Alt+Enter");
+    eprintln!("3. Verify newline is inserted with multiline indicator");
+}
+
+/// Bracketed paste for multiline content.
+///
+/// **Manual testing required** - PTY environments don't support bracketed paste mode.
+/// Bracketed paste is a terminal emulator feature where the terminal wraps pasted
+/// content with `ESC[200~` ... `ESC[201~` escape sequences. PTY testing libraries
+/// don't emulate this terminal feature.
+///
+/// To test manually:
+/// 1. Run `cargo run` or the release binary
+/// 2. Copy multiline text to clipboard
+/// 3. Paste into clemini (Cmd+V / Ctrl+Shift+V)
+/// 4. Content should appear in buffer with newlines preserved
+/// 5. Press Enter to submit the entire multiline input
+///
+/// Without bracketed paste, each newline would submit immediately.
+#[test]
+#[ignore = "Manual testing only - PTY doesn't support bracketed paste mode"]
+fn test_bracketed_paste_manual() {
+    // This test exists as documentation for manual testing.
+    // PTYs don't support bracketed paste mode - it's a terminal emulator feature.
+    eprintln!("This test requires manual verification:");
+    eprintln!("1. Run clemini");
+    eprintln!("2. Copy multiline text and paste it");
+    eprintln!("3. Verify all lines appear in the input buffer");
+    eprintln!("4. Press Enter to submit");
+}
