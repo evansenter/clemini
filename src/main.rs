@@ -2,7 +2,9 @@ use anyhow::Result;
 use clap::Parser;
 use colored::Colorize;
 use genai_rs::Client;
+use reedline::{FileBackedHistory, Prompt, PromptHistorySearch, Reedline, Signal};
 use serde::Deserialize;
+use std::borrow::Cow;
 use std::env;
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::PathBuf;
@@ -21,13 +23,18 @@ use clemini::tools::{self, CleminiToolService};
 
 const DEFAULT_MODEL: &str = "gemini-3-flash-preview";
 
+/// Returns the clemini configuration directory (~/.clemini/).
+/// Falls back to current directory if home directory is unavailable.
+fn clemini_dir() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".clemini")
+}
+
 /// Initialize logging by ensuring the log directory exists.
 /// Human-readable logs go through log_event().
 pub fn init_logging() {
-    let log_dir = dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".clemini/logs");
-
+    let log_dir = clemini_dir().join("logs");
     let _ = std::fs::create_dir_all(&log_dir);
 }
 
@@ -290,6 +297,71 @@ mod tests {
     }
 
     // Note: Logging tests moved to src/logging.rs since they test lib functionality
+
+    #[test]
+    fn test_process_input_empty() {
+        let cwd = PathBuf::from("/test/cwd");
+        assert_eq!(process_input("", "model", &cwd), InputAction::Continue);
+        assert_eq!(process_input("   ", "model", &cwd), InputAction::Continue);
+        assert_eq!(process_input("\n", "model", &cwd), InputAction::Continue);
+    }
+
+    #[test]
+    fn test_process_input_quit_commands() {
+        let cwd = PathBuf::from("/test/cwd");
+        assert_eq!(process_input("/quit", "model", &cwd), InputAction::Quit);
+        assert_eq!(process_input("/exit", "model", &cwd), InputAction::Quit);
+        assert_eq!(process_input("/q", "model", &cwd), InputAction::Quit);
+        // With whitespace
+        assert_eq!(process_input("  /quit  ", "model", &cwd), InputAction::Quit);
+    }
+
+    #[test]
+    fn test_process_input_builtin_commands() {
+        colored::control::set_override(false);
+        let cwd = PathBuf::from("/test/cwd");
+
+        // /model returns builtin response
+        match process_input("/model", "test-model", &cwd) {
+            InputAction::Builtin(response) => {
+                assert!(response.contains("test-model"));
+            }
+            other => panic!("Expected Builtin, got {:?}", other),
+        }
+
+        // /pwd returns builtin response
+        match process_input("/pwd", "model", &cwd) {
+            InputAction::Builtin(response) => {
+                assert!(response.contains("/test/cwd"));
+            }
+            other => panic!("Expected Builtin, got {:?}", other),
+        }
+
+        colored::control::unset_override();
+    }
+
+    #[test]
+    fn test_process_input_regular_input() {
+        let cwd = PathBuf::from("/test/cwd");
+
+        // Regular input is sent to REPL
+        assert_eq!(
+            process_input("hello world", "model", &cwd),
+            InputAction::SendToRepl("hello world".to_string())
+        );
+
+        // Unknown command is sent to REPL
+        assert_eq!(
+            process_input("/unknown", "model", &cwd),
+            InputAction::SendToRepl("/unknown".to_string())
+        );
+
+        // Whitespace is trimmed
+        assert_eq!(
+            process_input("  hello  ", "model", &cwd),
+            InputAction::SendToRepl("hello".to_string())
+        );
+    }
 }
 
 #[derive(Parser)]
@@ -450,11 +522,12 @@ async fn main() -> Result<()> {
         // Non-interactive mode: run single prompt
         let cancellation_token = CancellationToken::new();
         let ct_clone = cancellation_token.clone();
-        ctrlc::set_handler(move || {
+        if let Err(e) = ctrlc::set_handler(move || {
             eprintln!("\n{}", clemini::format::format_ctrl_c().yellow());
             ct_clone.cancel();
-        })
-        .ok();
+        }) {
+            tracing::warn!("Failed to set ctrl-c handler: {}", e);
+        }
 
         // Create channel for agent events
         let (events_tx, mut events_rx) = mpsc::channel::<AgentEvent>(100);
@@ -507,6 +580,188 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+/// Events from the reedline input thread to the async REPL loop.
+enum InputEvent {
+    /// User submitted a line of input.
+    Line(String),
+    /// User pressed Ctrl-C during input.
+    Cancel,
+}
+
+/// Action to take after processing user input.
+#[derive(Debug, Clone, PartialEq)]
+enum InputAction {
+    /// Exit the REPL (quit command).
+    Quit,
+    /// Print builtin command response.
+    Builtin(String),
+    /// Send input to the async REPL loop.
+    SendToRepl(String),
+    /// Empty input, skip.
+    Continue,
+}
+
+/// Process raw input and determine the action to take.
+///
+/// This is a pure function that can be easily unit tested.
+fn process_input(input: &str, model: &str, cwd: &std::path::Path) -> InputAction {
+    let input = input.trim();
+    if input.is_empty() {
+        return InputAction::Continue;
+    }
+    if input == "/quit" || input == "/exit" || input == "/q" {
+        return InputAction::Quit;
+    }
+    if let Some(response) = handle_builtin_command(input, model, cwd) {
+        return InputAction::Builtin(response);
+    }
+    InputAction::SendToRepl(input.to_string())
+}
+
+/// Spawn a dedicated thread for reedline input.
+///
+/// Reedline is synchronous and blocks on input. We run it in a separate thread
+/// and communicate with the async REPL loop via channels.
+///
+/// Returns (input_receiver, ready_sender). The main loop must call `ready_tx.send(())`
+/// after processing each input to signal that reedline can show the next prompt.
+/// This prevents reedline from putting the terminal in raw mode while output is printing.
+fn spawn_reedline_thread(
+    cwd: PathBuf,
+    model: String,
+) -> (
+    mpsc::UnboundedReceiver<InputEvent>,
+    std::sync::mpsc::Sender<()>,
+) {
+    let (tx, rx) = mpsc::unbounded_channel();
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel::<()>();
+
+    std::thread::spawn(move || {
+        // Set up history file
+        let history_path = clemini_dir().join("history.txt");
+
+        // Ensure directory exists
+        if let Some(parent) = history_path.parent()
+            && let Err(e) = std::fs::create_dir_all(parent)
+        {
+            tracing::warn!(
+                "Could not create history directory {:?}: {}. History will not be persisted.",
+                parent,
+                e
+            );
+        }
+
+        let history = match FileBackedHistory::with_file(10_000, history_path.clone()) {
+            Ok(h) => Some(Box::new(h)),
+            Err(e) => {
+                tracing::warn!(
+                    "Could not create history file {:?}: {}. Command history will not be persisted.",
+                    history_path,
+                    e
+                );
+                None
+            }
+        };
+
+        // Create reedline editor
+        let mut line_editor = Reedline::create();
+        if let Some(h) = history {
+            line_editor = line_editor.with_history(h);
+        }
+
+        // Simple prompt struct
+        struct SimplePrompt;
+
+        impl Prompt for SimplePrompt {
+            fn render_prompt_left(&self) -> Cow<'_, str> {
+                Cow::Borrowed("〉")
+            }
+
+            fn render_prompt_right(&self) -> Cow<'_, str> {
+                Cow::Borrowed("")
+            }
+
+            fn render_prompt_indicator(
+                &self,
+                _edit_mode: reedline::PromptEditMode,
+            ) -> Cow<'_, str> {
+                Cow::Borrowed("")
+            }
+
+            fn render_prompt_multiline_indicator(&self) -> Cow<'_, str> {
+                Cow::Borrowed("  ")
+            }
+
+            fn render_prompt_history_search_indicator(
+                &self,
+                _history_search: PromptHistorySearch,
+            ) -> Cow<'_, str> {
+                Cow::Borrowed("? ")
+            }
+        }
+
+        let prompt = SimplePrompt;
+        let mut last_ctrl_c = false; // Track if last input was ctrl-c on empty line
+
+        loop {
+            match line_editor.read_line(&prompt) {
+                Ok(Signal::Success(buffer)) => {
+                    last_ctrl_c = false; // Reset on any input
+                    match process_input(&buffer, &model, &cwd) {
+                        InputAction::Quit => break,
+                        InputAction::Continue => continue,
+                        InputAction::Builtin(response) => {
+                            eprintln!("{response}");
+                            continue;
+                        }
+                        InputAction::SendToRepl(input) => {
+                            if tx.send(InputEvent::Line(input)).is_err() {
+                                tracing::debug!("Input channel closed, terminating input thread");
+                                break;
+                            }
+                            // Wait for main loop to signal it's done processing before showing next prompt.
+                            // This prevents reedline from putting terminal in raw mode while output prints.
+                            if ready_rx.recv().is_err() {
+                                tracing::debug!("Ready channel closed, terminating input thread");
+                                break;
+                            }
+                        }
+                    }
+                }
+                Ok(Signal::CtrlC) => {
+                    // Double ctrl-c on empty line exits
+                    if last_ctrl_c {
+                        eprintln!();
+                        break;
+                    }
+                    last_ctrl_c = true;
+                    eprintln!("Press Ctrl-C again to exit, or type a command.");
+
+                    // Ctrl-C during input - send cancel event
+                    if tx.send(InputEvent::Cancel).is_err() {
+                        tracing::debug!("Input channel closed while sending cancel event");
+                    }
+                    // Still wait for ready signal
+                    let _ = ready_rx.recv();
+                }
+                Ok(Signal::CtrlD) => {
+                    // Normal EOF - user requested exit
+                    tracing::debug!("User pressed Ctrl-D, exiting REPL");
+                    break;
+                }
+                Err(e) => {
+                    // Actual error from reedline
+                    tracing::error!("Reedline error: {}", e);
+                    eprintln!("[input error: {}]", e);
+                    break;
+                }
+            }
+        }
+    });
+
+    (rx, ready_tx)
+}
+
 /// Plain text REPL
 async fn run_plain_repl(
     client: &Client,
@@ -519,55 +774,52 @@ async fn run_plain_repl(
 ) -> Result<()> {
     let mut last_interaction_id: Option<String> = initial_interaction_id;
 
+    // Spawn reedline input thread
+    let (mut input_rx, ready_tx) = spawn_reedline_thread(cwd.clone(), model.to_string());
+
     loop {
-        eprint!("> ");
-        io::stderr().flush()?;
+        // Receive input from reedline thread
+        let event = match input_rx.recv().await {
+            Some(e) => e,
+            None => break, // Channel closed (Ctrl-D or quit)
+        };
 
-        let mut input = String::new();
-        if io::stdin().read_line(&mut input)? == 0 {
-            break; // EOF
-        }
-        let input = input.trim();
-        if input.is_empty() {
-            continue;
-        }
+        let input = match event {
+            InputEvent::Cancel => {
+                // Ctrl-C during input - signal ready for next prompt
+                let _ = ready_tx.send(());
+                continue;
+            }
+            InputEvent::Line(line) => line,
+        };
 
-        // Redraw input with background
-        eprint!("\x1b[1A\x1b[2K"); // Move up 1 line, clear line
-        eprint!("> ");
-        eprintln!("{}", input.on_bright_black());
-        io::stderr().flush()?;
-
-        if input == "/quit" || input == "/exit" || input == "/q" {
-            break;
-        }
-
+        // Handle clear and help (these need access to REPL state)
         if input == "/clear" || input == "/c" {
             last_interaction_id = None;
             eprint!("{}", clemini::format::format_builtin_cleared());
+            let _ = ready_tx.send(());
             continue;
         }
 
         if input == "/help" || input == "/h" {
             print_help();
-            continue;
-        }
-
-        // Handle other commands
-        if let Some(response) = handle_builtin_command(input, model, &cwd) {
-            eprintln!("{response}");
+            let _ = ready_tx.send(());
             continue;
         }
 
         println!();
 
+        // Use tokio's signal handling - works with async and can be called multiple times
         let cancellation_token = CancellationToken::new();
-        let ct_clone = cancellation_token.clone();
-        ctrlc::set_handler(move || {
-            eprintln!("\n{}", clemini::format::format_ctrl_c().yellow());
-            ct_clone.cancel();
-        })
-        .ok();
+        let ct_for_signal = cancellation_token.clone();
+
+        // Spawn a task to listen for ctrl-c and cancel the token
+        let signal_task = tokio::spawn(async move {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                eprintln!("\n{}", clemini::format::format_ctrl_c().yellow());
+                ct_for_signal.cancel();
+            }
+        });
 
         // Create channel for agent events
         let (events_tx, mut events_rx) = mpsc::channel::<AgentEvent>(100);
@@ -587,7 +839,7 @@ async fn run_plain_repl(
         match run_interaction(
             client,
             tool_service,
-            input,
+            &input,
             last_interaction_id.as_deref(),
             model,
             &system_prompt,
@@ -610,6 +862,12 @@ async fn run_plain_repl(
 
         // Wait for event handler to finish
         let _ = event_handler.await;
+
+        // Abort the signal listener task (no longer needed for this interaction)
+        signal_task.abort();
+
+        // Signal reedline thread that we're done - safe to show next prompt
+        let _ = ready_tx.send(());
     }
 
     Ok(())
@@ -645,8 +903,11 @@ fn get_help_text() -> String {
         "  /h, /help         Show this help message",
         "",
         "Controls:",
-        "  Ctrl-C            Cancel current operation",
+        "  Enter             Submit input",
+        "  Ctrl-C            Cancel current operation / clear line",
         "  Ctrl-D            Quit",
+        "  Up/Down           Navigate history",
+        "  Ctrl-R            Search history",
         "",
         "Shell escape:",
         "  !<command>        Run a shell command directly",
