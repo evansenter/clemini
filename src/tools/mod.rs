@@ -70,7 +70,15 @@ pub use web_search::WebSearchTool;
 pub use write::WriteTool;
 
 pub const DEFAULT_EXCLUDES: &[&str] = &[".git", "node_modules", "target", "__pycache__", ".venv"];
+
+/// Maximum length for tool output (bash stdout/stderr, web fetch content).
 pub const MAX_TOOL_OUTPUT_LEN: usize = 50_000;
+
+/// Maximum buffer size for background task output to prevent memory exhaustion.
+pub const MAX_BACKGROUND_BUFFER_LEN: usize = 1_000_000;
+
+/// Maximum length for suggestion text previews in error messages.
+pub const MAX_SUGGESTION_PREVIEW_LEN: usize = 100;
 
 /// Tool service that provides file and command execution capabilities.
 pub struct CleminiToolService {

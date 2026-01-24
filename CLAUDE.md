@@ -215,6 +215,21 @@ Run locally with: `cargo test --test <name> -- --include-ignored --nocapture`
 
 These use `validate_response_semantically()` from `tests/common/mod.rs` - a second Gemini call with structured output that judges whether responses are appropriate. This provides a middle ground between brittle string assertions and purely structural checks.
 
+**Shared test helpers** - Common patterns for test utilities:
+- Put shared helpers in `tests/common/mod.rs` (for clemini) or `crates/clemitui/tests/common/mod.rs` (for clemitui)
+- Use `#![allow(dead_code)]` in shared test modules since not all test files use all helpers
+- RAII guards for cleanup: `DisableColors` (reset color override on drop), `LoggingGuard` (disable logging on drop)
+- Pattern: `let _guard = DisableColors::new();` at test start ensures cleanup even on panic
+
+**Flaky test handling** - Tests using LLM calls can be non-deterministic:
+- Use `temperature: 0` in test API calls for more determinism (not always sufficient)
+- Semantic validation is preferred over exact string matching
+- If a test is inherently flaky due to LLM non-determinism, track it in an issue and consider:
+  - Retry logic with max attempts
+  - Mocking the LLM call for unit tests
+  - Moving to integration test suite (run with `--include-ignored`)
+- Never skip flaky tests silently - fix or track them
+
 **Visual output changes** - Tool output formatting is centralized in `src/format.rs`:
 
 | Change | Location |

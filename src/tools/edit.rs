@@ -7,7 +7,9 @@ use strsim::normalized_levenshtein;
 use tokio::sync::mpsc;
 use tracing::instrument;
 
-use super::{ToolEmitter, error_codes, error_response, resolve_and_validate_path};
+use super::{
+    MAX_SUGGESTION_PREVIEW_LEN, ToolEmitter, error_codes, error_response, resolve_and_validate_path,
+};
 
 pub struct EditTool {
     cwd: PathBuf,
@@ -238,8 +240,8 @@ impl CallableFunction for EditTool {
                         json!({
                             "line": line,
                             "similarity": format!("{:.0}%", similarity * 100.0),
-                            "text": if text.len() > 100 {
-                                format!("{}...", &text[..100])
+                            "text": if text.len() > MAX_SUGGESTION_PREVIEW_LEN {
+                                format!("{}...", &text[..MAX_SUGGESTION_PREVIEW_LEN])
                             } else {
                                 text.clone()
                             }

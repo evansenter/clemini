@@ -4,6 +4,8 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Child;
 use tokio::task::JoinHandle;
 
+use super::MAX_BACKGROUND_BUFFER_LEN;
+
 /// Represents a running or completed background task.
 pub struct BackgroundTask {
     /// The child process (if still running).
@@ -156,9 +158,9 @@ fn spawn_output_collector<R: tokio::io::AsyncRead + Unpin + Send + 'static>(
                     buf.push_str(&line);
                     buf.push('\n');
                     // Limit buffer size to prevent memory exhaustion
-                    if buf.len() > 1_000_000 {
+                    if buf.len() > MAX_BACKGROUND_BUFFER_LEN {
                         let len = buf.len();
-                        buf.truncate(1_000_000);
+                        buf.truncate(MAX_BACKGROUND_BUFFER_LEN);
                         buf.push_str(&format!("\n... [truncated, {} bytes total]", len));
                         break;
                     }
