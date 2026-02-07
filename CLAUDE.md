@@ -163,7 +163,7 @@ Debugging: `LOUD_WIRE=1` logs all HTTP requests/responses.
 - `make clippy` (no warnings)
 - `make fmt` (run formatter, then commit any changes it makes)
 - `make test` (tests pass)
-- Documentation must compile without warnings (CI runs `cargo doc --workspace --no-deps --document-private-items` with `-D warnings`)
+- Documentation must compile without warnings (CI runs `cargo doc --no-deps --document-private-items` with `-D warnings`)
 
 Don't skip tests. If a test is flaky or legitimately broken by your change, fix the test as part of the PR.
 
