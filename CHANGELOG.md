@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- Extracted clemitui into standalone repository ([evansenter/clemitui](https://github.com/evansenter/clemitui)), now referenced as a git dependency
+- Committed Cargo.lock for reproducible builds
+- Removed single-member workspace wrapper
+
 ## [0.4.0] - 2026-01-24
 
 ### Added

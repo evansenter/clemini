@@ -20,8 +20,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install mold linker
         run: sudo apt-get update && sudo apt-get install -y mold
-      - name: Check workspace
-        run: cargo check --workspace --all-targets --all-features
+      - name: Check
+        run: cargo check --all-targets --all-features
 
   test:
     name: Test Suite
@@ -34,8 +34,7 @@ jobs:
       - name: Install mold linker
         run: sudo apt-get update && sudo apt-get install -y mold
       - name: Run unit tests
-        run: cargo nextest run --workspace
-      # Note: No doctests - clemini is a binary crate without a library target
+        run: cargo nextest run
 
   test-integration:
     name: Integration Tests
@@ -86,7 +85,7 @@ jobs:
       - name: Install mold linker
         run: sudo apt-get update && sudo apt-get install -y mold
       - name: Run clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        run: cargo clippy --all-targets --all-features -- -D warnings
 
   doc:
     name: Documentation
@@ -98,7 +97,7 @@ jobs:
       - name: Install mold linker
         run: sudo apt-get update && sudo apt-get install -y mold
       - name: Check documentation
-        run: cargo doc --workspace --no-deps --document-private-items
+        run: cargo doc --no-deps --document-private-items
         env:
           RUSTDOCFLAGS: -D warnings
 
@@ -111,8 +110,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install mold linker
         run: sudo apt-get update && sudo apt-get install -y mold
-      - name: Check workspace with MSRV
-        run: cargo check --workspace
+      - name: Check with MSRV
+        run: cargo check
 
   coverage:
     name: Code Coverage
@@ -127,7 +126,7 @@ jobs:
       - name: Install mold linker
         run: sudo apt-get update && sudo apt-get install -y mold
       - name: Generate coverage
-        run: cargo llvm-cov --workspace --lcov --output-path lcov.info
+        run: cargo llvm-cov --lcov --output-path lcov.info
       - uses: codecov/codecov-action@v4
         with:
           files: lcov.info
