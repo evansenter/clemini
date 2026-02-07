@@ -33,19 +33,7 @@ Logs are stored in `~/.clemini/logs/` with daily rotation.
 
 The CLI has three modes: single-prompt (`-p "prompt"`), interactive REPL, and MCP server (`--mcp-server`).
 
-### Workspace Structure
-
-This project is a Cargo workspace with two crates:
-
-```
-.
-├── Cargo.toml       # Workspace root
-├── src/             # clemini crate (AI agent)
-└── crates/
-    └── clemitui/    # TUI library crate (reusable by any ACP agent)
-```
-
-#### clemini (AI Agent)
+### Source Structure
 
 ```
 src/
@@ -69,28 +57,9 @@ src/
     └── ...          # Individual tool modules (edit, read, grep, etc.)
 ```
 
-#### clemitui (TUI Library)
+### clemitui (External TUI Library)
 
-Standalone crate for terminal UI, usable by any ACP-compatible agent:
-
-```
-crates/clemitui/
-├── Cargo.toml
-├── src/
-│   ├── lib.rs       # Re-exports
-│   ├── format.rs    # Primitive formatting functions (tool output, warnings)
-│   ├── logging.rs   # OutputSink trait, log_event functions
-│   ├── text_buffer.rs # TextBuffer for streaming markdown
-│   └── bin/demo.rs  # Demo binary exercising public API (used by PTY e2e tests)
-└── tests/
-    ├── common/mod.rs        # Shared test helpers (strip_ansi, RAII guards, CaptureSink)
-    ├── acp_simulation_tests.rs  # 29 tests simulating ACP agent patterns
-    └── e2e_tests.rs         # 19 PTY-based tests for actual terminal output
-```
-
-**Design**: clemitui takes primitive types (strings, durations, token counts), not genai-rs types. This allows it to work with any ACP agent. clemini's format.rs re-exports these and adds genai-rs-specific wrappers.
-
-Run clemitui tests: `cargo test -p clemitui`
+Terminal UI is provided by [clemitui](https://github.com/evansenter/clemitui), a standalone crate referenced as a git dependency. It takes primitive types (strings, durations, token counts), not genai-rs types, so it can work with any ACP agent. clemini's `format.rs` and `logging.rs` re-export clemitui's API and add genai-rs-specific wrappers.
 
 ### Event-Driven Architecture
 
@@ -222,7 +191,7 @@ Run locally with: `cargo test --test <name> -- --include-ignored --nocapture`
 These use `validate_response_semantically()` from `tests/common/mod.rs` - a second Gemini call with structured output that judges whether responses are appropriate. This provides a middle ground between brittle string assertions and purely structural checks.
 
 **Shared test helpers** - Common patterns for test utilities:
-- Put shared helpers in `tests/common/mod.rs` (for clemini) or `crates/clemitui/tests/common/mod.rs` (for clemitui)
+- Put shared helpers in `tests/common/mod.rs`
 - Use `#![allow(dead_code)]` in shared test modules since not all test files use all helpers
 - RAII guards for cleanup: `DisableColors` (reset color override on drop), `LoggingGuard` (disable logging on drop)
 - Pattern: `let _guard = DisableColors::new();` at test start ensures cleanup even on panic

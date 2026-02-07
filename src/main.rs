@@ -3,8 +3,8 @@ use clap::Parser;
 use colored::Colorize;
 use genai_rs::Client;
 use reedline::{
-    default_emacs_keybindings, EditCommand, Emacs, FileBackedHistory, KeyCode, KeyModifiers,
-    Prompt, PromptHistorySearch, Reedline, ReedlineEvent, Signal, kitty_protocol_available,
+    EditCommand, Emacs, FileBackedHistory, KeyCode, KeyModifiers, Prompt, PromptHistorySearch,
+    Reedline, ReedlineEvent, Signal, default_emacs_keybindings, kitty_protocol_available,
 };
 use serde::Deserialize;
 use std::borrow::Cow;

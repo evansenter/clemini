@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/clemitui"]
+members = ["."]
 resolver = "3"
 
 [package]
@@ -11,8 +11,8 @@ description = "A Gemini-powered coding CLI, built with genai-rs"
 license = "MIT"
 
 [dependencies]
-# Internal crates
-clemitui = { path = "crates/clemitui" }
+# TUI library (standalone crate)
+clemitui = { git = "https://github.com/evansenter/clemitui" }
 # AI
 genai-rs = "0.7.2"
 
