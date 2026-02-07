@@ -80,7 +80,8 @@ crates/clemitui/
 │   ├── lib.rs       # Re-exports
 │   ├── format.rs    # Primitive formatting functions (tool output, warnings)
 │   ├── logging.rs   # OutputSink trait, log_event functions
-│   └── text_buffer.rs # TextBuffer for streaming markdown
+│   ├── text_buffer.rs # TextBuffer for streaming markdown
+│   └── bin/demo.rs  # Demo binary exercising public API (used by PTY e2e tests)
 └── tests/
     ├── common/mod.rs        # Shared test helpers (strip_ansi, RAII guards, CaptureSink)
     ├── acp_simulation_tests.rs  # 29 tests simulating ACP agent patterns
@@ -158,6 +159,9 @@ Debugging: `LOUD_WIRE=1` logs all HTTP requests/responses.
 - `GEMINI_API_KEY` - Required
 - Model: `gemini-3-flash-preview`
 - Config: `~/.clemini/config.toml` (optional)
+  - `model` - Gemini model to use (default: `gemini-3-flash-preview`)
+  - `bash_timeout` - Timeout in seconds for bash commands (default: 120)
+  - `allowed_paths` - Additional paths tools can access beyond cwd (default: none)
 
 ## Documentation
 
@@ -169,9 +173,10 @@ Debugging: `LOUD_WIRE=1` logs all HTTP requests/responses.
 
 ## Conventions
 
-- Rust 2024 edition (let chains, etc.)
+- Rust 2024 edition (let chains, etc.), MSRV 1.88 (enforced in CI)
 - Tools return JSON: success data or `{"error": "..."}`
 - Tool errors return as JSON (not propagated) so Gemini can see them and retry
+- CI uses `cargo-nextest` for test execution (`make test-all` uses it locally too)
 
 ## Development Process
 
@@ -189,6 +194,7 @@ Debugging: `LOUD_WIRE=1` logs all HTTP requests/responses.
 - `make clippy` (no warnings)
 - `make fmt` (run formatter, then commit any changes it makes)
 - `make test` (tests pass)
+- Documentation must compile without warnings (CI runs `cargo doc --workspace --no-deps --document-private-items` with `-D warnings`)
 
 Don't skip tests. If a test is flaky or legitimately broken by your change, fix the test as part of the PR.
 
