@@ -47,8 +47,8 @@ jobs:
             REPO: ${{ github.repository }}
             PR_NUMBER: ${{ github.event.pull_request.number }}
 
-            ${{ steps.prompt.outputs.use_file == 'true' && 'First, read the review instructions from /tmp/review-prompt.md using your Read tool. Then follow those instructions to review this PR.' || 'Review this PR for code quality, bugs, security issues, and adherence to project conventions (check CLAUDE.md). Check for previous "Feedback Addressed" comments to avoid re-raising resolved issues. Be strict: REQUEST_CHANGES for any issues found, only APPROVE if genuinely ready to merge. Post your review using gh pr comment. Start your comment with: > **Prompt:** Fallback (centralized prompt fetch failed)' }}
+            ${{ steps.prompt.outputs.use_file == 'true' && 'First, read the review instructions from /tmp/review-prompt.md using your Read tool. Then follow those instructions to review this PR.' || 'Review this PR for code quality, bugs, security issues, and adherence to project conventions (check CLAUDE.md). Check for previous "Feedback Addressed" comments to avoid re-raising resolved issues. Be strict: REQUEST_CHANGES for any issues found, only APPROVE if genuinely ready to merge. Submit your review using gh api repos/$REPO/pulls/$PR_NUMBER/reviews with inline comments on specific files/lines and event set to APPROVE or REQUEST_CHANGES. Start the review body with: > **Prompt:** Fallback (centralized prompt fetch failed)' }}
 
             Use the REPO and PR_NUMBER variables provided above.
           # Tools required by the centralized prompt (see contrib/prompts/claude-review.md)
-          claude_args: '--model opus --allowed-tools "Read,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*),Bash(gh issue view:*),Bash(gh issue comment:*),Bash(gh api:*)"'
+          claude_args: '--model opus --allowed-tools "Read,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*),Bash(gh pr review:*),Bash(gh issue view:*),Bash(gh issue comment:*),Bash(gh api:*)"'
